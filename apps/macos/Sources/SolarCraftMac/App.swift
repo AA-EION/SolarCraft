@@ -19,8 +19,12 @@ struct SolarCraftApp: App {
 
 @MainActor
 final class QuickDesignModel: ObservableObject {
-    @Published var latitude = 4.711, longitude = -74.072, elevation = 2640.0
-    @Published var tilt = 10.0, azimuth = 180.0, modules = 10.0
+    @Published var latitude = 4.711
+    @Published var longitude = -74.072
+    @Published var elevation = 2640.0
+    @Published var tilt = 10.0
+    @Published var azimuth = 180.0
+    @Published var modules = 10.0
     @Published var progress = 0.0
     @Published var running = false
     @Published var summary: ScAnnualSummary?

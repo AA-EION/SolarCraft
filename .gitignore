@@ -6,13 +6,13 @@ reference/
 *.sdf
 # Build outputs
 target/
-bin/
-obj/
+apps/windows/**/bin/
+apps/windows/**/obj/
 .build/
 DerivedData/
 .DS_Store
 .venv/
 __pycache__/
-out/
-smoke
-report.json
+/out/
+/smoke
+/report.json

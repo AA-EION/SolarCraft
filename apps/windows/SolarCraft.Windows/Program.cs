@@ -15,10 +15,11 @@ public static class Program
         int i = Array.IndexOf(args, "--selftest");
         if (i >= 0) return SelfTest.Run(i + 1 < args.Length ? args[i + 1] : "selftest.txt");
         WinRT.ComWrappersSupport.InitializeComWrappers();
-        Application.Start(_ =>
+        Application.Start(p =>
         {
             SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
-            _ = new App();
+            _ = p;
+            new App();
         });
         return 0;
     }
