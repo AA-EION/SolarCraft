@@ -14,7 +14,7 @@
 | Cancellation | works | pass (Rust test) | CI | CI | CI | CI |
 | Core panic contained | no abort | pass | CI | CI | CI | CI |
 
-"CI" cells are filled from the GitHub Actions run. The x86_64 macOS slice runs under Rosetta, which is **not** Intel hardware (D-09).
+"CI" cells are **blocked**. GitHub Actions run 43299739190 (2026-11-12) failed every job within 2 s with no runner assigned and no logs. That pattern usually means Actions refused to start jobs (account spending limit, billing, or Actions disabled for private repositories), not a build error. The Windows and macOS shells are therefore **unverified**: not yet compiled or run. The x86_64 macOS slice runs under Rosetta, which is **not** Intel hardware (D-09).
 
 ## Decisions taken in the spike
 - **C ABI + hand-written façades** rather than UniFFI for now. The ABI is small, and C# bindings for UniFFI are community-maintained. Revisit once the API surface grows past ~40 functions.
