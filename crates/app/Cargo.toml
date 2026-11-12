@@ -1,0 +1,15 @@
+[package]
+name = "solarcraft-app"
+description = "SolarCraft application services: the single computation path shared by CLI, MCP and native shells"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+solarcraft-pv = { path = "../pv" }
+solarcraft-model = { path = "../model" }
+solarcraft-store = { path = "../store" }
+solarcraft-weather = { path = "../weather" }
+solarcraft-engine = { path = "../engine" }

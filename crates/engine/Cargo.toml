@@ -1,0 +1,16 @@
+[package]
+name = "solarcraft-engine"
+description = "SolarCraft annual simulation with an explicit energy ledger"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+solarcraft-pv = { path = "../pv" }
+solarcraft-model = { path = "../model" }
+solarcraft-weather = { path = "../weather" }
+
+[dev-dependencies]
+serde_json.workspace = true

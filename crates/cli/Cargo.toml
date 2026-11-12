@@ -1,0 +1,17 @@
+[package]
+name = "solarcraft-cli"
+description = "SolarCraft command-line interface"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "solarcraft"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+solarcraft-app = { path = "../app" }
+solarcraft-model = { path = "../model" }

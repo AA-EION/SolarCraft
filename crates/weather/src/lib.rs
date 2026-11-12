@@ -155,7 +155,9 @@ pub fn quality_check(w: &Weather) -> QcReport {
         if sp.apparent_elevation < -2.0 && h.ghi > 5.0 { night += 1; }
         if h.ghi > 1.5 * e0 * cz.max(0.0).powf(1.2) + 100.0 || h.dni > e0 { over += 1; }
         let closure = h.dhi + h.dni * cz.max(0.0);
-        if h.ghi > 50.0 && (closure - h.ghi).abs() / h.ghi > 0.15 { mismatch += 1; }
+        // With horizon-shaded beam (PVGIS), DNI is legitimately 0 while the sun is behind terrain.
+        let beam_blocked = w.horizon_applied && h.dni == 0.0;
+        if h.ghi > 50.0 && !beam_blocked && (closure - h.ghi).abs() / h.ghi > 0.15 { mismatch += 1; }
         ghi_sum += h.ghi;
     }
     let mut messages = vec![];

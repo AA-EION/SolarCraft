@@ -99,8 +99,29 @@ pub struct Losses {
     pub availability_pct: Field<f64>,
 }
 
+/// Module mounting, which sets the thermal model coefficients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mounting {
+    /// Free-standing rack, both sides ventilated (Faiman 2008 open-rack fit).
+    OpenRack,
+    /// Roof-mounted with a ventilated gap (PVsyst "semi-integrated" Uc = 20 W/m²K).
+    RoofMounted,
+    /// Building-integrated, rear insulated (PVsyst "integrated" Uc = 15 W/m²K).
+    Integrated,
+}
+
+impl Mounting {
+    /// Faiman (u0, u1). PVsyst U-values are converted with absorptance 0.9 and
+    /// efficiency 0.1: u0 = Uc / (0.9 · (1 − 0.1)).
+    pub fn faiman(self) -> (f64, f64) {
+        match self { Mounting::OpenRack => (25.0, 6.84), Mounting::RoofMounted => (20.0 / 0.81, 0.0), Mounting::Integrated => (15.0 / 0.81, 0.0) }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SimulationSettings {
+    pub mounting: Field<Mounting>,
     pub transposition: Field<TranspositionModel>,
     /// Faiman U0 (W/m²K) and U1 (W·s/m³K).
     pub faiman_u0: Field<f64>,
@@ -160,7 +181,7 @@ impl Project {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),
                 mismatch_pct: Field::default(1.0), dc_wiring_pct: Field::default(1.5), ac_wiring_pct: Field::default(0.5), availability_pct: Field::default(0.0),
             },
-            simulation: SimulationSettings { transposition: Field::default(TranspositionModel::Perez), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
+            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
         };

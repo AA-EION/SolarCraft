@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Offline engine tests on synthetic clear-sky weather (no network).
+use solarcraft_engine::simulate;
+use solarcraft_model::Project;
+use solarcraft_pv::{irradiance as irr, spa};
+use solarcraft_weather::{Hour, Provenance, Weather};
+
+fn synthetic(lat: f64, lon: f64) -> Weather {
+    let obs = spa::Observer::new(lat, lon, 0.0);
+    let start = solarcraft_pv::days_from_civil(2025, 1, 1) * 86400;
+    let hours = (0..8760).map(|h| {
+        let t = start + h * 3600 + 1800;
+        let sp = spa::solar_position(t as f64, &obs, 69.0);
+        let ghi = irr::clearsky_haurwitz(sp.apparent_zenith) * if h % 7 == 0 { 0.3 } else { 1.0 };
+        let (dni, dhi) = irr::erbs(ghi, sp.apparent_zenith, irr::dni_extra(solarcraft_pv::day_of_year_utc(t as f64) as f64, 1366.1));
+        Hour { unix_mid: t, ghi, dni, dhi, temp_air: 15.0 + 10.0 * ((h as f64 / 24.0 - 15.0) * std::f64::consts::TAU / 24.0).sin(), wind: 2.0, pressure: 101325.0 }
+    }).collect();
+    Weather { latitude: lat, longitude: lon, elevation: 0.0, horizon_applied: false, provenance: Provenance { provider: "synthetic".into(), dataset: "Haurwitz".into(), url: String::new(), retrieved_unix: 0, licence: "test".into(), notes: vec![] }, hours }
+}
+
+fn project(lat: f64, lon: f64, kwp: f64) -> Project {
+    let mut p = Project::new("t", "t", lat, lon);
+    p.set_by_pointer("/arrays/0/target_kwp", serde_json::json!(kwp)).unwrap();
+    p.weather = Some(solarcraft_model::WeatherRef { hash: "h".into(), provider: "synthetic".into(), summary: String::new() });
+    p
+}
+
+#[test]
+fn ledger_closes_and_is_consistent() {
+    for (lat, lon) in [(52.52, 13.405), (4.711, -74.072), (-33.87, 151.2)] {
+        let r = simulate(&project(lat, lon, 10.0), &synthetic(lat, lon), "h", |_| true).unwrap();
+        assert!(r.manifest.ledger_closure_error_kwh.abs() < 1e-6, "closure {}", r.manifest.ledger_closure_error_kwh);
+        let monthly: f64 = r.monthly.iter().map(|m| m.ac_kwh).sum();
+        assert!((monthly - r.annual.ac_kwh).abs() < 1e-6 * r.annual.ac_kwh.max(1.0));
+        let hourly: f64 = r.hourly.ac_w.iter().map(|&v| v as f64).sum::<f64>() / 1000.0;
+        assert!((hourly - r.annual.ac_kwh).abs() / r.annual.ac_kwh < 1e-4);
+        assert!(r.annual.performance_ratio > 0.7 && r.annual.performance_ratio < 0.95, "PR {}", r.annual.performance_ratio);
+        // Every loss stage is a non-gain except irradiance level (can be + at high irradiance).
+        for s in r.energy_ledger.iter().skip(2) { assert!(s.delta <= 1e-6 || s.key == "night", "{} {}", s.key, s.delta); }
+    }
+}
+
+#[test]
+fn clipping_appears_when_inverter_is_undersized() {
+    let mut p = project(40.4, -3.7, 10.0);
+    p.set_mode(solarcraft_model::DesignMode::Detailed);
+    p.library.ensure_inverter(solarcraft_model::equipment::InverterSpec::generic(6.0));
+    p.set_by_pointer("/arrays/0/inverter_id", serde_json::json!("generic-inv-6kw")).unwrap();
+    let r = simulate(&p, &synthetic(40.4, -3.7), "h", |_| true).unwrap();
+    let clip = r.energy_ledger.iter().find(|s| s.key == "clipping").unwrap();
+    assert!(clip.delta < -50.0, "expected clipping, got {}", clip.delta);
+}
+
+#[test]
+fn cancellation_and_errors() {
+    let w = synthetic(40.4, -3.7);
+    assert_eq!(simulate(&project(40.4, -3.7, 5.0), &w, "h", |f| f < 0.5).unwrap_err().0, "cancelled");
+    let mut p = project(40.4, -3.7, 5.0);
+    p.weather = None;
+    assert!(simulate(&p, &w, "h", |_| true).unwrap_err().0.contains("WEATHER_MISSING"));
+}
+
+#[test]
+fn deterministic() {
+    let w = synthetic(4.711, -74.072);
+    let p = project(4.711, -74.072, 5.0);
+    let a = simulate(&p, &w, "h", |_| true).unwrap();
+    let b = simulate(&p, &w, "h", |_| true).unwrap();
+    assert_eq!(serde_json::to_string(&a.annual).unwrap(), serde_json::to_string(&b.annual).unwrap());
+}

@@ -28,6 +28,7 @@ public static unsafe class SelfTest
         try { using var cts = new CancellationTokenSource(); cts.Cancel(); Core.QuickAnnual(input, null, cts.Token); Check(false, "cancel"); }
         catch (OperationCanceledException) { Check(true, "cancel"); }
         var buf = new double[131072];
+        fixed (double* w = buf) Core.sc_fill_probe(w, (nuint)buf.Length); // warm-up
         var sw = Stopwatch.StartNew();
         double sum; fixed (double* p = buf) sum = Core.sc_fill_probe(p, (nuint)buf.Length);
         sw.Stop();

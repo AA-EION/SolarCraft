@@ -22,6 +22,7 @@ enum SelfTest {
         let cj = Core.Job(onProgress: { _ in }); cj.cancel()
         do { _ = try Core.quickAnnual(input, job: cj); check(false, "cancel") } catch Core.Failure.cancelled { check(true, "cancel") } catch { check(false, "cancel \(error)") }
         var buf = [Double](repeating: 0, count: 131_072)
+        _ = buf.withUnsafeMutableBufferPointer { sc_fill_probe($0.baseAddress, $0.count) } // warm-up (first call pays page faults / translation)
         let t0 = DispatchTime.now().uptimeNanoseconds
         let sum = buf.withUnsafeMutableBufferPointer { sc_fill_probe($0.baseAddress, $0.count) }
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6

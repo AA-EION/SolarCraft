@@ -23,6 +23,14 @@ pub fn module_voltages(m: &crate::equipment::ModuleSpec, t_cell: f64) -> (f64, f
 }
 
 pub fn derive(p: &mut Project) {
+    // Mounting default: rooftop for small systems, open rack for large ones.
+    let total_kwp: f64 = p.arrays.iter().map(|a| a.target_kwp.value).sum();
+    if !p.simulation.mounting.is_user() {
+        p.simulation.mounting.derive(if total_kwp > 100.0 { crate::Mounting::OpenRack } else { crate::Mounting::RoofMounted });
+    }
+    let (u0, u1) = p.simulation.mounting.value.faiman();
+    p.simulation.faiman_u0.derive(u0);
+    p.simulation.faiman_u1.derive(u1);
     if !p.site.elevation.is_user() && p.site.elevation.value == 0.0 { /* filled by weather import */ }
     for i in 0..p.arrays.len() {
         let lat = p.site.latitude.value;

@@ -20,6 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup show && cargo --version
+      - run: cargo build --workspace --release
       - run: cargo test --workspace --release
       - run: cargo clippy --workspace --release -- -D warnings
       - name: C ABI smoke test
