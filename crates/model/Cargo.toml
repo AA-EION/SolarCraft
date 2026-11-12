@@ -1,0 +1,11 @@
+[package]
+name = "solarcraft-model"
+description = "SolarCraft project model: easy/detailed modes, value provenance, validation, derivation"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+solarcraft-pv = { path = "../pv" }

@@ -1,0 +1,16 @@
+[package]
+name = "solarcraft-weather"
+description = "Weather import (PVGIS, EPW), provenance and quality checks"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ureq = { workspace = true, optional = true }
+solarcraft-pv = { path = "../pv" }
+
+[features]
+default = ["online"]
+online = ["dep:ureq"]

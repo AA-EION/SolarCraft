@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pv", "crates/ffi", "spikes/store", "spikes/shading"]
+members = ["crates/pv", "crates/model", "crates/store", "crates/weather", "crates/ffi", "spikes/store", "spikes/shading"]
 
 [workspace.package]
 edition = "2021"
@@ -10,3 +10,11 @@ rust-version = "1.85"
 
 [profile.release]
 debug = 1
+
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+rusqlite = { version = "0.42", features = ["bundled"] }
+sha2 = "0.11.1"
+ureq = "3.5.2"
+clap = { version = "4.6.7", features = ["derive"] }

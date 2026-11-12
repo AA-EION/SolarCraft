@@ -1,0 +1,12 @@
+[package]
+name = "solarcraft-store"
+description = "Single-file SQLite project store (.solarcraft)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+solarcraft-model = { path = "../model" }

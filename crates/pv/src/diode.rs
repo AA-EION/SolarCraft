@@ -3,6 +3,7 @@
 //! 80(1):78-88, parameter translation; the implicit diode equation is solved
 //! by safeguarded Newton iteration on current, and the MPP by golden-section
 //! search refined with Newton on dP/dV.
+#![allow(clippy::needless_range_loop)] // index loops are clearer in the small dense solvers below
 
 /// Reference parameters at STC (e.g. from the CEC 6-parameter fit).
 #[derive(Debug, Clone, Copy)]
