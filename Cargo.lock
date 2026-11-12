@@ -136,6 +136,13 @@ name = "solarcraft-pv"
 version = "0.0.1"
 
 [[package]]
+name = "spike-shading"
+version = "0.0.1"
+dependencies = [
+ "solarcraft-pv",
+]
+
+[[package]]
 name = "spike-store"
 version = "0.0.1"
 dependencies = [

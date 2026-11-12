@@ -1,0 +1,9 @@
+[package]
+name = "spike-shading"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+solarcraft-pv = { path = "../../crates/pv" }
