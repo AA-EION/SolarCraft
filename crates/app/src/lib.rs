@@ -151,3 +151,37 @@ pub fn export_copy(path: &Path, dest: &Path) -> Result<()> {
     s.export_copy(dest).map_err(|x| e("EXPORT", x))
 }
 pub use solarcraft_engine::SimResult as SimResultExt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFormat { Pdf, Docx }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportOutput { pub path: String, pub bytes: usize, pub format: ReportFormat, pub lang: String }
+
+fn today_utc() -> (i32, u8, u8) {
+    let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86400).unwrap_or(0);
+    let (y, m, d) = solarcraft_pv::civil_from_days(days);
+    (y as i32, m as u8, d as u8)
+}
+
+/// Generate the customer report from the latest stored results.
+/// `lang`: en, es, de or pt-BR.
+pub fn generate_report(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str) -> Result<ReportOutput> {
+    let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}' (use en, es, de, pt-BR)")))?;
+    let (s, p) = open(path)?;
+    let r = latest_results(path)?.ok_or_else(|| e("NO_RESULTS", "No results yet. Run the simulation first."))?;
+    let (w, _) = load_weather(&s, &p)?;
+    let input = solarcraft_report::ReportInput {
+        project: &p, result: &r, lang: l, date: today_utc(), designer: designer.to_string(),
+        weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied },
+    };
+    let view = solarcraft_report::build_view(&input);
+    let bytes = match format {
+        ReportFormat::Pdf => solarcraft_report::pdf::render(&view, input.date),
+        ReportFormat::Docx => solarcraft_report::docx::render(&view),
+    }.map_err(|x| e("REPORT", x))?;
+    std::fs::write(out, &bytes).map_err(|x| e("FILE_WRITE", format!("{}: {x}", out.display())))?;
+    Ok(ReportOutput { path: out.display().to_string(), bytes: bytes.len(), format, lang: l.tag().into() })
+}

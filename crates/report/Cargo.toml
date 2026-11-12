@@ -1,0 +1,22 @@
+[package]
+name = "solarcraft-report"
+description = "SolarCraft customer reports: PDF (Typst) and editable DOCX"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+typst = "0.15.1"
+typst-pdf = "0.15.1"
+typst-layout = "0.15.1"
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+docx-rs = "0.4.22"
+resvg = "0.50.0"
+solarcraft-model = { path = "../model" }
+solarcraft-engine = { path = "../engine" }
+
+[dev-dependencies]
+solarcraft-pv = { path = "../pv" }
+solarcraft-weather = { path = "../weather" }

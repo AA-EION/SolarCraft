@@ -88,6 +88,24 @@ struct ModuleArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ReportArgs {
+    file: String,
+    /// Output file in the workspace, ending in .pdf or .docx (must not exist unless overwrite=true).
+    output: String,
+    /// "pdf" or "docx".
+    format: app::ReportFormat,
+    /// Report language: en, es, de or pt-BR.
+    #[serde(default = "default_lang")]
+    lang: String,
+    /// Designer name printed on the cover.
+    #[serde(default)]
+    designer: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+fn default_lang() -> String { "en".into() }
+
+#[derive(Deserialize, JsonSchema)]
 struct ResultsArgs {
     file: String,
     /// Include hourly series (paged).
@@ -224,6 +242,18 @@ impl SolarCraftMcp {
             }
             Ok(None) => app_err(app::AppError { code: "NO_RESULTS", message: "No results yet; call simulate first.".into() }),
             Err(e) => app_err(e),
+        }
+    }
+
+    #[tool(description = "Write the customer report (PDF, or editable DOCX) from the latest results into the workspace. Side effect: creates a file.")]
+    async fn export_report(&self, Parameters(a): Parameters<ReportArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let ext = match a.format { app::ReportFormat::Pdf => "pdf", app::ReportFormat::Docx => "docx" };
+        if !a.output.ends_with(&format!(".{ext}")) { return Err(ErrorData::invalid_params(format!("output must end in .{ext}"), None)); }
+        let out = self.path(&a.output, false, false)?;
+        if out.exists() && !a.overwrite { return Err(ErrorData::invalid_params("output exists; set overwrite=true to replace it", None)); }
+        match tokio::task::spawn_blocking(move || app::generate_report(&f, &out, a.format, &a.lang, &a.designer)).await {
+            Ok(Ok(r)) => ok(to_value(&r)), Ok(Err(e)) => app_err(e), Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }
 

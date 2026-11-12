@@ -33,6 +33,10 @@ pub struct RunManifest { pub engine: String, pub weather_hash: String, pub weath
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hourly { pub unix_mid: Vec<i64>, pub poa_w_m2: Vec<f32>, pub t_cell_c: Vec<f32>, pub dc_w: Vec<f32>, pub ac_w: Vec<f32> }
 
+/// A result note with a stable code (translated by reports/UI) and English text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Note { pub code: String, pub subject: String, pub value: f64, pub text: String }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimResult {
     pub manifest: RunManifest,
@@ -43,7 +47,7 @@ pub struct SimResult {
     pub energy_ledger: Vec<Step>,
     pub monthly: Vec<Month>,
     pub hourly: Hourly,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<Note>,
 }
 
 #[derive(Debug)]
@@ -84,8 +88,8 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
     for (i, m) in monthly.iter_mut().enumerate() { m.month = i as u32 + 1; }
     let mut hourly = Hourly { unix_mid: w.hours.iter().map(|h| h.unix_mid).collect(), poa_w_m2: vec![0.0; n], t_cell_c: vec![0.0; n], dc_w: vec![0.0; n], ac_w: vec![0.0; n] };
     let (mut dc_kwp, mut ac_kw) = (0.0, 0.0);
-    let mut warnings = vec![];
-    if w.horizon_applied { warnings.push("Weather beam irradiance already includes far-horizon shading; no additional horizon applied.".into()); }
+    let mut warnings: Vec<Note> = vec![];
+    if w.horizon_applied { warnings.push(Note { code: "HORIZON_IN_WEATHER".into(), subject: String::new(), value: 0.0, text: "Weather beam irradiance already includes far-horizon shading; no additional horizon applied.".into() }); }
 
     // Solar position once per hour (shared by arrays).
     let sun: Vec<spa::SolarPosition> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, spa::delta_t_estimate(2025.0))).collect();
@@ -160,7 +164,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
             hourly.dc_w[k] += dcwire as f32;
             hourly.ac_w[k] += avail as f32;
         }
-        if window_hours > 0 { warnings.push(format!("{}: {window_hours} h outside the inverter MPP voltage window", a.name.value)); }
+        if window_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: a.name.value.clone(), value: window_hours as f64, text: format!("{}: {window_hours} h outside the inverter MPP voltage window", a.name.value) }); }
     }
     progress(1.0);
     if area_tot <= 0.0 { return Err(SimError("no modules".into())); }

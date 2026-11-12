@@ -17,3 +17,4 @@ solarcraft-model = { path = "../model" }
 solarcraft-store = { path = "../store" }
 solarcraft-weather = { path = "../weather" }
 solarcraft-engine = { path = "../engine" }
+solarcraft-report = { path = "../report" }

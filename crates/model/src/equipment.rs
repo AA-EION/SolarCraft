@@ -90,7 +90,7 @@ impl InverterSpec {
         InverterSpec {
             id: format!("generic-inv-{pac_kw}kw"),
             manufacturer: "Generic".into(),
-            model: format!("Generic string inverter {pac_kw} kW"),
+            model: format!("string inverter {pac_kw} kW"),
             provenance: Provenance::Generic,
             pac_max_w: pac_kw * 1000.0,
             eta_nominal: 0.965,
@@ -117,7 +117,7 @@ impl Library {
     /// SolarCraft's generic defaults (illustrative values, not real products).
     pub fn generic() -> Self {
         let mut m = ModuleSpec {
-            id: "generic-mod-400-mono".into(), manufacturer: "Generic".into(), model: "Generic 400 W mono 72-cell".into(),
+            id: "generic-mod-400-mono".into(), manufacturer: "Generic".into(), model: "400 W mono 72-cell".into(),
             provenance: Provenance::Generic, technology: "mono-c-Si".into(), cells_in_series: 72, length_m: 2.0, width_m: 1.0,
             v_oc: 48.9, i_sc: 10.6, v_mp: 40.4, i_mp: 9.9, alpha_sc: 0.0053, beta_voc: -0.140, gamma_pmp: -0.36, model_params: None,
         };

@@ -21,6 +21,9 @@ struct Cli {
 #[derive(Clone, Copy, ValueEnum)]
 enum Mode { Easy, Detailed }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum Format { Pdf, Docx }
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Create a new project (Easy mode).
@@ -42,6 +45,8 @@ enum Cmd {
     Simulate { file: PathBuf },
     /// Explain the latest results (loss waterfall and monthly table).
     Explain { file: PathBuf },
+    /// Generate the customer report (PDF or editable DOCX).
+    Report { file: PathBuf, #[arg(short, long)] out: PathBuf, #[arg(long, default_value = "en")] lang: String, #[arg(long, value_enum, default_value_t = Format::Pdf)] format: Format, #[arg(long, default_value = "")] designer: String },
     /// Undo the last change.
     Undo { file: PathBuf },
     /// Show the change history.
@@ -111,12 +116,17 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
             print(j, &serde_json::json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings}), || {
                 let a = &r.annual;
                 println!("{:.0} kWh/yr  ·  {:.0} kWh/kWp  ·  PR {:.1} %  ·  {:.2} kWp DC / {:.1} kW AC", a.ac_kwh, a.specific_yield_kwh_kwp, a.performance_ratio * 100.0, a.dc_kwp, a.ac_kw);
-                for w in &r.warnings { println!("note: {w}"); }
+                for w in &r.warnings { println!("note: {}", w.text); }
             });
         }
         Cmd::Explain { file } => {
             let r = app::latest_results(&file)?.ok_or_else(|| app::AppError { code: "NO_RESULTS", message: "No results yet. Run `solarcraft simulate` first.".into() })?;
             print(j, &serde_json::json!({"irradiance": r.irradiance_ledger, "energy": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest}), || explain(&r));
+        }
+        Cmd::Report { file, out, lang, format, designer } => {
+            let f = match format { Format::Pdf => app::ReportFormat::Pdf, Format::Docx => app::ReportFormat::Docx };
+            let r = app::generate_report(&file, &out, f, &lang, &designer)?;
+            print(j, &r, || println!("Wrote {} ({} kB, {})", r.path, r.bytes / 1024, r.lang));
         }
         Cmd::Undo { file } => { match app::undo(&file)? { Some(_) => println!("Undone."), None => println!("Nothing to undo.") } }
         Cmd::History { file, limit } => { for (seq, op, at) in app::history(&file, limit)? { println!("{seq:>5}  {at}  {op}"); } }

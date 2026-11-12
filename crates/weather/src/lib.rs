@@ -51,7 +51,8 @@ fn err<T>(m: impl Into<String>) -> Result<T, WeatherError> { Err(WeatherError(m.
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 { solarcraft_pv::days_from_civil(y, m, d) }
 fn now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) }
 
-pub const PVGIS_LICENCE_NOTE: &str = "PVGIS © European Union, 2001–2026. Reuse per Commission Decision 2011/833/EU; cite the source. Terms to be confirmed (provider register PRV-01).";
+/// Customer-facing attribution (reuse terms tracked in the provider register, PRV-01).
+pub const PVGIS_LICENCE_NOTE: &str = "Weather data: PVGIS © European Union, 2001–2026.";
 
 /// Parse a PVGIS v5.x TMY JSON response (`outputformat=json`).
 pub fn parse_pvgis_tmy(json: &str, url: &str) -> Result<Weather, WeatherError> {

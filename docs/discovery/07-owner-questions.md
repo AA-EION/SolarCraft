@@ -16,3 +16,4 @@ These are recorded as approved decisions. The foundation record is [docs/decisio
 | D-10 | Data budget | **Free/open data only for now** | PVGIS, NASA POWER, Overture/OSM, Copernicus DEM, CEC lists, plus owner/user manual catalog entry. Paid weather, imagery and CAD SDK rows stay visible as deferred. |
 | D-11 | Parity baseline | **PV\*SOL premium 2026 (R4–R8); track 2027 R1** as next-version rows | |
 | D-12 | Build start | **Approved: spikes, then vertical slice 1** | Spike reports go in `docs/spikes/`. Slice 1 covers project → weather → layout → simulate → explain → report, plus CLI/MCP and easy/detailed modes. |
+| D-13 | Intel Mac verification | **Label the x86_64 macOS build "tested under emulation (Rosetta) only"** (2026-11-12) | Release notes and the download page carry the label until the owner supplies Intel hardware. |

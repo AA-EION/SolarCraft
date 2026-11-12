@@ -41,4 +41,13 @@ SolarCraft fits the CEC six-parameter model to the datasheet and tells you wheth
 
 `/simulation/mounting` is one of `open_rack`, `roof_mounted` (default up to 100 kWp) or `integrated`. It sets the module temperature model.
 
+## Customer report
+
+```bash
+solarcraft report casa.solarcraft -o informe.pdf --lang es --designer "Ingeniería Solar SAS"
+solarcraft report casa.solarcraft -o informe.docx --lang es --format docx   # editable
+```
+
+Languages: `en`, `es`, `de`, `pt-BR`. Numbers and dates follow the language. The PDF is tagged (accessible) and embeds Source Sans 3 (SIL OFL). The DOCX uses Calibri so it edits cleanly in Word and LibreOffice.
+
 All commands accept `--json` for machine-readable output. Exit codes: `0` success, `1` error, `2` the design has validation errors.
