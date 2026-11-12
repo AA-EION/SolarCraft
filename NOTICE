@@ -1,0 +1,16 @@
+SolarCraft
+Copyright (C) 2026 SolarCraft contributors
+
+SolarCraft is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See COPYING. The hosted catalog server (server/) is licensed under
+the GNU Affero General Public License, version 3 or later.
+
+This program incorporates algorithms ported from IngeTrazo
+(https://github.com/ingelibre/ingetrazo), Copyright (C) 2026 Marco Sumari
+Tellez and IngeTrazo contributors, GPL-3.0-or-later. Ported files carry
+attribution headers naming the upstream file and commit.
+
+Equipment catalog datasets distributed through the SolarCraft catalog service
+are not covered by the GPL and are licensed separately.

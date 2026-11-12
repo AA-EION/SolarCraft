@@ -1,0 +1,13 @@
+# Private reference evidence must never enter this repository.
+reference/
+*PVSol-Reference*
+*.pvprj
+*.wbv
+*.sdf
+# Build outputs
+target/
+bin/
+obj/
+.build/
+DerivedData/
+.DS_Store
