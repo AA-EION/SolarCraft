@@ -6,15 +6,19 @@
 - `apps/macos`: SwiftUI + Swift Charts. The SwiftPM system-library module maps the C header. Universal arm64 + x86_64 binary. `SolarCraftMac --selftest` runs headless.
 - Both shells show the same quick design form (site, tilt, azimuth, modules), run the core on a background thread with progress and cancel, and show annual and monthly results.
 
-## Results so far
-| Check | Target | Linux (C) | Windows x64 | Windows ARM64 | macOS arm64 | macOS x86_64 |
-|---|---|---|---|---|---|---|
-| Annual run via FFI | works | pass | CI | CI | CI | CI (Rosetta) |
-| 1 MiB array across FFI | < 5 ms | 0.45 ms | CI | CI | CI | CI |
-| Cancellation | works | pass (Rust test) | CI | CI | CI | CI |
-| Core panic contained | no abort | pass | CI | CI | CI | CI |
+## Results (GitHub Actions run 43307449143, 2026-11-12, all jobs green)
 
-"CI" cells are **blocked**. GitHub Actions run 43299739190 (2026-11-12) failed every job within 2 s with no runner assigned and no logs. That pattern usually means Actions refused to start jobs (account spending limit, billing, or Actions disabled for private repositories), not a build error. The Windows and macOS shells are therefore **unverified**: not yet compiled or run. The x86_64 macOS slice runs under Rosetta, which is **not** Intel hardware (D-09).
+| Check | Target | Linux (C) | Windows x64 | Windows ARM64 (native) | macOS arm64 | macOS x86_64 slice (Rosetta) |
+|---|---|---|---|---|---|---|
+| Builds | — | pass | pass (WinUI 3, WinAppSDK 2.6.5, .NET 10) | pass (cross-built, run natively on `windows-11-arm`) | pass (universal binary, Xcode 26.6, macOS 26.7) | same universal binary |
+| Annual run via FFI | works | pass | pass | pass (2425 kWh/kWp) | pass | pass (identical result) |
+| 1 MiB array across FFI | < 5 ms | 0.45 ms | pass | 0.18 ms | pass | 0.71 ms after warm-up (8.2 ms cold: first-call translation) |
+| Cancellation | works | pass | pass | pass | pass | pass |
+| Core panic contained | no abort | pass | pass | pass | pass | pass |
+
+Caveats:
+- The x86_64 macOS slice ran under **Rosetta, not on Intel hardware** (D-09). It still needs a run on owner hardware.
+- The self-contained Windows x64 output is 96 MB (bundled .NET + Windows App SDK). Trimming or a framework-dependent build is a packaging task.
 
 ## Decisions taken in the spike
 - **C ABI + hand-written façades** rather than UniFFI for now. The ABI is small, and C# bindings for UniFFI are community-maintained. Revisit once the API surface grows past ~40 functions.
