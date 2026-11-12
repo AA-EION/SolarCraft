@@ -72,7 +72,10 @@ jobs:
           Get-Content "$env:RUNNER_TEMP\selftest.txt"
           if ($p.ExitCode -ne 0) { throw "selftest failed: $($p.ExitCode)" }
       - uses: actions/upload-artifact@v4
-        with: { name: solarcraft-${{ matrix.rid }}, path: out/${{ matrix.rid }}, retention-days: 7 }
+        with:
+          name: solarcraft-${{ matrix.rid }}
+          path: out/${{ matrix.rid }}
+          retention-days: 7
 
   windows-arm64-test:
     name: windows ARM64 self-test (native)
@@ -117,4 +120,7 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 "$BIN" --selftest
       - uses: actions/upload-artifact@v4
-        with: { name: solarcraft-macos-universal, path: ${{ env.BIN }}, retention-days: 7 }
+        with:
+          name: solarcraft-macos-universal
+          path: ${{ env.BIN }}
+          retention-days: 7
