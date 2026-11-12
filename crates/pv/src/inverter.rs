@@ -16,3 +16,12 @@ impl Sandia {
         if p_dc < self.pso { -self.pnt.abs() } else { ac }
     }
 }
+
+/// PVWatts v5 inverter (Dobos 2014, NREL/TP-6A20-62641). `pdc0` is the
+/// inverter's DC rating (W); output is capped at `eta_nom · pdc0`.
+pub fn pvwatts(p_dc: f64, pdc0: f64, eta_nom: f64, eta_ref: f64) -> f64 {
+    if p_dc <= 0.0 { return 0.0; }
+    let zeta = p_dc / pdc0;
+    let eta = (eta_nom / eta_ref * (-0.0162 * zeta - 0.0059 / zeta + 0.9858)).max(0.0);
+    (eta * p_dc).min(eta_nom * pdc0).max(0.0)
+}

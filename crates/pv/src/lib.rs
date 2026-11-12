@@ -5,6 +5,7 @@
 //! north (N=0, E=90, S=180), irradiance in W/m², temperature in °C, time as
 //! Unix seconds UTC. Every model cites its publication.
 pub mod diode;
+pub mod iam;
 pub mod inverter;
 pub mod irradiance;
 pub mod spa;

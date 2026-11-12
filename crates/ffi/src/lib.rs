@@ -26,7 +26,7 @@ pub extern "C" fn sc_version() -> *const c_char {
 }
 
 /// Generic 400 W-class mono c-Si module (illustrative parameters, not a catalog product).
-const MODULE: diode::DeSotoRef = diode::DeSotoRef { alpha_sc: 0.0047, a_ref: 1.8, i_l_ref: 10.9, i_o_ref: 1.0e-11, r_sh_ref: 400.0, r_s: 0.25, eg_ref: 1.121, d_eg_dt: -0.0002677 };
+const MODULE: diode::DeSotoRef = diode::DeSotoRef { alpha_sc: 0.0047, a_ref: 1.8, i_l_ref: 10.9, i_o_ref: 1.0e-11, r_sh_ref: 400.0, r_s: 0.25, eg_ref: 1.121, d_eg_dt: -0.0002677, adjust: 0.0 };
 
 pub fn quick_annual(input: &ScQuickInput, hourly: Option<&mut [f64]>, mut progress: impl FnMut(f64) -> bool) -> Result<ScAnnualSummary, i32> {
     if !(-90.0..=90.0).contains(&input.latitude) || !(-180.0..=180.0).contains(&input.longitude) || input.modules == 0 || input.modules > 10_000 || !(1901..=2099).contains(&input.year) {

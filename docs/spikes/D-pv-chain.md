@@ -38,3 +38,23 @@ cargo build --release -p solarcraft-pv
 python -m venv .venv && .venv/bin/pip install pvlib==0.16.1
 .venv/bin/python -I spikes/pv-oracle/compare.py target/release/pvchain /tmp/pvd
 ```
+
+## Addendum (slice 1a): IAM, inverter and datasheet fit
+
+| Model | Oracle | Result |
+|---|---|---|
+| Physical IAM (Fresnel + absorption) | `pvlib.iam.physical` | max abs. diff 8e-16 |
+| ASHRAE IAM | `pvlib.iam.ashrae` | exact |
+| Diffuse IAM (sky / ground average) | `pvlib.iam.marion_diffuse` | 2e-5 / 7e-4 |
+| PVWatts v5 inverter | `pvlib.inverter.pvwatts` | exact |
+| CEC 6-parameter fit from datasheet (`diode::fit_cec`) | SAM-fitted parameters in the CEC list, 300 seeded c-Si modules | see below |
+
+**Datasheet fit.** Users enter their own modules, so SolarCraft must turn a datasheet into model parameters. On 300 real CEC datasheets:
+- **229 (76%) solve exactly.** Their power predictions match SAM's parameters within 5e-7 at STC, 0.2% at 200 W/m² and 0.36% at 800 W/m²/45 °C.
+- **238 (79%)** are within the "acceptable" limits: STC errors < 0.1%, γ within 0.02 %/K, β_Voc within 15%.
+- **The other 62** get the best physically valid compromise. A `FitReport` returns the errors so the UI can flag the module. The worst STC Pmp error is 1.2%.
+- pvlib's own 5-parameter `fit_desoto` fails on 262 of 300 of these datasheets, because the 5-parameter model is inconsistent with typical datasheets. That is why the 6-parameter CEC method exists.
+
+**Known gap.** SAM's parameters reproduce all 300 datasheets, so solutions exist for the 62. Fix: port SAM's solver (`ssc/shared/6par_*.h`, BSD-3) directly, including its band-gap constant and P(T) solver, instead of approximating its conventions. Tracked in feature row SIM-007.
+
+Reproduce: `.venv/bin/python -I spikes/pv-oracle/models.py target/release/pvmodels /tmp/pvm 300`
