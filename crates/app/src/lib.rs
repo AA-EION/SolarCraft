@@ -113,6 +113,7 @@ pub fn latest_results(path: &Path) -> Result<Option<SimResult>> {
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ModuleInput {
     pub id: String, pub manufacturer: String, pub model: String, pub technology: String,
     pub cells_in_series: u32, pub length_m: f64, pub width_m: f64,

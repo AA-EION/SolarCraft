@@ -1,0 +1,22 @@
+[package]
+name = "solarcraft-mcp"
+description = "SolarCraft Model Context Protocol server (stdio), backed by solarcraft-app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "solarcraft-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "3.9.0", features = ["server", "transport-io", "macros", "schemars"] }
+schemars = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+serde.workspace = true
+serde_json.workspace = true
+solarcraft-app = { path = "../app", features = ["schema"] }
+solarcraft-model = { path = "../model" }
+
+[dev-dependencies]
+serde_json.workspace = true
