@@ -13,3 +13,6 @@ DerivedData/
 .DS_Store
 .venv/
 __pycache__/
+out/
+smoke
+report.json

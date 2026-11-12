@@ -113,3 +113,9 @@ pub fn erbs(ghi: f64, zenith: f64, dni_extra: f64) -> (f64, f64) {
     let dni = if zenith < 87.0 { ((ghi - dhi) / cosd(zenith)).max(0.0) } else { 0.0 };
     (dni, dhi)
 }
+
+/// Haurwitz (1945) clear-sky GHI, W/m². Used only as an offline placeholder.
+pub fn clearsky_haurwitz(apparent_zenith: f64) -> f64 {
+    let cz = cosd(apparent_zenith);
+    if cz <= 0.0 { 0.0 } else { 1098.0 * cz * (-0.059 / cz).exp() }
+}

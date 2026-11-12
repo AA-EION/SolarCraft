@@ -1,0 +1,13 @@
+[package]
+name = "solarcraft-ffi"
+description = "C ABI for SolarCraft native shells (WinUI 3, SwiftUI)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "solarcraft_ffi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+solarcraft-pv = { path = "../pv" }

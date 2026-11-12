@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<Window x:Class="SolarCraft.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="SolarCraft">
+  <Grid Padding="24" ColumnSpacing="24">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="280" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+    <StackPanel Spacing="8">
+      <TextBlock Text="Site" Style="{StaticResource SubtitleTextBlockStyle}" />
+      <NumberBox x:Name="Lat" Header="Latitude" Value="4.711" />
+      <NumberBox x:Name="Lon" Header="Longitude" Value="-74.072" />
+      <NumberBox x:Name="Elev" Header="Elevation (m)" Value="2640" />
+      <TextBlock Text="Array" Style="{StaticResource SubtitleTextBlockStyle}" />
+      <NumberBox x:Name="Tilt" Header="Tilt (°)" Value="10" />
+      <NumberBox x:Name="Azimuth" Header="Azimuth (° from north)" Value="180" />
+      <NumberBox x:Name="Modules" Header="Modules" Value="10" SpinButtonPlacementMode="Inline" Minimum="1" Maximum="60" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button x:Name="RunButton" Content="Simulate" Style="{StaticResource AccentButtonStyle}" Click="OnRun" />
+        <Button x:Name="CancelButton" Content="Cancel" Click="OnCancel" IsEnabled="False" />
+      </StackPanel>
+      <ProgressBar x:Name="Progress" Maximum="1" />
+      <TextBlock Text="Clear-sky spike — not a yield estimate." Opacity="0.7" TextWrapping="Wrap" />
+    </StackPanel>
+    <StackPanel Grid.Column="1" Spacing="12">
+      <TextBlock x:Name="Summary" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+      <ItemsControl x:Name="Monthly" />
+      <TextBlock x:Name="CoreVersion" Opacity="0.6" />
+    </StackPanel>
+  </Grid>
+</Window>

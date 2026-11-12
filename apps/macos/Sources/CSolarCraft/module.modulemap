@@ -1,0 +1,5 @@
+module CSolarCraft [system] {
+    header "../../../../crates/ffi/include/solarcraft.h"
+    link "solarcraft_ffi"
+    export *
+}
