@@ -1,0 +1,12 @@
+[package]
+name = "solarcraft-pv"
+description = "SolarCraft photovoltaic physics: solar position, irradiance, temperature, module and inverter models"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "pvchain"
+path = "src/bin/pvchain.rs"

@@ -11,3 +11,5 @@ obj/
 .build/
 DerivedData/
 .DS_Store
+.venv/
+__pycache__/

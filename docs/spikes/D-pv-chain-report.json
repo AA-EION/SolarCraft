@@ -1,0 +1,95 @@
+{
+ "pvlib": "0.16.1",
+ "rust_runtime": "52560 steps in 1.179 s",
+ "module": "A10Green_Technology_A10J_S72_175",
+ "inverter": "AE_Solar_Energy__AE6_0__208V_",
+ "modules_per_string": 10,
+ "steps": 52560,
+ "daylight_steps": 26779,
+ "metrics": {
+  "apparent_zenith": {
+   "max_abs": 5.044853423896711e-12,
+   "p99_abs": 3.367972567502875e-12,
+   "max_rel_where_ref>1": 1.3863887814509335e-13,
+   "annual_sum_rel": 1.020694143079315e-15
+  },
+  "azimuth": {
+   "max_abs": 1.3216094885137863e-11,
+   "p99_abs": 6.338041202980094e-12,
+   "max_rel_where_ref>1": 7.867274155808694e-14,
+   "annual_sum_rel": 3.382545094493358e-15
+  },
+  "dni_extra": {
+   "max_abs": 0.0,
+   "p99_abs": 0.0,
+   "max_rel_where_ref>1": 0.0,
+   "annual_sum_rel": 0.0
+  },
+  "poa_isotropic": {
+   "max_abs": 6.87521151121473e-11,
+   "p99_abs": 2.605929694254896e-11,
+   "max_rel_where_ref>1": 3.8272427988992727e-13,
+   "annual_sum_rel": 1.0725810903804936e-15
+  },
+  "poa_haydavies": {
+   "max_abs": 2.6163888833252713e-09,
+   "p99_abs": 1.8636910681380038e-10,
+   "max_rel_where_ref>1": 2.357740893389571e-12,
+   "annual_sum_rel": 3.1824955185331462e-15
+  },
+  "poa_klucher": {
+   "max_abs": 7.153744263632689e-11,
+   "p99_abs": 3.042373464268173e-11,
+   "max_rel_where_ref>1": 3.7821300956585555e-13,
+   "annual_sum_rel": 1.4597267046552733e-15
+  },
+  "poa_reindl": {
+   "max_abs": 2.616161509649828e-09,
+   "p99_abs": 1.867238097474913e-10,
+   "max_rel_where_ref>1": 2.357740893389571e-12,
+   "annual_sum_rel": 3.3019880435224077e-15
+  },
+  "poa_perez": {
+   "max_abs": 5.148649506736547e-09,
+   "p99_abs": 4.245794116286577e-10,
+   "max_rel_where_ref>1": 1.4861515122995753e-11,
+   "annual_sum_rel": 4.3564651099073857e-14
+  },
+  "t_faiman": {
+   "max_abs": 1.8735590856522322e-10,
+   "p99_abs": 8.543850071873765e-12,
+   "max_rel_where_ref>1": 2.527944634513511e-12,
+   "annual_sum_rel": 1.1938633071722999e-14
+  },
+  "t_sapm": {
+   "max_abs": 1.7220713743881788e-10,
+   "p99_abs": 1.1327614402034677e-11,
+   "max_rel_where_ref>1": 2.9058758515603447e-12,
+   "annual_sum_rel": 1.4207432680389202e-14
+  },
+  "v_mp": {
+   "max_abs": 0.000249483334412659,
+   "p99_abs": 2.41150361077303e-06,
+   "max_rel_where_ref>1": 1.6500899741931375e-05,
+   "annual_sum_rel": 2.0273763112464594e-09
+  },
+  "i_mp": {
+   "max_abs": 9.872163566626568e-07,
+   "p99_abs": 5.743520350876067e-08,
+   "max_rel_where_ref>1": 8.050328179145455e-08,
+   "annual_sum_rel": 2.0701910617503696e-09
+  },
+  "p_mp": {
+   "max_abs": 1.7087359083234333e-08,
+   "p99_abs": 2.6634910454959335e-09,
+   "max_rel_where_ref>1": 1.7501627468193032e-10,
+   "annual_sum_rel": 2.5348957283543276e-12
+  },
+  "ac": {
+   "max_abs": 2.197683130589212e-06,
+   "p99_abs": 1.7739708894737306e-07,
+   "max_rel_where_ref>1": 1.6044829401358584e-07,
+   "annual_sum_rel": 4.405700885750995e-11
+  }
+ }
+}
