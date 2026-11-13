@@ -52,8 +52,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x64, rid: win-x64, target: x86_64-pc-windows-msvc, run: true }
-          - { arch: ARM64, rid: win-arm64, target: aarch64-pc-windows-msvc, run: false }
+          - { arch: x64, iss: x64, rid: win-x64, target: x86_64-pc-windows-msvc, run: true }
+          - { arch: ARM64, iss: arm64, rid: win-arm64, target: aarch64-pc-windows-msvc, run: false }
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add ${{ matrix.target }}
@@ -80,6 +80,24 @@ jobs:
           name: solarcraft-${{ matrix.rid }}
           path: out/${{ matrix.rid }}
           retention-days: 7
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; if ($LASTEXITCODE -ne 0) { throw "choco failed" } }
+          $src = Resolve-Path "out/${{ matrix.rid }}"
+          & $iscc /Q "/DArch=${{ matrix.iss }}" "/DSrcDir=$src" "/DAppVersion=0.0.1.${{ github.run_number }}" "/DOutDir=$pwd\installer" packaging/windows/SolarCraft.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
+          Get-ChildItem installer
+      - name: Installed app self-test (silent install, run, uninstall)
+        if: matrix.run
+        shell: pwsh
+        run: packaging/windows/test-installer.ps1 (Get-ChildItem installer/*.exe).FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SolarCraft-setup-${{ matrix.rid }}
+          path: installer/*.exe
+          retention-days: 30
 
   windows-arm64-test:
     name: windows ARM64 self-test (native)
@@ -94,6 +112,13 @@ jobs:
           $p = Start-Process -FilePath app/SolarCraft.exe -ArgumentList "--selftest", "$env:RUNNER_TEMP\selftest.txt" -Wait -PassThru
           Get-Content "$env:RUNNER_TEMP\selftest.txt"
           if ($p.ExitCode -ne 0) { throw "selftest failed: $($p.ExitCode)" }
+      - uses: actions/checkout@v4
+        with: { path: src, sparse-checkout: packaging }
+      - uses: actions/download-artifact@v4
+        with: { name: SolarCraft-setup-win-arm64, path: installer }
+      - name: Installed app self-test (native ARM64)
+        shell: pwsh
+        run: src/packaging/windows/test-installer.ps1 (Get-ChildItem installer/*.exe).FullName
 
   macos:
     name: macos universal
@@ -124,8 +149,20 @@ jobs:
         run: |
           softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 "$BIN" --selftest
+      - name: App bundle and DMG
+        run: |
+          DMG=$(packaging/macos/make-dmg.sh "$BIN" 0.0.1 ${{ github.run_number }} "$RUNNER_TEMP/dmg" | tail -1)
+          echo "DMG=$DMG" >> $GITHUB_ENV
+      - name: Self-test from the mounted DMG (arm64 and x86_64 under Rosetta)
+        run: |
+          MNT=$(mktemp -d)
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MNT"
+          codesign --verify --strict "$MNT/SolarCraft.app"
+          arch -arm64 "$MNT/SolarCraft.app/Contents/MacOS/SolarCraft" --selftest
+          arch -x86_64 "$MNT/SolarCraft.app/Contents/MacOS/SolarCraft" --selftest
+          hdiutil detach "$MNT"
       - uses: actions/upload-artifact@v4
         with:
-          name: solarcraft-macos-universal
-          path: ${{ env.BIN }}
-          retention-days: 7
+          name: SolarCraft-macos-universal-dmg
+          path: ${{ env.DMG }}
+          retention-days: 30
