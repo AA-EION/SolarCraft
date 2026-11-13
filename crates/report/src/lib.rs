@@ -63,6 +63,10 @@ pub struct View {
     pub monthly_svg: String,
     #[serde(skip)]
     pub waterfall_svg: String,
+    /// Roof plan SVGs (one per array with a roof); the template reads roof-<i>.svg.
+    #[serde(skip)]
+    pub roof_svgs: Vec<String>,
+    pub roof_count: usize,
 }
 
 pub fn build_view(inp: &ReportInput) -> View {
@@ -144,6 +148,10 @@ pub fn build_view(inp: &ReportInput) -> View {
     let lo = &p.losses;
     let pct = |v: f64| format!("{} %", n(v, 1));
     let model_name = format!("{:?}", p.simulation.transposition.value).replace("HayDavies", "Hay–Davies").replace("Perez", "Perez et al. (1990)");
+    let roof_svgs: Vec<String> = p.arrays.iter().filter_map(|a| a.roof.as_ref().map(|r| {
+        let cap = format!("{} — {}", a.name.value, s["roof_caption"].replace("%N%", &r.modules.len().to_string()).replace("%S%", &n(r.params.setback, 2)));
+        charts::roof_plan(&r.face, &r.modules, &cap, l)
+    })).filter(|svg| !svg.is_empty()).collect();
     View {
         lang: l.tag().into(), title: s["title"].into(), project_name: p.name.value.clone(), designer: inp.designer.clone(),
         customer: CustomerView { name: if p.customer.name.is_empty() { "—".into() } else { p.customer.name.clone() }, address: p.customer.address.clone() },
@@ -163,6 +171,8 @@ pub fn build_view(inp: &ReportInput) -> View {
         footer: format!("{} {}", s["generated_with"], env!("CARGO_PKG_VERSION")),
         monthly_svg: charts::monthly_bars(&vals, months, "kWh", l),
         waterfall_svg: charts::waterfall(&waterfall_steps, "kWh", l),
+        roof_svgs: roof_svgs.clone(),
+        roof_count: roof_svgs.len(),
         s,
     }
 }

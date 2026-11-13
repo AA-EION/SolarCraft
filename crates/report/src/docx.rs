@@ -65,6 +65,10 @@ pub fn render(v: &View) -> Result<Vec<u8>, String> {
         .add_paragraph(image_para(&v.monthly_svg, width)?)
         .add_paragraph(heading(s["system"]));
     for a in &v.arrays { doc = doc.add_paragraph(Paragraph::new().add_run(text(&a.name).bold().size(20))).add_table(table_of(None, &a.rows)); }
+    if !v.roof_svgs.is_empty() {
+        doc = doc.add_paragraph(Paragraph::new().add_run(text(s["roof_plan"]).bold().size(20)));
+        for svg in &v.roof_svgs { doc = doc.add_paragraph(image_para(svg, width)?); }
+    }
     doc = doc.add_paragraph(heading(s["site_weather"])).add_table(table_of(None, &v.site_rows))
         .add_paragraph(Paragraph::new().add_run(text(&v.weather_notes.join(" · ")).size(17).color(MUTED)))
         .add_paragraph(Paragraph::new().add_run(text(&v.licence).size(17).color(MUTED)))

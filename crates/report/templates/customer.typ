@@ -57,6 +57,13 @@
   #grid-table(a.rows)
 ]
 
+#if d.roof_count > 0 [
+  #block(breakable: false)[
+    #text(weight: "semibold", s.roof_plan)
+    #for i in range(d.roof_count) [#image("roof-" + str(i) + ".svg", width: 100%)]
+  ]
+]
+
 = #s.site_weather
 #grid-table(d.site_rows)
 #v(4pt)

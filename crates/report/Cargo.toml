@@ -16,6 +16,7 @@ docx-rs = "0.4.22"
 resvg = "0.50.0"
 solarcraft-model = { path = "../model" }
 solarcraft-engine = { path = "../engine" }
+solarcraft-geometry = { path = "../geometry" }
 
 [dev-dependencies]
 solarcraft-pv = { path = "../pv" }

@@ -2798,6 +2798,7 @@ dependencies = [
  "serde",
  "serde_json",
  "solarcraft-engine",
+ "solarcraft-geometry",
  "solarcraft-model",
  "solarcraft-pv",
  "solarcraft-weather",

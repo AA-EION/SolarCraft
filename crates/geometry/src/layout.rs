@@ -56,22 +56,28 @@ fn fill_one(face: &RoofFace, p: &LayoutParams, w: f64, h: f64, orientation: Orie
     let (px, py) = (w + p.gap_x, h + p.gap_y);
     let steps = |pitch: f64| ((pitch / p.search_step).ceil() as usize).max(1);
     let mut best = Layout { modules: vec![], orientation, origin: [x0, y0] };
+    // Rows are stacked with a common vertical offset; each row picks its own
+    // horizontal offset (as installers do on trapezoids and around obstacles).
     for iy in 0..steps(py) {
-        for ix in 0..steps(px) {
-            let (ox, oy) = (x0 + ix as f64 * p.search_step, y0 + iy as f64 * p.search_step);
-            let mut mods = vec![];
-            let mut y = oy;
-            while y + h <= y1 + 1e-9 {
-                let mut x = ox;
+        let oy = y0 + iy as f64 * p.search_step;
+        let mut mods = vec![];
+        let mut y = oy;
+        while y + h <= y1 + 1e-9 {
+            let mut row_best: Vec<Rect> = vec![];
+            for ix in 0..steps(px) {
+                let mut row = vec![];
+                let mut x = x0 + ix as f64 * p.search_step;
                 while x + w <= x1 + 1e-9 {
                     let r = Rect { x0: x, y0: y, x1: x + w, y1: y + h };
-                    if module_fits(face, &r, p) { mods.push(r); }
+                    if module_fits(face, &r, p) { row.push(r); }
                     x += px;
                 }
-                y += py;
+                if row.len() > row_best.len() { row_best = row; }
             }
-            if mods.len() > best.modules.len() { best = Layout { modules: mods, orientation, origin: [ox, oy] }; }
+            mods.extend(row_best);
+            y += py;
         }
+        if mods.len() > best.modules.len() { best = Layout { modules: mods, orientation, origin: [x0, oy] }; }
     }
     best
 }
@@ -131,7 +137,9 @@ mod tests {
         // Hip roof face: trapezoid 12 m eave, 6 m ridge, 5 m slope.
         let hip = RoofFace { outline: vec![[0.0, 0.0], [12.0, 0.0], [9.0, 5.0], [3.0, 5.0]], obstacles: vec![] };
         let l = fill(&hip, &params(Orientation::Best));
-        assert!(!l.modules.is_empty());
+        // Usable band after 0.4 m setback holds 2 landscape rows (1.7 × 1.0) of 5–6 modules, or
+        // 2 portrait rows (1.0 × 1.7); per-row offsets must beat a single shared grid offset.
+        assert!(l.modules.len() >= 10, "hip face fits only {}", l.modules.len());
         verify(&hip, &l, &params(Orientation::Best));
     }
 

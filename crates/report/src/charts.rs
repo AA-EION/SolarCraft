@@ -74,3 +74,31 @@ pub fn waterfall(steps: &[(String, f64, bool)], unit: &str, lang: Lang) -> Strin
     s.push_str("</svg>");
     s
 }
+
+/// Roof plan: outline, obstacles and placed modules in roof-plane metres
+/// (x along the eave, y up the slope; the eave is drawn at the bottom).
+pub fn roof_plan(face: &solarcraft_geometry::layout::RoofFace, modules: &[solarcraft_geometry::poly::Rect], caption: &str, lang: Lang) -> String {
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for v in &face.outline { x0 = x0.min(v[0]); y0 = y0.min(v[1]); x1 = x1.max(v[0]); y1 = y1.max(v[1]); }
+    if !(x1 > x0 && y1 > y0) { return String::new(); }
+    let (w, pad) = (640.0, 36.0);
+    let scale = ((w - 2.0 * pad) / (x1 - x0)).min(320.0 / (y1 - y0));
+    let h = (y1 - y0) * scale + 2.0 * pad + 18.0;
+    let px = |x: f64| pad + (x - x0) * scale;
+    let py = |y: f64| pad + (y1 - y) * scale;
+    let path = |pts: &[[f64; 2]]| pts.iter().enumerate().map(|(i, p)| format!("{}{:.1},{:.1}", if i == 0 { "M" } else { "L" }, px(p[0]), py(p[1]))).collect::<String>() + "Z";
+    let mut s = String::new();
+    let _ = write!(s, r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h:.0}" viewBox="0 0 {w} {h:.0}" font-family="{FONT_CSS}">"#);
+    let _ = write!(s, r##"<path d="{}" fill="#f3f4f6" stroke="{INK}" stroke-width="1.5"/>"##, path(&face.outline));
+    for m in modules {
+        let _ = write!(s, r##"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" fill="{BAR}" stroke="#ffffff" stroke-width="0.6"/>"##, px(m.x0), py(m.y1), (m.x1 - m.x0) * scale, (m.y1 - m.y0) * scale);
+    }
+    for ob in &face.obstacles { let _ = write!(s, r##"<path d="{}" fill="#9ca3af" stroke="{INK}" stroke-width="1"/>"##, path(ob)); }
+    // Eave dimension line.
+    let yb = py(y0) + 14.0;
+    let _ = write!(s, r#"<line x1="{:.1}" y1="{yb:.1}" x2="{:.1}" y2="{yb:.1}" stroke="{MUTED}" stroke-width="1"/>"#, px(x0), px(x1));
+    let _ = write!(s, r#"<text x="{:.1}" y="{:.1}" font-size="11" fill="{MUTED}" text-anchor="middle">{} m</text>"#, (px(x0) + px(x1)) / 2.0, yb + 13.0, esc(&lang.num(x1 - x0, 2)));
+    let _ = write!(s, r#"<text x="{pad}" y="16" font-size="11" fill="{INK}">{}</text>"#, esc(caption));
+    s.push_str("</svg>");
+    s
+}

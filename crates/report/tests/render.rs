@@ -17,6 +17,8 @@ fn fixture() -> (Project, solarcraft_engine::SimResult) {
     }).collect();
     let w = Weather { latitude: lat, longitude: lon, elevation: 2600.0, horizon_applied: true, provenance: Provenance { provider: "test".into(), dataset: "synthetic".into(), url: String::new(), retrieved_unix: 0, licence: "Weather data: test".into(), notes: vec![] }, hours };
     let mut p = Project::new("t", "Casa de prueba", lat, lon);
+    p.set_by_pointer("/arrays/0/roof", serde_json::json!({"face": {"outline": [[0.0, 0.0], [11.0, 0.0], [8.0, 5.0], [3.0, 5.0]], "obstacles": [[[5.0, 2.0], [5.8, 2.0], [5.8, 2.8], [5.0, 2.8]]]},
+        "params": {"module_length": 0.0, "module_width": 0.0, "orientation": "best", "gap_x": 0.02, "gap_y": 0.02, "setback": 0.4, "obstacle_clearance": 0.3, "search_step": 0.05}, "modules": [], "orientation": "best", "inputs_key": ""})).unwrap();
     p.customer.name = "Cliente Ñandú & Hijos <S.A.>".into(); // markup-like characters must print literally
     p.weather = Some(solarcraft_model::WeatherRef { hash: "abc".into(), provider: "test".into(), summary: String::new() });
     let r = solarcraft_engine::simulate(&p, &w, "abc", |_| true).unwrap();
@@ -35,6 +37,8 @@ fn all_languages_render_pdf_and_docx() {
             assert!(lang == Lang::En && bad.starts_with("outside") || !json.contains(bad), "{lang:?} leaks '{bad}'");
         }
         assert!(v.monthly_svg.contains("font-family=\"'Source Sans 3'"));
+        assert_eq!(v.roof_count, 1);
+        assert!(v.roof_svgs[0].matches("<rect").count() == p.arrays[0].roof.as_ref().unwrap().modules.len());
         let pdf_bytes = pdf::render(&v, input.date).unwrap_or_else(|e| panic!("{lang:?}: {e}"));
         assert!(pdf_bytes.starts_with(b"%PDF-") && pdf_bytes.len() > 20_000);
         let d = docx::render(&v).unwrap();

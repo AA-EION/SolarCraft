@@ -93,6 +93,8 @@ strings! {
     roof_mounted => ["Roof-mounted (ventilated)", "Sobre cubierta (ventilado)", "Aufdach (hinterlüftet)", "Sobre telhado (ventilado)"],
     integrated => ["Building-integrated", "Integrado en edificio", "Gebäudeintegriert", "Integrado à edificação"],
     total => ["Total", "Total", "Summe", "Total"],
+    roof_plan => ["Roof layout", "Distribución en el techo", "Dachbelegung", "Distribuição no telhado"],
+    roof_caption => ["%N% modules · eave at the bottom · setback %S% m", "%N% módulos · alero abajo · retiro %S% m", "%N% Module · Traufe unten · Randabstand %S% m", "%N% módulos · beiral embaixo · recuo %S% m"],
     note_horizon => ["The weather data already include shading by the distant horizon (terrain).", "Los datos meteorológicos ya incluyen el sombreado del horizonte lejano (relieve).", "Die Wetterdaten enthalten bereits die Verschattung durch den fernen Horizont (Gelände).", "Os dados meteorológicos já incluem o sombreamento do horizonte distante (relevo)."],
     note_mpp => ["%S%: %N% hours with the string voltage outside the inverter MPP range.", "%S%: %N% horas con la tensión de cadena fuera del rango MPP del inversor.", "%S%: %N% Stunden mit Stringspannung außerhalb des MPP-Bereichs des Wechselrichters.", "%S%: %N% horas com a tensão de string fora da faixa MPP do inversor."],
     weather_tmy => ["Typical meteorological year", "Año meteorológico típico", "Typisches meteorologisches Jahr", "Ano meteorológico típico"],
