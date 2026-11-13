@@ -1,0 +1,2 @@
+{"horizon_years":20,"discount_rate_pct":9,"cost_fixed":3000000,"cost_per_kwp":3500000,"cost_per_battery_kwh":1800000,"om_pct_of_investment":1,"om_escalation_pct":4,
+ "inverter_replacement_year":13,"inverter_replacement_cost":4000000,"battery_replacement_year":12,"battery_replacement_cost":0,"degradation_pct_per_year":0.4,"subsidy":0,"loan":null}

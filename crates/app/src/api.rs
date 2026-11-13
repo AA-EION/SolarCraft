@@ -24,7 +24,7 @@ pub const METHODS: &[&str] = &[
     "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
     "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
-    "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import",
+    "report_preview", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import",
 ];
 
 /// Project sections that `set_section` replaces as a whole (validated on save).
@@ -131,6 +131,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let designer = params.get("designer").and_then(Value::as_str).unwrap_or("");
             Ok(v(&app::generate_report(&path(params, "file")?, &path(params, "output")?, fmt, lang, designer)?))
         }
+        "report_preview" => Ok(v(&app::report_view(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"))?)),
         "undo" => Ok(json!({"undone": app::undo(&path(params, "file")?)?.is_some()})),
         "history" => Ok(json!({"changes": app::history(&path(params, "file")?, 50)?.into_iter().map(|(seq, op, at)| json!({"seq": seq, "op": op, "at_unix": at})).collect::<Vec<_>>()})),
         _ => Err(AppError { code: "UNKNOWN_METHOD", message: format!("unknown method '{method}'") }),

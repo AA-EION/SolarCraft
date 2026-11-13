@@ -1,0 +1,2 @@
+{"name":"Residential TOU (illustrative)","currency":"COP","import_price":800,"tou":[{"name":"Peak","price":1100,"start_hour":18,"end_hour":22,"weekdays":true,"weekends":true,"months":[]}],
+ "export":{"kind":"fixed","price":300},"fixed_per_month":12000,"demand_charge_per_kw_month":0,"import_escalation_pct":4,"export_escalation_pct":2}

@@ -115,6 +115,8 @@ impl Store {
     pub fn put_blob(&mut self, kind: &str, media_type: &str, data: &[u8]) -> Result<String> {
         let hash = sha256_hex(data);
         self.conn.execute("INSERT OR IGNORE INTO blobs(hash, kind, media_type, data, created_unix) VALUES(?1, ?2, ?3, ?4, ?5)", params![hash, kind, media_type, data, now()])?;
+        // Identical content is stored once; the pointer records which blob of a kind was written last.
+        self.conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("latest:{kind}"), hash])?;
         Ok(hash)
     }
 
@@ -124,6 +126,8 @@ impl Store {
 
     /// Latest blob of a kind (e.g. "results").
     pub fn latest_blob(&self, kind: &str) -> Result<Option<(String, Vec<u8>)>> {
+        let ptr: Option<String> = self.conn.query_row("SELECT value FROM meta WHERE key=?1", [format!("latest:{kind}")], |r| r.get(0)).optional()?;
+        if let Some(h) = ptr { if let Some(d) = self.get_blob(&h)? { return Ok(Some((h, d))); } }
         Ok(self.conn.query_row("SELECT hash, data FROM blobs WHERE kind=?1 ORDER BY created_unix DESC, rowid DESC LIMIT 1", [kind], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
     }
 

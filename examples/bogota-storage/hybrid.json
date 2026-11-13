@@ -1,0 +1,4 @@
+{"id":"user-hybrid-5k","manufacturer":"Datasheet entry","model":"hybrid 5 kW","pac_max_w":5000,"eta_nominal":0.97,"mppt_v_min":120,"mppt_v_max":500,
+ "v_dc_max":600,"mppt_count":2,"i_max_per_mppt":26,"night_w":2,"pdc_max_w":7500,
+ "efficiency_curve":[[0.05,0.90],[0.1,0.94],[0.2,0.96],[0.3,0.968],[0.5,0.972],[0.75,0.97],[1.0,0.967]],
+ "battery_port":{"v_min":150,"v_max":500,"p_charge_max_w":5000,"p_discharge_max_w":5000,"dc_dc_efficiency":0.98}}

@@ -53,6 +53,26 @@ enum Cmd {
     History { file: PathBuf, #[arg(long, default_value_t = 20)] limit: usize },
     /// Write a compact portable copy.
     Export { file: PathBuf, dest: PathBuf },
+    /// Replace a plant section from a JSON file or inline JSON (grid, loads, storage, tariff, economics, electrical, …).
+    Section { file: PathBuf, section: String, value: String },
+    /// Add an equipment record (module, inverter, battery, battery_inverter) from a JSON file to the project.
+    Equipment { file: PathBuf, kind: String, spec: PathBuf },
+    /// Import a metered consumption series (one value per line; kWh per interval or kW with --unit kw).
+    Load { file: PathBuf, source: PathBuf, #[arg(long, default_value = "kwh")] unit: String },
+    /// Show the inverter/MPPT stringing and its checks.
+    Stringing { file: PathBuf },
+    /// Energy balance, battery and grid totals of the latest run.
+    Balance { file: PathBuf },
+    /// Hours behind the totals: --day 172, --top import, or --start/--count.
+    Hours { file: PathBuf, #[arg(long)] day: Option<u32>, #[arg(long)] top: Option<String>, #[arg(long, default_value_t = 0)] start: u32, #[arg(long, default_value_t = 24)] count: u32 },
+    /// Cash flow of the latest run.
+    Cashflow { file: PathBuf },
+    /// Save the current design as a named variant.
+    Variant { file: PathBuf, name: String },
+    /// Simulate the current design and all variants side by side.
+    Compare { file: PathBuf },
+    /// Call any API method with JSON parameters (the same contract as the shells and MCP).
+    Call { method: String, #[arg(default_value = "{}")] params: String },
 }
 
 #[derive(Subcommand)]
@@ -113,9 +133,12 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
         Cmd::Simulate { file } => {
             let r = app::simulate(&file, |f| { if !j { eprint!("\rSimulating… {:>3.0} %", f * 100.0); } true })?;
             if !j { eprintln!(); }
-            print(j, &serde_json::json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings}), || {
+            print(j, &app::api::summary(&r), || {
                 let a = &r.annual;
                 println!("{:.0} kWh/yr  ·  {:.0} kWh/kWp  ·  PR {:.1} %  ·  {:.2} kWp DC / {:.1} kW AC", a.ac_kwh, a.specific_yield_kwh_kwp, a.performance_ratio * 100.0, a.dc_kwp, a.ac_kw);
+                let b = &r.balance;
+                if b.load_kwh > 0.0 || b.batt_charge_kwh > 0.0 { println!("Consumption {:.0} kWh · import {:.0} · export {:.0} · self-consumption {:.1} % · autarky {:.1} %", b.load_kwh, b.import_kwh, b.export_kwh, b.self_consumption_rate * 100.0, b.autarky * 100.0); }
+                if let Some(f) = &r.finance { println!("NPV {:.0} {} · IRR {} · payback {}", f.npv, f.currency, f.irr_pct.map_or("—".into(), |x| format!("{x:.1} %")), f.payback_years.map_or("—".into(), |x| format!("{x:.1} y"))); }
                 for w in &r.warnings { println!("note: {}", w.text); }
             });
         }
@@ -131,8 +154,109 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
         Cmd::Undo { file } => { match app::undo(&file)? { Some(_) => println!("Undone."), None => println!("Nothing to undo.") } }
         Cmd::History { file, limit } => { for (seq, op, at) in app::history(&file, limit)? { println!("{seq:>5}  {at}  {op}"); } }
         Cmd::Export { file, dest } => { app::export_copy(&file, &dest)?; println!("Wrote {}", dest.display()); }
+        Cmd::Section { file, section, value } => {
+            let text = if std::path::Path::new(&value).is_file() { std::fs::read_to_string(&value).map_err(|x| app::AppError { code: "FILE_READ", message: x.to_string() })? } else { value };
+            let v: Value = serde_json::from_str(&text).map_err(|x| app::AppError { code: "INVALID_ARGUMENT", message: format!("value: {x}") })?;
+            let r = api(&"set_section".to_string(), serde_json::json!({"file": file, "section": section, "value": v}))?;
+            print(j, &r, || { println!("Updated {section}."); issues(&r["issues"]); });
+        }
+        Cmd::Equipment { file, kind, spec } => {
+            let text = std::fs::read_to_string(&spec).map_err(|x| app::AppError { code: "FILE_READ", message: x.to_string() })?;
+            let rec: Value = serde_json::from_str(&text).map_err(|x| app::AppError { code: "INVALID_ARGUMENT", message: x.to_string() })?;
+            let r = app::plant_ops::add_equipment(&file, &kind, &rec)?;
+            print(j, &r, || println!("Added {kind} {} ({} {})", r["id"].as_str().unwrap_or(""), r["manufacturer"].as_str().unwrap_or(""), r["model"].as_str().unwrap_or("")));
+        }
+        Cmd::Load { file, source, unit } => { let r = app::plant_ops::import_load_series(&file, &source, &unit)?; print(j, &r, || println!("Imported {} values ({} min) — {:.0} kWh/yr", r["values"], r["step_minutes"], r["annual_kwh"].as_f64().unwrap_or(0.0))); }
+        Cmd::Stringing { file } => {
+            let r = app::plant_ops::stringing(&file)?;
+            print(j, &r, || {
+                println!("Stringing: {}", if r["manual"].as_bool() == Some(true) { "manual" } else { "derived from the arrays" });
+                for u in r["inverters"].as_array().into_iter().flatten() {
+                    println!("  {} [{}]{}", u["unit"]["name"].as_str().unwrap_or(""), u["unit"]["id"].as_str().unwrap_or(""), if u["has_battery_port"] == Value::Bool(true) { "  (battery port)" } else { "" });
+                    for (i, m) in u["unit"]["mppts"].as_array().into_iter().flatten().enumerate() {
+                        let g: Vec<String> = m.as_array().into_iter().flatten().map(|g| format!("{} × {} modules ({})", g["strings"], g["modules_per_string"], g["array_id"].as_str().unwrap_or(""))).collect();
+                        println!("    MPPT {}: {}", i + 1, if g.is_empty() { "—".into() } else { g.join(" + ") });
+                    }
+                }
+                issues(&r["issues"]);
+            });
+        }
+        Cmd::Balance { file } => {
+            let r = app::latest_results(&file)?.ok_or_else(|| app::AppError { code: "NO_RESULTS", message: "No results yet. Run `solarcraft simulate` first.".into() })?;
+            print(j, &serde_json::json!({"balance": r.balance, "electrical": r.electrical}), || balance(&r));
+        }
+        Cmd::Hours { file, day, top, start, count } => {
+            let q = serde_json::json!({"day_of_year": day, "top": top, "start": start, "count": count});
+            let r = app::plant_ops::results_hours(&file, &q)?;
+            print(j, &r, || {
+                println!("{:>5} {:>3} {:>3} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7}  {}", "idx", "mo", "day", "hour", "PV AC", "load", "→batt", "batt→", "import", "export", "SOC%", "backup", "curtail", "");
+                for h in r["hours"].as_array().into_iter().flatten() {
+                    let g = |k: &str| h[k].as_f64().unwrap_or(0.0);
+                    println!("{:>5} {:>3} {:>3} {:>5} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {:>7.0} {:>7.0}  {}", g("index"), g("month"), g("day_of_year"), format!("{:02}:00", g("hour") as u32), g("pv_ac_wh"), g("load_wh"), g("batt_charge_wh"), g("batt_discharge_wh"), g("import_wh"), g("export_wh"), g("soc_pct"), g("backup_wh"), g("curtailed_wh"), if h["outage"] == Value::Bool(true) { "OUTAGE" } else { "" });
+                }
+                println!("(Wh per hour; totals kWh: {})", r["totals_kwh"]);
+            });
+        }
+        Cmd::Cashflow { file } => {
+            let r = app::latest_results(&file)?.ok_or_else(|| app::AppError { code: "NO_RESULTS", message: "No results yet. Run `solarcraft simulate` first.".into() })?;
+            let f = r.finance.clone().unwrap_or_default();
+            print(j, &f, || {
+                println!("Bill year 1 without PV: {:.0} {c}; with PV: {:.0} {c} (export credit {:.0})", f.bill_without.total, f.bill_with.total, f.bill_with.export_credit, c = f.currency);
+                println!("{:>4} {:>12} {:>12} {:>10} {:>12} {:>10} {:>12} {:>13}", "year", "savings", "export", "O&M", "replacement", "loan", "cash flow", "cumulative");
+                for y in &f.years { println!("{:>4} {:>12.0} {:>12.0} {:>10.0} {:>12.0} {:>10.0} {:>12.0} {:>13.0}", y.year, y.savings, y.export_revenue, y.om, y.replacements, y.loan, y.cash_flow, y.cumulative); }
+                println!("Investment {:.0} · NPV {:.0} · IRR {} · payback {} · LCOE {:.3}/kWh", f.investment, f.npv, f.irr_pct.map_or("—".into(), |x| format!("{x:.1} %")), f.payback_years.map_or("—".into(), |x| format!("{x:.1} y")), f.lcoe_per_kwh);
+            });
+        }
+        Cmd::Variant { file, name } => { let v = app::plant_ops::create_variant(&file, &name)?; print(j, &v, || println!("Saved variant {} ({})", v.name, v.id)); }
+        Cmd::Compare { file } => {
+            let rows = app::plant_ops::compare_variants(&file)?;
+            print(j, &rows, || {
+                println!("{:<24} {:>7} {:>6} {:>9} {:>7} {:>6} {:>6} {:>9} {:>14} {:>7} {:>7}", "variant", "kWp", "kWh", "AC kWh", "kWh/kWp", "SC %", "aut %", "import", "NPV", "IRR %", "payback");
+                for r in &rows {
+                    if let Some(e) = &r.error { println!("{:<24} error: {e}", r.name); continue; }
+                    println!("{:<24} {:>7.2} {:>6.1} {:>9.0} {:>7.0} {:>6.1} {:>6.1} {:>9.0} {:>14.0} {:>7} {:>7}", r.name, r.dc_kwp, r.battery_kwh, r.ac_kwh, r.specific_yield, r.self_consumption_pct, r.autarky_pct, r.import_kwh, r.npv,
+                             r.irr_pct.map_or("—".into(), |x| format!("{x:.1}")), r.payback_years.map_or("—".into(), |x| format!("{x:.1}")));
+                }
+            });
+        }
+        Cmd::Call { method, params } => {
+            let p: Value = serde_json::from_str(&params).map_err(|x| app::AppError { code: "INVALID_ARGUMENT", message: format!("params: {x}") })?;
+            let r = api(&method, p)?;
+            println!("{}", serde_json::to_string_pretty(&r).unwrap());
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn api(method: &String, params: Value) -> Result<Value, app::AppError> { app::api::dispatch(method, &params, &mut |_| true) }
+
+fn issues(v: &Value) {
+    for i in v.as_array().into_iter().flatten() { println!("{:<8} {:<20} {}", i["severity"].as_str().unwrap_or("").to_uppercase(), i["code"].as_str().unwrap_or(""), i["message"].as_str().unwrap_or("")); }
+}
+
+fn balance(r: &solarcraft_app::SimResultExt) {
+    let b = &r.balance;
+    println!("Energy balance (kWh)                         Sources            Uses");
+    println!("  PV DC after DC losses                    {:>9.1}", b.pv_dc_kwh);
+    println!("  Grid import                              {:>9.1}", b.import_kwh);
+    println!("  Consumption served                                       {:>9.1}", b.load_served_kwh);
+    println!("  Inverter standby                                         {:>9.1}", b.standby_kwh);
+    println!("  Grid export                                              {:>9.1}", b.export_kwh);
+    println!("  Curtailed (export limit / outage)                        {:>9.1}", b.curtailed_kwh);
+    println!("  Inverter clipping                                        {:>9.1}", b.clipped_kwh);
+    println!("  Inverter conversion                                      {:>9.1}", b.inverter_loss_kwh);
+    println!("  AC wiring and availability                               {:>9.1}", b.ac_wiring_loss_kwh);
+    println!("  Battery conversion                                       {:>9.1}", b.batt_conversion_loss_kwh);
+    println!("  Battery self-discharge                                   {:>9.1}", b.self_discharge_kwh);
+    println!("  Change in stored energy                                  {:>9.1}", b.stored_delta_kwh);
+    println!("  largest hourly residual: {:.1e} Wh", b.max_abs_residual_wh);
+    println!("PV AC {:.0} kWh: to load {:.0}, to battery {:.0}; battery out {:.0} ({:.0} full cycles); self-consumption {:.1} %, autarky {:.1} %", b.pv_ac_kwh, b.pv_to_load_kwh, b.batt_charge_kwh - b.batt_charge_grid_kwh, b.batt_discharge_kwh, b.battery_full_cycles, b.self_consumption_rate * 100.0, b.autarky * 100.0);
+    if b.outage_hours > 0 { println!("Outages {} h: unserved critical load {:.2} kWh, non-critical load shed {:.1} kWh", b.outage_hours, b.unserved_kwh, b.shed_noncritical_kwh); }
+    println!("\nInverter / MPPT                                   kWp     DC kWh   mismatch   limits   limited h");
+    for u in &r.electrical {
+        println!("  {:<46} {:>6.2} {:>9.0}   DC/AC {:.2}  AC {:.0} kWh  clipped {:.0} kWh", u.name, u.stc_kw, u.dc_kwh, u.dc_ac_ratio, u.ac_kwh, u.clipped_kwh);
+        for m in &u.mppts { println!("    MPPT {} {:<38} {:>6.2} {:>9.0} {:>9.1} {:>8.1} {:>9}", m.index, m.strings, m.stc_kw, m.dc_kwh, m.mismatch_kwh, m.limit_loss_kwh, m.limited_hours); }
+    }
 }
 
 fn weather_summary(s: &app::WeatherSummary) {

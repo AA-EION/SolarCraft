@@ -50,6 +50,23 @@ fn image_para(svg: &str, width_emu: u32) -> Result<Paragraph, String> {
     Ok(Paragraph::new().add_run(Run::new().add_image(Pic::new(&png).size(width_emu, height_emu))))
 }
 
+fn table_dyn(header: Option<&Vec<String>>, rows: &[Vec<String>]) -> Table {
+    let n = header.map(|h| h.len()).or_else(|| rows.first().map(|r| r.len())).unwrap_or(2).max(1);
+    let first = if n == 2 { 5600 } else { 9600 - 1600 * (n - 1) };
+    let widths: Vec<usize> = (0..n).map(|i| if i == 0 { first } else { (9600 - first) / (n - 1).max(1) }).collect();
+    let mk_row = |cells: &[String], bold: bool| TableRow::new(cells.iter().enumerate().map(|(i, c)| {
+        let mut r = text(c).size(18);
+        if bold { r = r.bold(); }
+        let mut p = Paragraph::new().add_run(r);
+        if i > 0 { p = p.align(AlignmentType::Right); }
+        TableCell::new().add_paragraph(p).width(widths[i.min(n - 1)], WidthType::Dxa)
+    }).collect());
+    let mut t: Vec<TableRow> = vec![];
+    if let Some(h) = header { t.push(mk_row(h, true)); }
+    for r in rows { t.push(mk_row(r, false)); }
+    Table::new(t).set_grid(widths.clone()).width(9600, WidthType::Dxa)
+}
+
 pub fn render(v: &View) -> Result<Vec<u8>, String> {
     let s = &v.s;
     let width = 6_000_000; // ≈ 16.7 cm
@@ -83,6 +100,11 @@ pub fn render(v: &View) -> Result<Vec<u8>, String> {
         .add_paragraph(heading(s["assumptions"]))
         .add_table(table_of(None, &v.assumption_rows))
         .add_paragraph(Paragraph::new().add_run(text(&format!("{}: ", s["models"])).bold().size(19)).add_run(text(&v.models_text).size(19)));
+    for sec in &v.sections {
+        doc = doc.add_paragraph(heading(&sec.title));
+        if !sec.intro.is_empty() { doc = doc.add_paragraph(Paragraph::new().add_run(text(&sec.intro).size(18).color(MUTED))); }
+        doc = doc.add_table(table_dyn(if sec.header.is_empty() { None } else { Some(&sec.header) }, &sec.rows));
+    }
     if !v.notes.is_empty() {
         doc = doc.add_paragraph(heading(s["notes"]));
         for n in &v.notes { doc = doc.add_paragraph(para(&format!("• {n}"))); }

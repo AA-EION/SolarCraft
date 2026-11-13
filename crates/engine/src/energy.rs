@@ -73,7 +73,14 @@ pub struct Flows {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Balance {
     pub pv_dc_kwh: f64,
+    /// PV energy delivered to the AC bus (for a DC-coupled battery, excluding PV that charged it).
     pub pv_ac_kwh: f64,
+    /// PV energy that entered the battery on the DC side (DC coupling).
+    #[serde(default)]
+    pub pv_to_battery_dc_kwh: f64,
+    /// Usable PV generation: AC to the bus plus DC-side battery charging.
+    #[serde(default)]
+    pub pv_generation_kwh: f64,
     pub clipped_kwh: f64,
     pub curtailed_kwh: f64,
     pub inverter_loss_kwh: f64,
@@ -213,6 +220,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
         let e_before = batt.as_ref().map_or(0.0, |x| x.acc.total());
         let (mut inv_loss, mut clipped, mut ac_inv_out, mut hy_ac) = (0.0, 0.0, 0.0, 0.0);
         let (mut ch_in, mut ch_grid, mut dis_out, mut to_grid, mut conv_loss) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        let mut pv_dc_to_batt = 0.0;
         // Non-hybrid units.
         let mut ac_other = 0.0;
         for (i, u) in units.iter().enumerate() {
@@ -240,6 +248,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
                 let want_cell = (surplus_dc.min(port_ch) * eta).min(bt.ch_limit() * bt.eta_cell).min(bt.acc.room(&bt.st.charge_priority));
                 let got = bt.acc.charge(want_cell, &bt.st.charge_priority);
                 pv_to_batt_dc = got / eta;
+                pv_dc_to_batt = pv_to_batt_dc;
                 ch_in += pv_to_batt_dc; conv_loss += pv_to_batt_dc - got;
                 dc_in = pv_h - pv_to_batt_dc;
             } else if !full_feed_in || outage {
@@ -328,7 +337,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
         } else if balance > 0.0 {
             export = balance;
             if let Some(l) = export_limit { if export > l { curtailed = export - l; export = l; } }
-        } else {
+        } else if balance < -1e-9 {
             import = -balance;
         }
         if full_feed_in && !outage { import += served_target; }
@@ -355,7 +364,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
         }
         f.outage.push(outage);
         let kw = 1e-3;
-        b.pv_dc_kwh += pv_dc * kw; b.pv_ac_kwh += pv_ac_h * kw; b.clipped_kwh += clipped * kw; b.curtailed_kwh += curtailed * kw; b.inverter_loss_kwh += inv_loss * kw;
+        b.pv_dc_kwh += pv_dc * kw; b.pv_ac_kwh += pv_ac_h * kw; b.pv_to_battery_dc_kwh += pv_dc_to_batt * kw; b.clipped_kwh += clipped * kw; b.curtailed_kwh += curtailed * kw; b.inverter_loss_kwh += inv_loss * kw;
         b.ac_wiring_loss_kwh += ac_wiring * kw; b.standby_kwh += standby * kw; b.load_kwh += load * kw; b.load_served_kwh += served * kw; b.pv_to_load_kwh += pv_to_load * kw;
         b.batt_charge_kwh += (ch_in + ch_grid) * kw; b.batt_charge_grid_kwh += ch_grid * kw; b.batt_discharge_kwh += dis_out * kw; b.batt_to_grid_kwh += to_grid * kw;
         b.batt_conversion_loss_kwh += conv_loss * kw; b.self_discharge_kwh += sd * kw; b.stored_delta_kwh += (e_after - e_before) * kw;
@@ -363,7 +372,9 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
         b.outage_hours += u32::from(outage);
         b.max_abs_residual_wh = b.max_abs_residual_wh.max(resid.abs());
     }
-    b.self_consumption_rate = if b.pv_ac_kwh > 0.0 { ((b.pv_ac_kwh - b.export_kwh - b.curtailed_kwh).max(0.0) / b.pv_ac_kwh).min(1.0) } else { 0.0 };
+    b.pv_generation_kwh = b.pv_ac_kwh + b.pv_to_battery_dc_kwh;
+    let pv_exported = (b.export_kwh - b.batt_to_grid_kwh).max(0.0);
+    b.self_consumption_rate = if b.pv_generation_kwh > 0.0 { ((b.pv_generation_kwh - pv_exported - b.curtailed_kwh).max(0.0) / b.pv_generation_kwh).min(1.0) } else { 0.0 };
     b.autarky = if b.load_kwh > 0.0 { (1.0 - b.import_kwh.min(b.load_kwh) / b.load_kwh).max(0.0) } else { 0.0 };
     if let Some(bt) = &batt {
         let usable: f64 = bt.acc.cap.iter().sum();

@@ -1,0 +1,2 @@
+{"id":"user-bat-10","manufacturer":"Datasheet entry","model":"LFP 10 kWh","chemistry":"lfp","capacity_kwh":10.0,"nominal_voltage_v":204.8,
+ "soc_min_pct":5,"soc_max_pct":100,"p_charge_max_kw":5,"p_discharge_max_kw":5,"roundtrip_efficiency":0.95,"self_discharge_pct_per_month":2,"cycle_life":6000}

@@ -83,7 +83,7 @@ fn roof_layout_drives_easy_mode_size_and_detailed_capacity() {
     assert_eq!(r.modules.len(), 20);
     let pmp = p.library.modules[0].pmp_stc();
     let n = (p.arrays[0].modules_per_string.value * p.arrays[0].strings.value) as usize;
-    assert!(n <= 20 && n >= 18, "derived layout uses {n} modules");
+    assert!((18..=20).contains(&n), "derived layout uses {n} modules");
     assert!((p.arrays[0].target_kwp.value - n as f64 * pmp / 1000.0).abs() < 1e-3); // rounded to watts
     // Detailed mode: more modules than fit is an error.
     p.set_mode(DesignMode::Detailed);

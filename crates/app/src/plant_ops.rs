@@ -192,7 +192,7 @@ pub fn results_hours(path: &Path, q: &Value) -> Result<Value> {
 pub fn create_variant(path: &Path, name: &str) -> Result<Variant> {
     let (mut s, mut p) = open(path)?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let id = format!("var-{}", p.variants.len() + 1 + p.variants.iter().filter_map(|v| v.id.strip_prefix("var-").and_then(|x| x.parse::<usize>().ok())).max().unwrap_or(0));
+    let id = format!("var-{}", 1 + p.variants.iter().filter_map(|v| v.id.strip_prefix("var-").and_then(|x| x.parse::<usize>().ok())).max().unwrap_or(0));
     let v = Variant { id, name: name.to_string(), created_unix: now, design: p.design_snapshot() };
     p.variants.push(v.clone());
     save(&mut s, &p, &format!("variant {name}"))?;

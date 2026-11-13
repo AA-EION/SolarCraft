@@ -30,6 +30,81 @@ struct FileArg {
     file: String,
 }
 
+#[derive(Deserialize, serde::Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum Section { Grid, Loads, Storage, Tariff, Economics, Electrical, Losses, Simulation, Customer, Site }
+
+#[derive(Deserialize, JsonSchema)]
+struct SectionArgs {
+    file: String,
+    /// Section to replace as a whole. Shapes: see `get_project` (e.g. storage: {battery_id, units, coupling: {kind: dc_hybrid, unit_id} | {kind: ac_coupled, battery_inverter_id}, model: simple|detailed, soc_min_pct, soc_max_pct, initial_soc_pct, backup_reserve_pct, grid_services_pct, charge_priority: [backup, self_consumption, grid_services], grid_charge_backup, grid_service: {kind: none|export_window|peak_shaving, ...}, outages: [{start_hour, hours}]}; storage may be null).
+    section: Section,
+    value: Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum Kind { Module, Inverter, Battery, BatteryInverter }
+impl Kind { fn as_str(&self) -> &'static str { match self { Kind::Module => "module", Kind::Inverter => "inverter", Kind::Battery => "battery", Kind::BatteryInverter => "battery_inverter" } } }
+
+#[derive(Deserialize, JsonSchema)]
+struct EquipmentArgs {
+    file: String,
+    kind: Kind,
+    /// The record in SolarCraft's equipment schema (same for user, imported and catalog items). Modules are fitted on save.
+    record: Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct StringingArgs {
+    file: String,
+    /// false: return to stringing derived from the arrays.
+    manual: bool,
+    /// [{id, name, inverter_id, mppts: [[{array_id, modules_per_string, strings}], ...]}]
+    #[serde(default)]
+    inverters: Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct HoursArgs {
+    file: String,
+    /// Local day of the reference year, 1–365 (returns its 24 hours).
+    day_of_year: Option<u32>,
+    /// Channel to rank hours by: import, export, clipped, curtailed, batt_discharge, batt_charge, unserved, load, pv_ac, or -soc (lowest SOC first).
+    top: Option<String>,
+    start: Option<u32>,
+    count: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct VariantArgs { file: String, name: String }
+
+#[derive(Deserialize, JsonSchema)]
+struct VariantIdArgs { file: String, id: String, #[serde(default)] keep_current: bool }
+
+#[derive(Deserialize, JsonSchema)]
+struct LibraryArgs {
+    /// Filter by kind.
+    kind: Option<Kind>,
+    /// Text search across the record.
+    query: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct LibrarySaveArgs { kind: Kind, record: Value }
+
+#[derive(Deserialize, JsonSchema)]
+struct PinArgs { file: String, kind: Kind, id: String }
+
+#[derive(Deserialize, JsonSchema)]
+struct LoadArgs {
+    file: String,
+    /// CSV/text file in the workspace: one value per line (8760 hourly … 525600 minute values).
+    source: String,
+    /// "kwh" (energy per interval, default) or "kw" (average power).
+    unit: Option<String>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct CreateArgs {
     /// New project file name relative to the workspace, ending in `.solarcraft`.
@@ -244,7 +319,7 @@ impl SolarCraftMcp {
     async fn simulate(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;
         match tokio::task::spawn_blocking(move || app::simulate(&f, |_| true)).await {
-            Ok(Ok(r)) => ok(json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings})),
+            Ok(Ok(r)) => ok(app::api::summary(&r)),
             Ok(Err(e)) => app_err(e), Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }
@@ -289,6 +364,87 @@ impl SolarCraftMcp {
         }
     }
 
+    #[tool(description = "Replace a plant section (grid, loads, storage, tariff, economics, electrical, losses, simulation, customer, site) in one validated change. Returns the stored section and all validation issues. Undo with `undo`.")]
+    async fn set_section(&self, Parameters(a): Parameters<SectionArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let sec = serde_json::to_value(&a.section).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        self.api("set_section", json!({"file": f, "section": sec, "value": a.value}))
+    }
+
+    #[tool(description = "Add or replace equipment in the project library (works offline; same schema as library and catalog items). kind: module | inverter | battery | battery_inverter.")]
+    async fn add_equipment(&self, Parameters(a): Parameters<EquipmentArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("add_equipment", json!({"file": f, "kind": a.kind.as_str(), "record": a.record}))
+    }
+
+    #[tool(description = "Show the inverter/MPPT stringing used by the simulation (manual or derived) with its electrical checks (string voltage at −10/70 °C, MPPT current, DC/AC ratio, roof capacity).")]
+    async fn get_stringing(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("stringing", json!({"file": f}))
+    }
+
+    #[tool(description = "Assign strings to inverter MPPT inputs (manual=true with inverters), or return to derived stringing (manual=false). Returns the checks; errors block simulation.")]
+    async fn set_stringing(&self, Parameters(a): Parameters<StringingArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("set_stringing", json!({"file": f, "manual": a.manual, "inverters": a.inverters}))
+    }
+
+    #[tool(description = "Inspect the hours behind the totals: one local day, the top hours of a channel, or a range. Rows carry PV, consumption, battery charge/discharge, SOC, reserve allocations, import, export, curtailment and the balance residual (Wh).")]
+    async fn results_hours(&self, Parameters(a): Parameters<HoursArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("results_hours", json!({"file": f, "day_of_year": a.day_of_year, "top": a.top, "start": a.start, "count": a.count}))
+    }
+
+    #[tool(description = "Year-1 bills with and without the plant and the cash flow (savings, export revenue, O&M, replacements, loan, cumulative) with NPV, IRR, payback and LCOE from the latest run.")]
+    async fn cash_flow(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("cash_flow", json!({"file": f}))
+    }
+
+    #[tool(description = "Save the current design as a named variant.")]
+    async fn create_variant(&self, Parameters(a): Parameters<VariantArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("create_variant", json!({"file": f, "name": a.name}))
+    }
+
+    #[tool(description = "Make a saved variant the active design (keep_current saves the current design first).")]
+    async fn apply_variant(&self, Parameters(a): Parameters<VariantIdArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("apply_variant", json!({"file": f, "id": a.id, "keep_current": a.keep_current}))
+    }
+
+    #[tool(description = "Simulate the current design and every variant with their own pinned inputs and compare yield, self-consumption, autarky, grid exchange, NPV, IRR, payback and LCOE.")]
+    async fn compare_variants(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let ws = self.workspace.clone();
+        match tokio::task::spawn_blocking(move || { let _ = ws; app::api::dispatch("compare_variants", &json!({"file": f}), &mut |_| true) }).await {
+            Ok(Ok(v)) => ok(v), Ok(Err(e)) => app_err(e), Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
+        }
+    }
+
+    #[tool(description = "Search the workspace equipment library (library.sqlite in the workspace; offline, versioned).")]
+    async fn library_list(&self, Parameters(a): Parameters<LibraryArgs>) -> Result<CallToolResult, ErrorData> {
+        self.api("library_list", json!({"library": self.library(), "kind": a.kind.map(|k| k.as_str()), "query": a.query}))
+    }
+
+    #[tool(description = "Save an equipment record to the workspace library as a new revision (validated; modules are fitted).")]
+    async fn library_save(&self, Parameters(a): Parameters<LibrarySaveArgs>) -> Result<CallToolResult, ErrorData> {
+        self.api("library_save", json!({"library": self.library(), "kind": a.kind.as_str(), "record": a.record}))
+    }
+
+    #[tool(description = "Copy a library record into a project (the project keeps its own copy and never depends on the library).")]
+    async fn library_pin(&self, Parameters(a): Parameters<PinArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("library_pin", json!({"library": self.library(), "file": f, "kind": a.kind.as_str(), "id": a.id}))
+    }
+
+    #[tool(description = "Import a metered consumption series from a workspace file into the project.")]
+    async fn import_load(&self, Parameters(a): Parameters<LoadArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let src = self.path(&a.source, false, true)?;
+        self.api("import_load", json!({"file": f, "source": src, "unit": a.unit.unwrap_or_else(|| "kwh".into())}))
+    }
+
     #[tool(description = "Undo the last saved change to the project.")]
     async fn undo(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;
@@ -302,12 +458,19 @@ impl SolarCraftMcp {
     }
 }
 
+impl SolarCraftMcp {
+    fn library(&self) -> PathBuf { self.workspace.join("library.sqlite") }
+    fn api(&self, method: &str, params: Value) -> Result<CallToolResult, ErrorData> {
+        match app::api::dispatch(method, &params, &mut |_| true) { Ok(v) => ok(v), Err(e) => app_err(e) }
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for SolarCraftMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("SolarCraft PV design tools. Typical flow: create_project → fetch_weather_pvgis (confirm_network) or import_weather → validate → simulate → explain. Fields are set by JSON pointer with set_fields; every saved change can be undone. Units: SI, angles in degrees, azimuth clockwise from north (180 = south).")
+            .with_instructions("SolarCraft PV design tools. Typical flow: create_project → fetch_weather_pvgis (confirm_network) or import_weather → set_section loads/grid/tariff → add_equipment or library_pin → set_roof → set_stringing → set_section storage → validate → simulate → explain / results_hours / cash_flow → create_variant / compare_variants → export_report. Fields are set by JSON pointer with set_fields; every saved change can be undone. Units: SI, angles in degrees, azimuth clockwise from north (180 = south).")
     }
 }
 

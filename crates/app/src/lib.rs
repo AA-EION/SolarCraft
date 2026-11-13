@@ -178,6 +178,17 @@ fn today_utc() -> (i32, u8, u8) {
     (y as i32, m as u8, d as u8)
 }
 
+/// The report's view model (every value as printed), for previews and traceability checks.
+pub fn report_view(path: &Path, lang: &str) -> Result<solarcraft_report::View> {
+    let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}'")))?;
+    let (s, p) = open(path)?;
+    let r = latest_results(path)?.ok_or_else(|| e("NO_RESULTS", "No results yet. Run the simulation first."))?;
+    let (w, _) = load_weather(&s, &p)?;
+    let input = solarcraft_report::ReportInput { project: &p, result: &r, lang: l, date: today_utc(), designer: String::new(),
+        weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied } };
+    Ok(solarcraft_report::build_view(&input))
+}
+
 /// Generate the customer report from the latest stored results.
 /// `lang`: en, es, de or pt-BR.
 pub fn generate_report(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str) -> Result<ReportOutput> {

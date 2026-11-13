@@ -263,8 +263,12 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     let load_f32: Vec<f32> = load_w.iter().map(|&x| x as f32).collect();
     let without = finance::bill(&p.tariff, &load_f32, &zero, &local_hour);
     let with = finance::bill(&p.tariff, &en.flows.import, &en.flows.export, &local_hour);
-    let fin = finance::cash_flow(&p.tariff, &p.economics, &finance::Plant { dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_ac_kwh }, without, with);
+    let fin = finance::cash_flow(&p.tariff, &p.economics, &finance::Plant { dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_generation_kwh }, without, with);
     progress(1.0);
+    if en.balance.pv_to_battery_dc_kwh > 0.0 {
+        warnings.push(Note { code: "DC_BATTERY_LEDGER".into(), subject: String::new(), value: en.balance.pv_to_battery_dc_kwh,
+            text: format!("The loss waterfall shows PV production as if all of it were converted by the inverters; {:.0} kWh charged the DC-coupled battery before conversion (see the energy balance).", en.balance.pv_to_battery_dc_kwh) });
+    }
 
     let mk = |keys: &[(&str, &str)], vals: &[f64], scale: f64| -> Vec<Step> {
         let mut out: Vec<Step> = vec![];

@@ -86,6 +86,13 @@
 #v(4pt)
 #text(size: 9pt)[*#s.models.* #d.models_text]
 
+#for sec in d.sections [
+  = #sec.title
+  #if sec.intro != "" [#text(size: 9pt, fill: muted, sec.intro)]
+  #let ncol = if sec.rows.len() > 0 { sec.rows.at(0).len() } else { 2 }
+  #grid-table(sec.rows, widths: (1fr,) + range(ncol - 1).map(_ => auto), header: if sec.header.len() > 0 { sec.header } else { none }, align-cols: (left,) + range(ncol - 1).map(_ => right))
+]
+
 #if d.notes.len() > 0 [
   = #s.notes
   #for n in d.notes [- #n]
