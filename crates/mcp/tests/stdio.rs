@@ -51,6 +51,19 @@ fn design_flow_and_safety() {
     assert_eq!(r["result"]["isError"], json!(true));
     assert_eq!(r["result"]["structuredContent"]["code"], json!("WEATHER_MISSING"));
 
+    // Offline flow to a report.
+    let r = c.call("use_demo_weather", json!({"file": "a.solarcraft"}));
+    assert_eq!(r["result"]["isError"], json!(false), "{r}");
+    let r = c.call("simulate", json!({"file": "a.solarcraft"}));
+    assert!(r["result"]["structuredContent"]["annual"]["ac_kwh"].as_f64().unwrap() > 1000.0, "{r}");
+    let r = c.call("export_report", json!({"file": "a.solarcraft", "output": "informe.pdf", "format": "pdf", "lang": "es"}));
+    assert_eq!(r["result"]["isError"], json!(false), "{r}");
+    assert!(std::fs::read(ws.join("informe.pdf")).unwrap().starts_with(b"%PDF"));
+    let r = c.call("export_report", json!({"file": "a.solarcraft", "output": "informe.pdf", "format": "pdf"}));
+    assert!(r["error"].is_object(), "must not overwrite without consent: {r}");
+    let r = c.call("export_report", json!({"file": "a.solarcraft", "output": "../out.pdf", "format": "pdf"}));
+    assert!(r["error"].is_object());
+
     // Safety: path escapes, wrong extension, network without consent.
     let r = c.call("get_project", json!({"file": "../etc/passwd.solarcraft"}));
     assert!(r["error"].is_object(), "{r}");

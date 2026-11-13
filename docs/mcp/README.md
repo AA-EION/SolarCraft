@@ -34,6 +34,8 @@ target/release/solarcraft-mcp --workspace /path/to/projects
 | `validate` | none | Issues with stable `code`, `severity` and `pointer` |
 | `fetch_weather_pvgis` | **network** + saves | Requires `confirm_network: true`; sends only lat/lon to PVGIS (EC JRC) |
 | `import_weather` | saves | EPW or saved PVGIS JSON from inside the workspace |
+| `use_demo_weather` | saves | Offline clear-sky demo data (labelled; overestimates yield) |
+| `export_report` | creates a file | PDF or DOCX in en/es/de/pt-BR inside the workspace; refuses to overwrite unless `overwrite: true` |
 | `add_module` | saves | Datasheet → CEC 6-parameter fit, with fit-quality report |
 | `simulate` | stores results | Annual hourly simulation |
 | `explain` | none | Irradiation and energy loss waterfalls, monthly table |

@@ -202,6 +202,12 @@ impl SolarCraftMcp {
         match app::import_weather(&f, &src) { Ok(s) => ok(to_value(&s)), Err(e) => app_err(e) }
     }
 
+    #[tool(description = "Attach offline clear-sky demonstration weather (no network). Overestimates yield; for trying the workflow only.")]
+    async fn use_demo_weather(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        match app::use_demo_weather(&f) { Ok(s) => ok(to_value(&s)), Err(e) => app_err(e) }
+    }
+
     #[tool(description = "Add or replace a user-authored PV module from datasheet values (STC Voc, Isc, Vmp, Imp in V/A; alpha_sc A/K; beta_voc V/K; gamma_pmp %/K). Fits the CEC six-parameter model and reports fit quality.")]
     async fn add_module(&self, Parameters(a): Parameters<ModuleArgs>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;

@@ -11,9 +11,9 @@ Status on 2026-11-12. The row IDs refer to [feature-matrix.tsv](../discovery/fea
 | Explain | Irradiation and energy waterfalls that close exactly; monthly table; coded notes | `crates/engine/tests/ledger.rs` | SIM-012, RPT-007 (partial) |
 | Report | Customer report as PDF (Typst, tagged) and editable DOCX, in en/es/de/pt-BR | `crates/report/tests/render.rs`; LibreOffice opens the DOCX | RPT-001, RPT-011 (JSON via `--json`) |
 | Automation | CLI and MCP server (stdio) over the same app layer | `crates/mcp/tests/stdio.rs` | MCP-001, MCP-002 (partial), MCP-003 (dry run, undo), MCP-005 |
-| Native shells | WinUI 3 (x64, ARM64) and SwiftUI (universal) build and pass self-tests in CI; **still show the spike screen, not the project workflow** | CI run 43307449143 | — |
+| Native shells | WinUI 3 (x64, ARM64) and SwiftUI (universal): project → site & weather (consented PVGIS, EPW/PVGIS import, offline demo) → design (easy/detailed, calculated-value hints, checks) → results (KPIs, monthly chart, loss table) → report export; UI in en/es/de/pt-BR from one string table in the core | Self-tests run the full offline workflow through the same JSON API (`sc_invoke`) | PRJ-002 (partial), PRJ-006 (partial), PRJ-009 |
 
 ## Remaining for slice 1
-1. Native shells: project workflow screens (site, weather, layout, results, report) on the app layer through the C ABI.
+1. Interactive check of both shells on real desktops: CI proves they build and that the API calls the UI makes work, not the look and feel. Screenshots from a real machine are needed.
 2. 2D roof layout (polygon, setbacks, module placement), starting the IngeTrazo geometry port.
 3. Port SAM's 6-parameter solver so every CEC datasheet fits exactly (SIM-007).
