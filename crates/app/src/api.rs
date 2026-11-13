@@ -58,7 +58,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let m: app::ModuleInput = serde_json::from_value(arg(params, "module")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("module: {e}") })?;
             Ok(v(&app::add_module(&path(params, "file")?, m)?))
         }
-        "simulate" => { let r = app::simulate(&path(params, "file")?, |x| progress(x))?; Ok(json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings})) }
+        "simulate" => { let r = app::simulate(&path(params, "file")?, progress)?; Ok(json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings})) }
         "explain" => match app::latest_results(&path(params, "file")?)? {
             Some(r) => Ok(json!({"annual": r.annual, "irradiance_kwh_m2": r.irradiance_ledger, "energy_kwh": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest, "warnings": r.warnings})),
             None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }),
