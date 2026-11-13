@@ -31,6 +31,14 @@ const char *sc_version(void);
 /* Hourly clear-sky simulation (spike). hourly_ac_w may be NULL or point to >= 8784 doubles. */
 int32_t sc_quick_annual(const ScQuickInput *in, ScAnnualSummary *out, double *hourly_ac_w, size_t hourly_len,
                         ScProgressFn progress, void *user);
+/* Invoke an application method. request: {"method": "...", "params": {...}} (UTF-8 JSON).
+   Returns {"ok": true, "result": ...} or {"ok": false, "error": {"code": "...", "message": "..."}}.
+   The returned string is never NULL and must be released with sc_string_free.
+   Methods: version, create_project, get_project, set_fields, set_mode, validate,
+   fetch_weather_pvgis, import_weather, use_demo_weather, add_module, simulate,
+   explain, export_report, undo, history (same parameters as the MCP tools; absolute paths). */
+char *sc_invoke(const char *request, ScProgressFn progress, void *user);
+void sc_string_free(char *s);
 /* FFI throughput probe: fills buf[i] = i * 0.5 and returns the sum. */
 double sc_fill_probe(double *buf, size_t len);
 /* Deliberately panics inside the core; must return SC_INTERNAL_ERROR, not abort. */

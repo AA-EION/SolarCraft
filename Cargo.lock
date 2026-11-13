@@ -2750,6 +2750,7 @@ dependencies = [
 name = "solarcraft-ffi"
 version = "0.0.1"
 dependencies = [
+ "solarcraft-app",
  "solarcraft-pv",
 ]
 

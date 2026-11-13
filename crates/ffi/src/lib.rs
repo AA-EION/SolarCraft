@@ -2,7 +2,7 @@
 //! C ABI over the SolarCraft core. See `include/solarcraft.h`.
 //! Every entry point catches panics so a core bug never aborts the shell.
 use solarcraft_pv::{diode, inverter, irradiance as irr, spa, temperature};
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const SC_OK: i32 = 0;
@@ -94,6 +94,34 @@ pub extern "C" fn sc_panic_probe() -> i32 {
     match catch_unwind(|| -> i32 { panic!("deliberate panic probe") }) { Ok(v) => v, Err(_) => SC_INTERNAL_ERROR }
 }
 
+/// Invoke an application method with a JSON request
+/// `{"method": "...", "params": {...}}`. Returns a newly allocated UTF-8 JSON
+/// response `{"ok": true, "result": ...}` or `{"ok": false, "error": {...}}`
+/// that the caller must release with [`sc_string_free`]. Never returns NULL.
+///
+/// # Safety
+/// `request` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn sc_invoke(request: *const c_char, progress: ScProgressFn, user: *mut c_void) -> *mut c_char {
+    let out = catch_unwind(AssertUnwindSafe(|| {
+        if request.is_null() { return r#"{"ok":false,"error":{"code":"INVALID_REQUEST","message":"null request"}}"#.to_string(); }
+        match CStr::from_ptr(request).to_str() {
+            Ok(req) => solarcraft_app::api::invoke_json(req, &mut |f| progress.is_none_or(|cb| cb(f, user) != 0)),
+            Err(_) => r#"{"ok":false,"error":{"code":"INVALID_REQUEST","message":"request is not UTF-8"}}"#.to_string(),
+        }
+    })).unwrap_or_else(|_| r#"{"ok":false,"error":{"code":"INTERNAL_ERROR","message":"core panic"}}"#.to_string());
+    CString::new(out.replace('\0', "")).unwrap_or_default().into_raw()
+}
+
+/// Release a string returned by [`sc_invoke`].
+///
+/// # Safety
+/// `s` must come from `sc_invoke` and be freed once.
+#[no_mangle]
+pub unsafe extern "C" fn sc_string_free(s: *mut c_char) {
+    if !s.is_null() { drop(CString::from_raw(s)); }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +132,14 @@ mod tests {
         // Clear-sky upper bound for Madrid: well above a real TMY (~1,600–1,750 kWh/kWp).
         assert!(s.specific_yield_kwh_per_kwp > 1900.0 && s.specific_yield_kwh_per_kwp < 2600.0, "{s:?}");
         assert_eq!(s.steps, 8760);
+    }
+    #[test]
+    fn invoke_roundtrip() {
+        let req = CString::new(r#"{"method":"version","params":{}}"#).unwrap();
+        let out = unsafe { sc_invoke(req.as_ptr(), None, std::ptr::null_mut()) };
+        let s = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { sc_string_free(out) };
+        assert!(s.contains("\"ok\":true") && s.contains("create_project"), "{s}");
     }
     #[test]
     fn cancel_and_invalid_and_panic() {

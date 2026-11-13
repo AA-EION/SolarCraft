@@ -38,3 +38,47 @@ enum Core {
         }
     }
 }
+
+// MARK: - JSON application API (sc_invoke)
+
+struct CoreError: Error, LocalizedError {
+    let code: String
+    let message: String
+    var errorDescription: String? { message }
+}
+
+extension Core {
+    final class Progress: @unchecked Sendable {
+        let handler: (@Sendable (Double) -> Void)?
+        private let lock = NSLock()
+        private var cancelled = false
+        init(_ handler: (@Sendable (Double) -> Void)? = nil) { self.handler = handler }
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    }
+
+    /// Call an application method; returns the raw JSON of `result`.
+    static func invokeRaw(_ method: String, _ params: [String: Any], progress: Progress? = nil) throws -> Data {
+        let request = try JSONSerialization.data(withJSONObject: ["method": method, "params": params])
+        let requestString = String(decoding: request, as: UTF8.self)
+        let box = progress ?? Progress()
+        let user = Unmanaged.passUnretained(box).toOpaque()
+        guard let raw = requestString.withCString({ sc_invoke($0, { fraction, user in
+            let p = Unmanaged<Core.Progress>.fromOpaque(user!).takeUnretainedValue()
+            p.handler?(fraction)
+            return p.isCancelled ? 0 : 1
+        }, user) }) else { throw CoreError(code: "INTERNAL_ERROR", message: "null response") }
+        defer { sc_string_free(raw) }
+        let data = Data(String(cString: raw).utf8)
+        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CoreError(code: "INTERNAL_ERROR", message: "bad response") }
+        if (obj["ok"] as? Bool) == true {
+            return try JSONSerialization.data(withJSONObject: obj["result"] ?? NSNull(), options: [.fragmentsAllowed])
+        }
+        let err = obj["error"] as? [String: Any]
+        throw CoreError(code: err?["code"] as? String ?? "ERROR", message: err?["message"] as? String ?? "Unknown error")
+    }
+
+    static func invoke<T: Decodable>(_ method: String, _ params: [String: Any], as type: T.Type, progress: Progress? = nil) throws -> T {
+        try JSONDecoder().decode(T.self, from: invokeRaw(method, params, progress: progress))
+    }
+}

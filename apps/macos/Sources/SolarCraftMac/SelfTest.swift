@@ -28,6 +28,26 @@ enum SelfTest {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e6
         check(sum == 4_294_934_528 && ms < 5, "1 MiB FFI probe \(ms) ms")
         check(sc_panic_probe() == Int32(SC_INTERNAL_ERROR), "core panic is contained")
+        // Full offline workflow through the JSON API used by the UI.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sc-selftest-\(ProcessInfo.processInfo.processIdentifier)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("t.solarcraft").path
+        let pdf = dir.appendingPathComponent("r.pdf").path
+        do {
+            _ = try Core.invokeRaw("create_project", ["file": file, "name": "Selftest", "latitude": 6.2442, "longitude": -75.5812, "target_kwp": 4.0])
+            let s = try Core.invoke("set_fields", ["file": file, "edits": [["pointer": "/arrays/0/tilt", "value": 12.0]]], as: SetResult.self)
+            check(s.project.arrays[0].tilt.value == 12 && s.project.arrays[0].tilt.isUser, "set_fields decodes into UI models")
+            _ = try Core.invokeRaw("use_demo_weather", ["file": file])
+            _ = try Core.invokeRaw("simulate", ["file": file])
+            let e = try Core.invoke("explain", ["file": file], as: Explain.self)
+            check(e.monthly.count == 12 && e.annual.ac_kwh > 1000, "workflow simulate/explain \(Int(e.annual.ac_kwh)) kWh")
+            let r = try Core.invoke("export_report", ["file": file, "output": pdf, "format": "pdf", "lang": "es"], as: ReportOutput.self)
+            check(r.bytes > 20_000, "report PDF \(r.bytes) bytes")
+            let ui = try Core.invoke("ui_strings", ["lang": "es"], as: [String: String].self)
+            check(ui["simulate"] == "Simular", "UI strings (es)")
+        } catch { check(false, "workflow: \(error.localizedDescription)") }
+        do { _ = try Core.invokeRaw("fetch_weather_pvgis", ["file": file]); check(false, "consent enforced") } catch let e as CoreError { check(e.code == "CONSENT_REQUIRED", "consent enforced") } catch { check(false, "consent enforced") }
+        try? FileManager.default.removeItem(at: dir)
         return failures == 0 ? 0 : 1
     }
 }

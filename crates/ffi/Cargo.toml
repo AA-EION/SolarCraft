@@ -11,3 +11,4 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 solarcraft-pv = { path = "../pv" }
+solarcraft-app = { path = "../app" }

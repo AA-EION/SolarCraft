@@ -14,6 +14,9 @@ use solarcraft_store::Store;
 use solarcraft_weather::{QcReport, Weather};
 use std::path::Path;
 
+pub mod api;
+pub mod ui_strings;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppError { pub code: &'static str, pub message: String }
 impl std::fmt::Display for AppError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{} ({})", self.message, self.code) } }
@@ -85,6 +88,12 @@ pub fn import_weather(path: &Path, file: &Path) -> Result<WeatherSummary> {
     let w = if text.trim_start().starts_with('{') { solarcraft_weather::parse_pvgis_tmy(&text, &name) } else { solarcraft_weather::parse_epw(&text, &name) }
         .map_err(|x| e("WEATHER_PARSE", x))?;
     attach_weather(path, w)
+}
+
+/// Attach offline clear-sky demonstration weather (no network; clearly labelled).
+pub fn use_demo_weather(path: &Path) -> Result<WeatherSummary> {
+    let p = get_project(path)?;
+    attach_weather(path, solarcraft_weather::synthetic_clear_sky(p.site.latitude.value, p.site.longitude.value, 2025))
 }
 
 pub fn load_weather(s: &Store, p: &Project) -> Result<(Weather, String)> {
