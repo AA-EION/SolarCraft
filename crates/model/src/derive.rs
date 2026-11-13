@@ -38,6 +38,20 @@ pub fn derive(p: &mut Project) {
         a.tilt.derive(if a.tilt.is_user() { a.tilt.value } else { default_tilt(lat) });
         if !a.azimuth.is_user() { a.azimuth.derive(if lat >= 0.0 { 180.0 } else { 0.0 }); }
         let Some(module) = p.library.module(&a.module_id.value).cloned() else { continue };
+        // Roof layout: module size comes from the selected module; recompute only when inputs change.
+        if let Some(roof) = a.roof.as_mut() {
+            roof.params.module_length = module.length_m.max(module.width_m);
+            roof.params.module_width = module.length_m.min(module.width_m);
+            let key = serde_json::to_string(&(&roof.face, &roof.params)).unwrap_or_default();
+            if key != roof.inputs_key {
+                let l = solarcraft_geometry::layout::fill(&roof.face, &roof.params);
+                roof.modules = l.modules;
+                roof.orientation = l.orientation;
+                roof.inputs_key = key;
+            }
+            let count = roof.modules.len() as f64;
+            if !a.target_kwp.is_user() { a.target_kwp.derive((count * module.pmp_stc() / 1000.0 * 1000.0).round() / 1000.0); }
+        }
         // Inverter: generic size nearest TARGET_DC_AC unless user-chosen.
         let target_kw = if a.modules_per_string.is_user() && a.strings.is_user() {
             a.modules_per_string.value as f64 * a.strings.value as f64 * module.pmp_stc() / 1000.0

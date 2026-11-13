@@ -85,6 +85,21 @@ pub struct Array {
     pub inverter_id: Field<String>,
     /// Number of identical inverters serving this array.
     pub inverter_count: Field<u32>,
+    /// Optional roof face with module layout (2D, roof-plane coordinates).
+    #[serde(default)]
+    pub roof: Option<RoofLayout>,
+}
+
+/// A roof face, its layout parameters and the computed placement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoofLayout {
+    pub face: solarcraft_geometry::layout::RoofFace,
+    pub params: solarcraft_geometry::layout::LayoutParams,
+    /// Computed: placed modules (do not edit; recomputed when inputs change).
+    pub modules: Vec<solarcraft_geometry::poly::Rect>,
+    pub orientation: solarcraft_geometry::layout::Orientation,
+    /// Fingerprint of the inputs the placement was computed from.
+    pub inputs_key: String,
 }
 
 /// Loss assumptions in percent of energy at that stage.
@@ -176,6 +191,7 @@ impl Project {
                 strings: Field::default(0),
                 inverter_id: Field::default(String::new()),
                 inverter_count: Field::default(1),
+                roof: None,
             }],
             losses: Losses {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),

@@ -68,3 +68,26 @@ fn easy_mode_sweep_has_no_errors() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn roof_layout_drives_easy_mode_size_and_detailed_capacity() {
+    let mut p = Project::new("r", "Roof", 40.4, -3.7);
+    let roof = json!({
+        "face": {"outline": [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]], "obstacles": []},
+        "params": {"module_length": 0.0, "module_width": 0.0, "orientation": "best", "gap_x": 0.02, "gap_y": 0.02, "setback": 0.4, "obstacle_clearance": 0.3, "search_step": 0.05},
+        "modules": [], "orientation": "best", "inputs_key": ""
+    });
+    p.set_by_pointer("/arrays/0/roof", roof).unwrap();
+    let r = p.arrays[0].roof.as_ref().unwrap();
+    // Generic module 2.0 × 1.0 m: portrait floor(9.22/1.02)=9 × floor(5.22/2.02)=2 = 18; landscape floor(9.22/2.02)=4 × floor(5.22/1.02)=5 = 20.
+    assert_eq!(r.modules.len(), 20);
+    let pmp = p.library.modules[0].pmp_stc();
+    let n = (p.arrays[0].modules_per_string.value * p.arrays[0].strings.value) as usize;
+    assert!(n <= 20 && n >= 18, "derived layout uses {n} modules");
+    assert!((p.arrays[0].target_kwp.value - n as f64 * pmp / 1000.0).abs() < 1e-3); // rounded to watts
+    // Detailed mode: more modules than fit is an error.
+    p.set_mode(DesignMode::Detailed);
+    p.set_by_pointer("/arrays/0/modules_per_string", json!(12)).unwrap();
+    p.set_by_pointer("/arrays/0/strings", json!(2)).unwrap();
+    assert!(validate(&p).iter().any(|i| i.code == "ROOF_CAPACITY"));
+}

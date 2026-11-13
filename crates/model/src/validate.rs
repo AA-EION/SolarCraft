@@ -41,6 +41,12 @@ pub fn validate(p: &Project) -> Vec<Issue> {
             push("MPPT_CURRENT", Severity::Warning, format!("{base}/strings"), format!("{per_mppt:.0} string(s) per MPPT give Isc {:.1} A, above the {:.1} A input limit.", per_mppt * m.i_sc, inv.i_max_per_mppt));
         }
         if strings_per_inv > inv.mppt_count as f64 * (inv.i_max_per_mppt / m.i_sc).floor().max(1.0) { push("INVERTER_INPUTS", Severity::Error, format!("{base}/strings"), "More strings than the inverter can accept.".into()); }
+        if let Some(roof) = &a.roof {
+            let placed = (a.modules_per_string.value * a.strings.value) as usize;
+            if placed > roof.modules.len() {
+                push("ROOF_CAPACITY", Severity::Error, format!("{base}/strings"), format!("{placed} modules in strings, but only {} fit on the roof layout.", roof.modules.len()));
+            }
+        }
         let dcac = n * a.strings.value as f64 * m.pmp_stc() / (inv.pac_max_w * a.inverter_count.value.max(1) as f64);
         if !(0.8..=1.5).contains(&dcac) { push("DC_AC_RATIO", Severity::Warning, format!("{base}/inverter_id"), format!("DC/AC ratio {dcac:.2} is outside 0.8–1.5.")); }
     }

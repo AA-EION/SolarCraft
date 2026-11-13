@@ -10,14 +10,14 @@
 use crate::poly::{point_in_ring, Rect, P};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoofFace { pub outline: Vec<P>, pub obstacles: Vec<Vec<P>> }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Orientation { Portrait, Landscape, Best }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutParams {
     /// Module long side and short side, metres.
     pub module_length: f64,
@@ -37,7 +37,7 @@ impl Default for LayoutParams {
     fn default() -> Self { Self { module_length: 1.722, module_width: 1.134, orientation: Orientation::Best, gap_x: 0.02, gap_y: 0.02, setback: 0.4, obstacle_clearance: 0.3, search_step: 0.05 } }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout { pub modules: Vec<Rect>, pub orientation: Orientation, pub origin: P }
 
 pub fn module_fits(face: &RoofFace, r: &Rect, p: &LayoutParams) -> bool {

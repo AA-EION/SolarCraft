@@ -9,3 +9,4 @@ version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 solarcraft-pv = { path = "../pv" }
+solarcraft-geometry = { path = "../geometry" }

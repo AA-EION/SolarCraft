@@ -21,7 +21,7 @@ fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Va
 
 pub const METHODS: &[&str] = &[
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
-    "use_demo_weather", "add_module", "simulate", "explain", "export_report", "undo", "history",
+    "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
 ];
 
 /// Dispatch `method` with JSON `params`. `progress(fraction) -> continue?` is used by long methods.
@@ -53,6 +53,25 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             Ok(v(&app::fetch_weather_pvgis(&path(params, "file")?)?))
         }
         "import_weather" => Ok(v(&app::import_weather(&path(params, "file")?, &path(params, "source")?)?)),
+        "set_roof" => {
+            // {file, array?: 0, outline: [[x,y],...] | null, obstacles?: [[[x,y],...]], params?: {...}}
+            let file = path(params, "file")?;
+            let idx = params.get("array").and_then(Value::as_u64).unwrap_or(0);
+            let ptr = format!("/arrays/{idx}/roof");
+            let value = match params.get("outline") {
+                None | Some(Value::Null) => Value::Null,
+                Some(outline) => {
+                    let mut lp = serde_json::to_value(solarcraft_geometry::layout::LayoutParams::default()).unwrap_or(json!({}));
+                    if let (Some(over), Some(base)) = (params.get("params").and_then(Value::as_object), lp.as_object_mut()) {
+                        for (k, val) in over { base.insert(k.clone(), val.clone()); }
+                    }
+                    json!({"face": {"outline": outline, "obstacles": params.get("obstacles").cloned().unwrap_or(json!([]))}, "params": lp, "modules": [], "orientation": "best", "inputs_key": ""})
+                }
+            };
+            let p = app::set_fields(&file, &[(ptr, value)])?;
+            let a = p.arrays.get(idx as usize).ok_or_else(|| AppError { code: "INVALID_ARGUMENT", message: "no such array".into() })?;
+            Ok(json!({"modules_fit": a.roof.as_ref().map(|r| r.modules.len()), "orientation": a.roof.as_ref().map(|r| r.orientation), "target_kwp": a.target_kwp.value, "strings": a.strings.value, "modules_per_string": a.modules_per_string.value, "issues": solarcraft_model::validate::validate(&p)}))
+        }
         "use_demo_weather" => Ok(v(&app::use_demo_weather(&path(params, "file")?)?)),
         "add_module" => {
             let m: app::ModuleInput = serde_json::from_value(arg(params, "module")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("module: {e}") })?;
@@ -107,6 +126,9 @@ mod tests {
         assert_eq!(call("simulate", json!({"file": fs}))["error"]["code"], json!("WEATHER_MISSING"));
         assert_eq!(call("fetch_weather_pvgis", json!({"file": fs}))["error"]["code"], json!("CONSENT_REQUIRED"));
         assert_eq!(call("use_demo_weather", json!({"file": fs}))["ok"], json!(true));
+        let roof = call("set_roof", json!({"file": fs, "outline": [[0,0],[8,0],[8,5],[0,5]], "obstacles": [[[3,2],[4,2],[4,3],[3,3]]], "params": {"setback": 0.5}}));
+        assert!(roof["result"]["modules_fit"].as_u64().unwrap() > 6, "{roof}");
+        assert_eq!(call("set_roof", json!({"file": fs, "outline": null}))["result"]["modules_fit"], json!(null));
         let r = call("simulate", json!({"file": fs}));
         assert!(r["result"]["annual"]["ac_kwh"].as_f64().is_some_and(|x| x > 1000.0), "{r}");
         let e = call("explain", json!({"file": fs}));
