@@ -20,6 +20,7 @@
         <NavigationViewItem x:Name="NavProject" Tag="project" Icon="Document" />
         <NavigationViewItem x:Name="NavSite" Tag="site" Icon="World" />
         <NavigationViewItem x:Name="NavDesign" Tag="design" Icon="ViewAll" />
+        <NavigationViewItem x:Name="NavRoof" Tag="roof" Icon="Home" />
         <NavigationViewItem x:Name="NavResults" Tag="results" Icon="Calculator" />
         <NavigationViewItem x:Name="NavReport" Tag="report" Icon="Print" />
       </NavigationView.MenuItems>
@@ -63,6 +64,21 @@
             <TextBlock x:Name="EquipmentText" TextWrapping="Wrap" />
             <TextBlock x:Name="IssuesHeader" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
             <ItemsControl x:Name="IssuesList" />
+          </StackPanel>
+
+          <StackPanel x:Name="RoofPage" Spacing="10" Visibility="Collapsed">
+            <ComboBox x:Name="RoofShapeBox" Width="260" SelectedIndex="0" SelectionChanged="OnRoofShape" />
+            <NumberBox x:Name="EaveBox" Width="220" HorizontalAlignment="Left" Value="10" />
+            <NumberBox x:Name="RidgeBox" Width="220" HorizontalAlignment="Left" Value="6" Visibility="Collapsed" />
+            <NumberBox x:Name="SlopeBox" Width="220" HorizontalAlignment="Left" Value="5" />
+            <TextBox x:Name="CustomBox" Width="520" HorizontalAlignment="Left" Visibility="Collapsed" />
+            <TextBox x:Name="ObstaclesBox" Width="520" HorizontalAlignment="Left" />
+            <NumberBox x:Name="SetbackBox" Width="220" HorizontalAlignment="Left" Value="0.4" SmallChange="0.05" />
+            <NumberBox x:Name="ClearanceBox" Width="220" HorizontalAlignment="Left" Value="0.3" SmallChange="0.05" />
+            <TextBlock x:Name="RoofHint" Opacity="0.7" TextWrapping="Wrap" />
+            <Button x:Name="ApplyRoofButton" Style="{StaticResource AccentButtonStyle}" Click="OnApplyRoof" />
+            <Canvas x:Name="RoofCanvas" Width="700" Height="320" HorizontalAlignment="Left" />
+            <TextBlock x:Name="RoofCount" Style="{StaticResource SubtitleTextBlockStyle}" />
           </StackPanel>
 
           <StackPanel x:Name="ResultsPage" Spacing="14" Visibility="Collapsed">

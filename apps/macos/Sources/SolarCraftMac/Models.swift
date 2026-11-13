@@ -21,6 +21,15 @@ struct ProjectDoc: Decodable {
         let strings: Field<Int>
         let inverter_id: Field<String>
         let inverter_count: Field<Int>
+        let roof: RoofDoc?
+    }
+    struct RoofDoc: Decodable {
+        struct Face: Decodable { let outline: [[Double]]; let obstacles: [[[Double]]] }
+        struct Params: Decodable { let setback: Double; let obstacle_clearance: Double }
+        struct ModuleRect: Decodable { let x0: Double; let y0: Double; let x1: Double; let y1: Double }
+        let face: Face
+        let params: Params
+        let modules: [ModuleRect]
     }
     struct Simulation: Decodable { let mounting: Field<String> }
     struct WeatherRef: Decodable { let provider: String; let summary: String }
@@ -54,3 +63,5 @@ struct Month: Decodable, Identifiable { let month: Int; let ac_kwh: Double; var 
 struct Explain: Decodable { let annual: Annual; let energy_kwh: [Step]; let monthly: [Month] }
 struct WeatherSummary: Decodable { let weather_ref: ProjectDoc.WeatherRef }
 struct ReportOutput: Decodable { let path: String; let bytes: Int }
+
+struct RoofResult: Decodable { let modules_fit: Int? }

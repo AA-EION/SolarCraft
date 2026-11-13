@@ -42,7 +42,7 @@ public sealed partial class MainWindow : Window
         Title = T("app_title");
         NewButton.Label = T("new_project"); OpenButton.Label = T("open_project"); UndoButton.Label = T("undo");
         SimulateButton.Label = T("simulate"); CancelButton.Label = T("cancel");
-        NavProject.Content = T("project"); NavSite.Content = T("site_weather"); NavDesign.Content = T("design"); NavResults.Content = T("results"); NavReport.Content = T("report");
+        NavProject.Content = T("project"); NavSite.Content = T("site_weather"); NavDesign.Content = T("design"); NavRoof.Content = T("roof"); NavResults.Content = T("results"); NavReport.Content = T("report");
         EmptyText.Text = T("no_project");
         NameBox.Header = T("name"); CustomerBox.Header = T("customer"); AddressBox.Header = T("address");
         LatBox.Header = T("latitude"); LonBox.Header = T("longitude"); ElevBox.Header = T("elevation"); AlbedoBox.Header = T("albedo");
@@ -52,6 +52,11 @@ public sealed partial class MainWindow : Window
         MountingBox.ItemsSource = new[] { T("open_rack"), T("roof_mounted"), T("integrated") };
         MpsBox.Header = T("modules_per_string"); StringsBox.Header = T("strings"); IssuesHeader.Text = T("issues");
         NoResults.Text = T("no_results"); MonthlyHeader.Text = T("monthly_energy"); LossesHeader.Text = T("losses");
+        RoofShapeBox.Header = T("roof_shape");
+        RoofShapeBox.ItemsSource = new[] { T("roof_rect"), T("roof_trapezoid"), T("roof_custom"), T("roof_none") };
+        EaveBox.Header = T("eave_length"); RidgeBox.Header = T("ridge_length"); SlopeBox.Header = T("slope_length");
+        CustomBox.Header = T("custom_points"); ObstaclesBox.Header = T("obstacles"); SetbackBox.Header = T("setback"); ClearanceBox.Header = T("clearance");
+        RoofHint.Text = T("roof_hint"); ApplyRoofButton.Content = T("apply_roof");
         LangBox.Header = T("language"); FormatBox.Header = T("format"); DesignerBox.Header = T("designer"); ExportButton.Content = T("export_report");
         var two = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         LangBox.SelectedIndex = two switch { "es" => 1, "de" => 2, "pt" => 3, _ => 0 };
@@ -131,7 +136,78 @@ public sealed partial class MainWindow : Window
         var mod = p["library"]!["modules"]!.AsArray().FirstOrDefault(m => m!["id"]!.GetValue<string>() == Api.Str(a["module_id"]));
         var inv = p["library"]!["inverters"]!.AsArray().FirstOrDefault(i => i!["id"]!.GetValue<string>() == Api.Str(a["inverter_id"]));
         EquipmentText.Text = $"{T("module")}: {mod?["manufacturer"]} {mod?["model"]}\n{T("inverter")}: {Api.Num(a["inverter_count"])} × {inv?["manufacturer"]} {inv?["model"]}";
+        ShowRoof(a["roof"]);
         _loading = false;
+    }
+
+    // ---- Roof ----
+    private static List<double[]> ParsePoints(string text) => text.Split(';', StringSplitOptions.RemoveEmptyEntries)
+        .Select(p => p.Split(',').Select(v => double.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray())
+        .Where(v => v.Length == 2 && !v.Any(double.IsNaN)).ToList();
+
+    public static List<List<double[]>> ParseObstacles(string text) => text.Split(';', StringSplitOptions.RemoveEmptyEntries)
+        .Select(p => p.Split(',').Select(v => double.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray())
+        .Where(v => v.Length == 4 && !v.Any(double.IsNaN) && v[2] > 0 && v[3] > 0)
+        .Select(v => new List<double[]> { new[] { v[0], v[1] }, new[] { v[0] + v[2], v[1] }, new[] { v[0] + v[2], v[1] + v[3] }, new[] { v[0], v[1] + v[3] } }).ToList();
+
+    private void OnRoofShape(object sender, SelectionChangedEventArgs e)
+    {
+        var i = RoofShapeBox.SelectedIndex;
+        EaveBox.Visibility = SlopeBox.Visibility = i is 0 or 1 ? Visibility.Visible : Visibility.Collapsed;
+        RidgeBox.Visibility = i == 1 ? Visibility.Visible : Visibility.Collapsed;
+        CustomBox.Visibility = i == 2 ? Visibility.Visible : Visibility.Collapsed;
+        ObstaclesBox.Visibility = SetbackBox.Visibility = ClearanceBox.Visibility = i == 3 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void OnApplyRoof(object sender, RoutedEventArgs e)
+    {
+        if (_file is null) return;
+        double eave = EaveBox.Value, ridge = RidgeBox.Value, slope = SlopeBox.Value;
+        List<double[]>? outline = RoofShapeBox.SelectedIndex switch
+        {
+            0 => new() { new[] { 0.0, 0.0 }, new[] { eave, 0.0 }, new[] { eave, slope }, new[] { 0.0, slope } },
+            1 => new() { new[] { 0.0, 0.0 }, new[] { eave, 0.0 }, new[] { eave - Math.Max(0, (eave - ridge) / 2), slope }, new[] { Math.Max(0, (eave - ridge) / 2), slope } },
+            2 => ParsePoints(CustomBox.Text),
+            _ => null,
+        };
+        if (outline is { Count: < 3 }) { ShowError(T("custom_points")); return; }
+        Try(() =>
+        {
+            var r = outline is null
+                ? Api.Invoke("set_roof", new { file = _file, array = 0, outline = (object?)null })!
+                : Api.Invoke("set_roof", new { file = _file, array = 0, outline, obstacles = ParseObstacles(ObstaclesBox.Text), @params = new { setback = SetbackBox.Value, obstacle_clearance = ClearanceBox.Value } })!;
+            if (r["modules_fit"] is JsonNode n) ShowInfo($"{n.GetValue<int>()} {T("modules_fit")}");
+        });
+        Reload();
+    }
+
+    private void ShowRoof(JsonNode? roof)
+    {
+        RoofCanvas.Children.Clear();
+        RoofCount.Text = "";
+        if (roof is null) return;
+        var outline = roof["face"]!["outline"]!.AsArray().Select(p => new[] { p![0]!.GetValue<double>(), p[1]!.GetValue<double>() }).ToList();
+        if (outline.Count < 3) return;
+        double minX = outline.Min(p => p[0]), maxX = outline.Max(p => p[0]), minY = outline.Min(p => p[1]), maxY = outline.Max(p => p[1]);
+        if (maxX <= minX || maxY <= minY) return;
+        const double pad = 12;
+        var scale = Math.Min((RoofCanvas.Width - 2 * pad) / (maxX - minX), (RoofCanvas.Height - 2 * pad) / (maxY - minY));
+        Windows.Foundation.Point Pt(double x, double y) => new(pad + (x - minX) * scale, pad + (maxY - y) * scale);
+        Polygon Poly(IEnumerable<double[]> pts, Brush fill, Brush? stroke) { var pg = new Polygon { Fill = fill, Stroke = stroke, StrokeThickness = 1.5 }; foreach (var p in pts) pg.Points.Add(Pt(p[0], p[1])); return pg; }
+        RoofCanvas.Children.Add(Poly(outline, new SolidColorBrush(ColorHelper.FromArgb(40, 128, 128, 128)), new SolidColorBrush(Colors.Gray)));
+        var teal = new SolidColorBrush(ColorHelper.FromArgb(255, 0x0f, 0x5c, 0x63));
+        var mods = roof["modules"]!.AsArray();
+        foreach (var m in mods)
+        {
+            double x0 = m!["x0"]!.GetValue<double>(), y0 = m["y0"]!.GetValue<double>(), x1 = m["x1"]!.GetValue<double>(), y1 = m["y1"]!.GetValue<double>();
+            var r = new Rectangle { Width = (x1 - x0) * scale, Height = (y1 - y0) * scale, Fill = teal, Stroke = new SolidColorBrush(Colors.White), StrokeThickness = 0.6 };
+            var p = Pt(x0, y1);
+            Canvas.SetLeft(r, p.X); Canvas.SetTop(r, p.Y);
+            RoofCanvas.Children.Add(r);
+        }
+        foreach (var ob in roof["face"]!["obstacles"]!.AsArray())
+            RoofCanvas.Children.Add(Poly(ob!.AsArray().Select(p => new[] { p![0]!.GetValue<double>(), p[1]!.GetValue<double>() }), new SolidColorBrush(Colors.DarkGray), null));
+        RoofCount.Text = $"{mods.Count} {T("modules_fit")}";
     }
 
     private void ShowIssues(JsonArray issues)
@@ -191,6 +267,7 @@ public sealed partial class MainWindow : Window
         ProjectPage.Visibility = tag == "project" ? Visibility.Visible : Visibility.Collapsed;
         SitePage.Visibility = tag == "site" ? Visibility.Visible : Visibility.Collapsed;
         DesignPage.Visibility = tag == "design" ? Visibility.Visible : Visibility.Collapsed;
+        RoofPage.Visibility = tag == "roof" ? Visibility.Visible : Visibility.Collapsed;
         ResultsPage.Visibility = tag == "results" ? Visibility.Visible : Visibility.Collapsed;
         ReportPage.Visibility = tag == "report" ? Visibility.Visible : Visibility.Collapsed;
     }

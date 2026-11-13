@@ -29,13 +29,14 @@ struct SolarCraftApp: App {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case project, site_weather, design, results, report
+    case project, site_weather, design, roof, results, report
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .project: return "doc.text"
         case .site_weather: return "sun.max"
         case .design: return "square.grid.3x3"
+        case .roof: return "house"
         case .results: return "chart.bar"
         case .report: return "doc.richtext"
         }
@@ -80,6 +81,7 @@ struct PageView: View {
         case .project: ProjectPage()
         case .site_weather: SitePage()
         case .design: DesignPage()
+        case .roof: RoofPage()
         case .results: ResultsPage()
         case .report: ReportPage()
         }
@@ -258,5 +260,123 @@ struct ReportPage: View {
             Button(m.t("export_report")) { m.exportReport(lang: lang, format: format, designer: designer) }.disabled(m.results == nil)
             if m.results == nil { Text(m.t("no_results")).foregroundStyle(.secondary) }
         }
+    }
+}
+
+/// Parses "x,y; x,y; …" into points.
+func parsePoints(_ text: String) -> [[Double]] {
+    text.split(separator: ";").compactMap { pair -> [Double]? in
+        let v = pair.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        return v.count == 2 ? v : nil
+    }
+}
+
+/// Parses "x,y,w,h; …" into rectangular obstacle polygons.
+func parseObstacles(_ text: String) -> [[[Double]]] {
+    text.split(separator: ";").compactMap { item -> [[Double]]? in
+        let v = item.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard v.count == 4, v[2] > 0, v[3] > 0 else { return nil }
+        return [[v[0], v[1]], [v[0] + v[2], v[1]], [v[0] + v[2], v[1] + v[3]], [v[0], v[1] + v[3]]]
+    }
+}
+
+struct RoofPage: View {
+    @EnvironmentObject var m: AppModel
+    @State private var shape = "rect"
+    @State private var eave = 10.0
+    @State private var ridge = 6.0
+    @State private var slope = 5.0
+    @State private var custom = ""
+    @State private var obstacles = ""
+    @State private var setback = 0.4
+    @State private var clearance = 0.3
+
+    private func outline() -> [[Double]]? {
+        switch shape {
+        case "rect": return [[0, 0], [eave, 0], [eave, slope], [0, slope]]
+        case "trapezoid":
+            let inset = max(0, (eave - ridge) / 2)
+            return [[0, 0], [eave, 0], [eave - inset, slope], [inset, slope]]
+        case "custom":
+            let p = parsePoints(custom)
+            return p.count >= 3 ? p : nil
+        default: return nil
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Form {
+                Picker(m.t("roof_shape"), selection: $shape) {
+                    Text(m.t("roof_rect")).tag("rect")
+                    Text(m.t("roof_trapezoid")).tag("trapezoid")
+                    Text(m.t("roof_custom")).tag("custom")
+                    Text(m.t("roof_none")).tag("none")
+                }
+                if shape == "rect" || shape == "trapezoid" {
+                    TextField(m.t("eave_length"), value: $eave, format: .number)
+                    if shape == "trapezoid" { TextField(m.t("ridge_length"), value: $ridge, format: .number) }
+                    TextField(m.t("slope_length"), value: $slope, format: .number)
+                }
+                if shape == "custom" { TextField(m.t("custom_points"), text: $custom) }
+                if shape != "none" {
+                    TextField(m.t("obstacles"), text: $obstacles)
+                    TextField(m.t("setback"), value: $setback, format: .number)
+                    TextField(m.t("clearance"), value: $clearance, format: .number)
+                }
+                Text(m.t("roof_hint")).font(.caption).foregroundStyle(.secondary)
+                Button(m.t("apply_roof")) {
+                    m.setRoof(outline: shape == "none" ? nil : outline(), obstacles: parseObstacles(obstacles), setback: setback, clearance: clearance)
+                }.keyboardShortcut(.return, modifiers: [.command])
+            }
+            if let roof = m.project?.arrays.first?.roof {
+                RoofPreview(roof: roof).frame(height: 300)
+                Text("\(roof.modules.count) \(m.t("modules_fit"))").font(.headline)
+            }
+        }
+        .onAppear(perform: loadFromProject)
+    }
+
+    private func loadFromProject() {
+        guard let roof = m.project?.arrays.first?.roof else { return }
+        shape = "custom"
+        custom = roof.face.outline.map { "\($0[0]),\($0[1])" }.joined(separator: "; ")
+        obstacles = roof.face.obstacles.compactMap { pts -> String? in
+            let xs = pts.map { $0[0] }, ys = pts.map { $0[1] }
+            guard let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else { return nil }
+            return "\(x0),\(y0),\(x1 - x0),\(y1 - y0)"
+        }.joined(separator: "; ")
+        setback = roof.params.setback
+        clearance = roof.params.obstacle_clearance
+    }
+}
+
+/// Draws the roof face (eave at the bottom), obstacles and placed modules.
+struct RoofPreview: View {
+    let roof: ProjectDoc.RoofDoc
+    var body: some View {
+        Canvas { ctx, size in
+            let pts = roof.face.outline
+            guard let minX = pts.map({ $0[0] }).min(), let maxX = pts.map({ $0[0] }).max(),
+                  let minY = pts.map({ $0[1] }).min(), let maxY = pts.map({ $0[1] }).max(), maxX > minX, maxY > minY else { return }
+            let pad = 12.0
+            let scale = min((size.width - 2 * pad) / (maxX - minX), (size.height - 2 * pad) / (maxY - minY))
+            func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: pad + (x - minX) * scale, y: pad + (maxY - y) * scale) }
+            func poly(_ p: [[Double]]) -> Path {
+                var path = Path()
+                for (i, v) in p.enumerated() { if i == 0 { path.move(to: pt(v[0], v[1])) } else { path.addLine(to: pt(v[0], v[1])) } }
+                path.closeSubpath()
+                return path
+            }
+            ctx.fill(poly(pts), with: .color(.gray.opacity(0.12)))
+            ctx.stroke(poly(pts), with: .color(.primary), lineWidth: 1.5)
+            for r in roof.modules {
+                let rect = CGRect(x: pad + (r.x0 - minX) * scale, y: pad + (maxY - r.y1) * scale, width: (r.x1 - r.x0) * scale, height: (r.y1 - r.y0) * scale)
+                ctx.fill(Path(rect), with: .color(Color(red: 0.06, green: 0.36, blue: 0.39)))
+                ctx.stroke(Path(rect), with: .color(.white), lineWidth: 0.6)
+            }
+            for ob in roof.face.obstacles { ctx.fill(poly(ob), with: .color(.gray)) }
+        }
+        .accessibilityLabel("Roof layout")
     }
 }

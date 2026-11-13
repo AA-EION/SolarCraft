@@ -67,6 +67,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setRoof(outline: [[Double]]?, obstacles: [[[Double]]], setback: Double, clearance: Double) {
+        run {
+            var params: [String: Any] = ["file": file, "array": 0]
+            if let o = outline {
+                params["outline"] = o
+                params["obstacles"] = obstacles
+                params["params"] = ["setback": setback, "obstacle_clearance": clearance]
+            } else {
+                params["outline"] = NSNull()
+            }
+            let r = try Core.invoke("set_roof", params, as: RoofResult.self)
+            if let n = r.modules_fit { notice = "\(n) \(t("modules_fit"))" }
+        }
+        reload()
+    }
+
     func setMode(_ mode: String) { run { _ = try Core.invokeRaw("set_mode", ["file": file, "mode": mode]) }; reload() }
     func undo() { run { _ = try Core.invokeRaw("undo", ["file": file]) }; reload() }
 

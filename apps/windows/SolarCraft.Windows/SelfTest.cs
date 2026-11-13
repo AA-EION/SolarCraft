@@ -43,6 +43,10 @@ public static unsafe class SelfTest
             Api.Invoke("create_project", new { file, name = "Selftest", latitude = 6.2442, longitude = -75.5812, target_kwp = 4.0 });
             var set = Api.Invoke("set_fields", new { file, edits = new[] { new { pointer = "/arrays/0/tilt", value = 12.0 } } })!;
             Check(Api.Num(set["project"]!["arrays"]![0]!["tilt"]) == 12 && Api.IsUser(set["project"]!["arrays"]![0]!["tilt"]), "set_fields");
+            var roof = Api.Invoke("set_roof", new { file, outline = new[] { new[] { 0.0, 0.0 }, new[] { 11.0, 0.0 }, new[] { 8.0, 5.0 }, new[] { 3.0, 5.0 } }, obstacles = MainWindow.ParseObstacles("5,2,0.8,0.8") })!;
+            var fit = roof["modules_fit"]!.GetValue<int>();
+            var stored = Api.Invoke("get_project", new { file })!["arrays"]![0]!["roof"]!["modules"]!.AsArray().Count;
+            Check(fit >= 8 && stored == fit, $"roof layout ({fit} modules)");
             Api.Invoke("use_demo_weather", new { file });
             var calls = 0;
             Api.Invoke("simulate", new { file }, new SyncProgress(_ => calls++));
