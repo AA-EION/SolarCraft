@@ -67,12 +67,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func setRoof(outline: [[Double]]?, obstacles: [[[Double]]], setback: Double, clearance: Double) {
+    func setRoof(outline: [[Double]]?, obstacles: [[[Double]]], heights: [Double], setback: Double, clearance: Double) {
         run {
             var params: [String: Any] = ["file": file, "array": 0]
             if let o = outline {
                 params["outline"] = o
                 params["obstacles"] = obstacles
+                params["obstacle_heights"] = heights
                 params["params"] = ["setback": setback, "obstacle_clearance": clearance]
             } else {
                 params["outline"] = NSNull()

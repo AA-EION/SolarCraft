@@ -65,7 +65,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
                     if let (Some(over), Some(base)) = (params.get("params").and_then(Value::as_object), lp.as_object_mut()) {
                         for (k, val) in over { base.insert(k.clone(), val.clone()); }
                     }
-                    json!({"face": {"outline": outline, "obstacles": params.get("obstacles").cloned().unwrap_or(json!([]))}, "params": lp, "modules": [], "orientation": "best", "inputs_key": ""})
+                    json!({"face": {"outline": outline, "obstacles": params.get("obstacles").cloned().unwrap_or(json!([])), "obstacle_heights": params.get("obstacle_heights").cloned().unwrap_or(json!([]))}, "params": lp, "modules": [], "orientation": "best", "inputs_key": ""})
                 }
             };
             let p = app::set_fields(&file, &[(ptr, value)])?;

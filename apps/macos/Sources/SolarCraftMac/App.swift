@@ -230,6 +230,16 @@ struct ResultsPage: View {
                 Text(m.t("monthly_energy")).font(.headline)
                 Chart(r.monthly) { BarMark(x: .value("Month", $0.month), y: .value("kWh", $0.ac_kwh)) }
                     .chartXScale(domain: 0.5...12.5).frame(height: 220).accessibilityLabel(m.t("monthly_energy"))
+                Text(m.t("irradiation")).font(.headline)
+                Grid(alignment: .trailing, horizontalSpacing: 16, verticalSpacing: 4) {
+                    ForEach(r.irradiance_kwh_m2) { s in
+                        GridRow {
+                            Text(m.t("irr_" + s.key)).gridColumnAlignment(.leading)
+                            Text(s.value.formatted(.number.precision(.fractionLength(1))) + " kWh/m²").monospacedDigit()
+                            Text(["ghi", "effective"].contains(s.key) ? "" : s.delta_pct.formatted(.number.precision(.fractionLength(2))) + " %").monospacedDigit().foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Text(m.t("losses")).font(.headline)
                 Grid(alignment: .trailing, horizontalSpacing: 16, verticalSpacing: 4) {
                     ForEach(r.energy_kwh) { s in
@@ -271,11 +281,20 @@ func parsePoints(_ text: String) -> [[Double]] {
     }
 }
 
-/// Parses "x,y,w,h; …" into rectangular obstacle polygons.
+/// Heights (5th value, metres; default 1) for the obstacles accepted by `parseObstacles`.
+func parseObstacleHeights(_ text: String) -> [Double] {
+    text.split(separator: ";").compactMap { item -> Double? in
+        let v = item.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard v.count == 4 || v.count == 5, v[2] > 0, v[3] > 0 else { return nil }
+        return v.count == 5 ? v[4] : 1.0
+    }
+}
+
+/// Parses "x,y,w,d[,h]; …" into rectangular obstacle polygons.
 func parseObstacles(_ text: String) -> [[[Double]]] {
     text.split(separator: ";").compactMap { item -> [[Double]]? in
         let v = item.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-        guard v.count == 4, v[2] > 0, v[3] > 0 else { return nil }
+        guard v.count == 4 || v.count == 5, v[2] > 0, v[3] > 0 else { return nil }
         return [[v[0], v[1]], [v[0] + v[2], v[1]], [v[0] + v[2], v[1] + v[3]], [v[0], v[1] + v[3]]]
     }
 }
@@ -338,7 +357,7 @@ struct RoofPage: View {
                 }
                 Text(m.t("roof_hint")).font(.caption).foregroundStyle(.secondary)
                 Button(m.t("apply_roof")) {
-                    m.setRoof(outline: shape == "none" ? nil : outline(), obstacles: parseObstacles(obstacles), setback: setback, clearance: clearance)
+                    m.setRoof(outline: shape == "none" ? nil : outline(), obstacles: parseObstacles(obstacles), heights: parseObstacleHeights(obstacles), setback: setback, clearance: clearance)
                 }.keyboardShortcut(.return, modifiers: [.command])
             }
             if let roof = m.project?.arrays.first?.roof {
@@ -356,7 +375,9 @@ struct RoofPage: View {
         obstacles = roof.face.obstacles.compactMap { pts -> String? in
             let xs = pts.map { $0[0] }, ys = pts.map { $0[1] }
             guard let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else { return nil }
-            return "\(x0),\(y0),\(x1 - x0),\(y1 - y0)"
+            let i = roof.face.obstacles.firstIndex { $0 == pts } ?? 0
+            let h = i < roof.face.obstacle_heights.count ? roof.face.obstacle_heights[i] : 1.0
+            return "\(x0),\(y0),\(x1 - x0),\(y1 - y0),\(h)"
         }.joined(separator: "; ")
         setback = roof.params.setback
         clearance = roof.params.obstacle_clearance

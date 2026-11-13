@@ -2,6 +2,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -43,7 +44,7 @@ public static unsafe class SelfTest
             Api.Invoke("create_project", new { file, name = "Selftest", latitude = 6.2442, longitude = -75.5812, target_kwp = 4.0 });
             var set = Api.Invoke("set_fields", new { file, edits = new[] { new { pointer = "/arrays/0/tilt", value = 12.0 } } })!;
             Check(Api.Num(set["project"]!["arrays"]![0]!["tilt"]) == 12 && Api.IsUser(set["project"]!["arrays"]![0]!["tilt"]), "set_fields");
-            var roof = Api.Invoke("set_roof", new { file, outline = new[] { new[] { 0.0, 0.0 }, new[] { 11.0, 0.0 }, new[] { 8.0, 5.0 }, new[] { 3.0, 5.0 } }, obstacles = MainWindow.ParseObstacles("5,2,0.8,0.8") })!;
+            var roof = Api.Invoke("set_roof", new { file, outline = new[] { new[] { 0.0, 0.0 }, new[] { 11.0, 0.0 }, new[] { 8.0, 5.0 }, new[] { 3.0, 5.0 } }, obstacles = MainWindow.ParseObstacles("5,2,0.8,0.8,2.0"), obstacle_heights = MainWindow.ParseObstacleHeights("5,2,0.8,0.8,2.0") })!;
             var fit = roof["modules_fit"]!.GetValue<int>();
             var stored = Api.Invoke("get_project", new { file })!["arrays"]![0]!["roof"]!["modules"]!.AsArray().Count;
             Check(fit >= 8 && stored == fit, $"roof layout ({fit} modules)");
@@ -53,6 +54,8 @@ public static unsafe class SelfTest
             var e = Api.Invoke("explain", new { file })!;
             var kwh = e["annual"]!["ac_kwh"]!.GetValue<double>();
             Check(e["monthly"]!.AsArray().Count == 12 && kwh > 1000 && calls > 0, $"workflow simulate/explain {kwh:F0} kWh");
+            var shade = e["irradiance_kwh_m2"]!.AsArray().First(x => x!["key"]!.GetValue<string>() == "shading")!["delta_pct"]!.GetValue<double>();
+            Check(shade < 0, $"near shading counted ({shade:F2} %)");
             var rep = Api.Invoke("export_report", new { file, output = Path.Combine(dir, "r.pdf"), format = "pdf", lang = "es" })!;
             Check(rep["bytes"]!.GetValue<int>() > 20000, "report PDF");
             Check(Api.Invoke("ui_strings", new { lang = "es" })!["simulate"]!.GetValue<string>() == "Simular", "UI strings (es)");

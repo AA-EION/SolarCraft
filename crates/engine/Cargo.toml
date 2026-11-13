@@ -11,6 +11,8 @@ serde_json.workspace = true
 solarcraft-pv = { path = "../pv" }
 solarcraft-model = { path = "../model" }
 solarcraft-weather = { path = "../weather" }
+solarcraft-geometry = { path = "../geometry" }
+solarcraft-shading = { path = "../shading" }
 
 [dev-dependencies]
 serde_json.workspace = true

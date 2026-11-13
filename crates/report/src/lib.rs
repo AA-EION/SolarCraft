@@ -51,6 +51,7 @@ pub struct View {
     pub weather_notes: Vec<String>,
     pub licence: String,
     pub loss_rows: Vec<[String; 3]>,
+    pub irr_rows: Vec<[String; 3]>,
     pub monthly_header: [String; 4],
     pub monthly_rows: Vec<[String; 4]>,
     pub assumption_rows: Vec<[String; 2]>,
@@ -158,11 +159,17 @@ pub fn build_view(inp: &ReportInput) -> View {
         date, kpis, arrays, site_rows,
         weather_notes: { let mut v = vec![format!("{} — {}", s["weather_tmy"], inp.weather.dataset)]; if inp.weather.horizon_applied { v.push(s["note_horizon"].into()); } v },
         licence: inp.weather.licence.clone(), loss_rows,
+        irr_rows: r.irradiance_ledger.iter().map(|st| {
+            let key = format!("irr_{}", st.key);
+            let label = s.get(key.as_str()).map(|v| v.to_string()).unwrap_or_else(|| st.label.clone());
+            [label, n(st.value, 1), if st.key == "ghi" || st.key == "effective" { String::new() } else { format!("{} %", n(st.delta_pct, 2)) }]
+        }).collect(),
         monthly_header: [s["month"].into(), "GHI kWh/m²".into(), "POA kWh/m²".into(), format!("{} kWh", s["energy"])],
         monthly_rows,
         assumption_rows: vec![[s["soiling"].into(), pct(lo.soiling_pct.value)], [s["lid"].into(), pct(lo.lid_pct.value)], [s["mismatch"].into(), pct(lo.mismatch_pct.value)], [s["dc_wiring"].into(), pct(lo.dc_wiring_pct.value)], [s["ac_wiring"].into(), pct(lo.ac_wiring_pct.value)], [s["availability"].into(), pct(lo.availability_pct.value)], ["Albedo".into(), n(p.site.albedo.value, 2)]],
         models_text: s["models_text"].replace("%MODEL%", &model_name),
         notes: r.warnings.iter().filter(|w| w.code != "HORIZON_IN_WEATHER").map(|w| match w.code.as_str() {
+            "NEAR_SHADING" => s["note_shading"].replace("%S%", &w.subject),
             "MPP_WINDOW_HOURS" => s["note_mpp"].replace("%S%", &w.subject).replace("%N%", &n(w.value, 0)),
             _ => w.text.clone(),
         }).collect(),

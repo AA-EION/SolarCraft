@@ -3,3 +3,4 @@
 pub mod earcut;
 pub mod layout;
 pub mod poly;
+pub mod roof3d;

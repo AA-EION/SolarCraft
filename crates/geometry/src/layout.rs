@@ -11,7 +11,13 @@ use crate::poly::{point_in_ring, Rect, P};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RoofFace { pub outline: Vec<P>, pub obstacles: Vec<Vec<P>> }
+pub struct RoofFace {
+    pub outline: Vec<P>,
+    pub obstacles: Vec<Vec<P>>,
+    /// Height of each obstacle above the roof, metres (missing entries: 1 m).
+    #[serde(default)]
+    pub obstacle_heights: Vec<f64>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,7 +125,7 @@ mod tests {
     fn rectangular_roof_matches_hand_count() {
         // Usable 9.2 × 5.2 m. Portrait 1.0 × 1.7: floor(9.22/1.02)=9 × floor(5.22/1.72)=3 = 27.
         // Landscape 1.7 × 1.0: floor(9.22/1.72)=5 × floor(5.22/1.02)=5 = 25.
-        let face = RoofFace { outline: rect_roof(10.0, 6.0), obstacles: vec![] };
+        let face = RoofFace { outline: rect_roof(10.0, 6.0), obstacles: vec![], obstacle_heights: vec![] };
         assert_eq!(fill(&face, &params(Orientation::Portrait)).modules.len(), 27);
         assert_eq!(fill(&face, &params(Orientation::Landscape)).modules.len(), 25);
         let best = fill(&face, &params(Orientation::Best));
@@ -130,12 +136,12 @@ mod tests {
     #[test]
     fn chimney_and_trapezoid_hip_roof() {
         let chimney = vec![[4.5, 2.5], [5.5, 2.5], [5.5, 3.5], [4.5, 3.5]];
-        let face = RoofFace { outline: rect_roof(10.0, 6.0), obstacles: vec![chimney] };
+        let face = RoofFace { outline: rect_roof(10.0, 6.0), obstacles: vec![chimney], obstacle_heights: vec![] };
         let l = fill(&face, &params(Orientation::Best));
         assert!(l.modules.len() < 27 && l.modules.len() >= 20, "{}", l.modules.len());
         verify(&face, &l, &params(Orientation::Best));
         // Hip roof face: trapezoid 12 m eave, 6 m ridge, 5 m slope.
-        let hip = RoofFace { outline: vec![[0.0, 0.0], [12.0, 0.0], [9.0, 5.0], [3.0, 5.0]], obstacles: vec![] };
+        let hip = RoofFace { outline: vec![[0.0, 0.0], [12.0, 0.0], [9.0, 5.0], [3.0, 5.0]], obstacles: vec![], obstacle_heights: vec![] };
         let l = fill(&hip, &params(Orientation::Best));
         // Usable band after 0.4 m setback holds 2 landscape rows (1.7 × 1.0) of 5–6 modules, or
         // 2 portrait rows (1.0 × 1.7); per-row offsets must beat a single shared grid offset.
@@ -145,7 +151,7 @@ mod tests {
 
     #[test]
     fn too_small_roof_gives_nothing() {
-        let face = RoofFace { outline: rect_roof(1.5, 1.5), obstacles: vec![] };
+        let face = RoofFace { outline: rect_roof(1.5, 1.5), obstacles: vec![], obstacle_heights: vec![] };
         assert!(fill(&face, &params(Orientation::Best)).modules.is_empty());
     }
 }

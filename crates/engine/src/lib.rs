@@ -55,8 +55,8 @@ pub struct SimError(pub String);
 impl std::fmt::Display for SimError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) } }
 impl std::error::Error for SimError {}
 
-const IRR_KEYS: [(&str, &str); 5] = [
-    ("ghi", "Global horizontal irradiation"), ("poa", "Global incident in plane (transposition)"),
+const IRR_KEYS: [(&str, &str); 6] = [
+    ("ghi", "Global horizontal irradiation"), ("poa", "Global incident in plane (transposition)"), ("shading", "After near shading (obstacles)"),
     ("iam", "After incidence angle (reflection)"), ("soiling", "After soiling"), ("effective", "Effective irradiation on modules"),
 ];
 const E_KEYS: [(&str, &str); 15] = [
@@ -81,7 +81,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
     };
     let l = &p.losses;
     let f = |x: f64| 1.0 - x / 100.0;
-    let mut irr_tot = [0.0f64; 5]; // area-weighted Wh/m²·m²
+    let mut irr_tot = [0.0f64; 6]; // area-weighted Wh/m²·m²
     let mut e_tot = [0.0f64; 15];
     let mut area_tot = 0.0;
     let mut monthly = vec![Month::default(); 12];
@@ -109,6 +109,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
         let iam_beam = |aoi: f64| iam::physical(aoi, 1.526, 4.0, 0.002);
         let iam_sky = iam::diffuse_average(iam_beam, a.tilt.value, true);
         let iam_gnd = if a.tilt.value > 0.0 { iam::diffuse_average(iam_beam, a.tilt.value, false) } else { 0.0 };
+        let shade = near_shading(a, &sun);
         let mut window_hours = 0usize;
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
@@ -119,11 +120,14 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
             let comp = irr::Components { ghi, dni, dhi, dni_extra: irr::dni_extra(doy, 1366.1) };
             let poa = irr::poa(model, &geo, &comp, p.site.albedo.value);
             let aoi = irr::aoi_projection(geo.tilt, geo.surface_azimuth, geo.zenith, geo.sun_azimuth).clamp(-1.0, 1.0).acos().to_degrees();
-            let after_iam = poa.direct * iam_beam(aoi) + poa.sky_diffuse * iam_sky + poa.ground_diffuse * iam_gnd;
+            let (beam_f, diff_f) = shade.as_ref().map_or((1.0, 1.0), |s| (1.0 - s.beam_shaded[k] as f64, s.diffuse_factor));
+            let (dir_s, sky_s) = (poa.direct * beam_f, poa.sky_diffuse * diff_f);
+            let after_shade = dir_s + sky_s + poa.ground_diffuse;
+            let after_iam = dir_s * iam_beam(aoi) + sky_s * iam_sky + poa.ground_diffuse * iam_gnd;
             let after_soil = after_iam * f(l.soiling_pct.value);
             let e_eff = after_soil;
-            let irr_stages = [ghi, poa.global, after_iam, after_soil, e_eff];
-            for s in 0..5 { irr_tot[s] += irr_stages[s] * area; }
+            let irr_stages = [ghi, poa.global, after_shade, after_iam, after_soil, e_eff];
+            for s in 0..6 { irr_tot[s] += irr_stages[s] * area; }
 
             let tc = temperature::faiman(poa.global, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             let nominal = e_eff / 1000.0 * p_stc;
@@ -164,6 +168,10 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
             hourly.dc_w[k] += dcwire as f32;
             hourly.ac_w[k] += avail as f32;
         }
+        if let Some(sh) = &shade {
+            warnings.push(Note { code: "NEAR_SHADING".into(), subject: a.name.value.clone(), value: sh.obstacles as f64,
+                text: format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); electrical mismatch from partial shading is not yet modelled.", a.name.value, sh.obstacles, sh.diffuse_factor) });
+        }
         if window_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: a.name.value.clone(), value: window_hours as f64, text: format!("{}: {window_hours} h outside the inverter MPP voltage window", a.name.value) }); }
     }
     progress(1.0);
@@ -190,4 +198,58 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
         annual: Annual { dc_kwp, ac_kw, ghi_kwh_m2: irradiance_ledger[0].value, poa_kwh_m2: poa, ac_kwh, specific_yield_kwh_kwp: ac_kwh / dc_kwp, performance_ratio: ac_kwh / (poa * dc_kwp) },
         irradiance_ledger, energy_ledger, monthly, hourly, warnings,
     })
+}
+
+
+/// Near shading of an array's modules by its roof obstacles.
+pub struct NearShading {
+    /// Shaded fraction of the beam on the modules, per hour.
+    pub beam_shaded: Vec<f32>,
+    /// Fraction of isotropic sky diffuse still reaching the modules.
+    pub diffuse_factor: f64,
+    pub obstacles: usize,
+}
+
+/// Ray-traced near shading for arrays with a roof layout and obstacles
+/// (3 × 6 samples per module; deterministic cosine-weighted hemisphere for diffuse).
+pub fn near_shading(a: &solarcraft_model::Array, sun: &[spa::SolarPosition]) -> Option<NearShading> {
+    use solarcraft_geometry::roof3d::{obstacle_triangles, Frame};
+    use solarcraft_shading::{sun_dir, Bvh, Triangle};
+    let roof = a.roof.as_ref()?;
+    if roof.face.obstacles.is_empty() || roof.modules.is_empty() { return None; }
+    let frame = Frame::new(a.tilt.value, a.azimuth.value, 3.0);
+    let tris: Vec<Triangle> = obstacle_triangles(&roof.face, &frame).into_iter().map(|(t, i)| Triangle { a: t[0], b: t[1], c: t[2], owner: i as u32 + 1 }).collect();
+    let bvh = Bvh::from_triangles(&tris);
+    let mut samples = vec![];
+    for m in &roof.modules {
+        for i in 0..3 { for j in 0..6 {
+            let p = [m.x0 + (m.x1 - m.x0) * (i as f64 + 0.5) / 3.0, m.y0 + (m.y1 - m.y0) * (j as f64 + 0.5) / 6.0];
+            samples.push(frame.above(p, 0.05));
+        } }
+    }
+    let n = frame.n;
+    let beam_shaded = sun.iter().map(|sp| {
+        if sp.apparent_elevation <= 0.0 { return 0.0; }
+        let d = sun_dir(sp.apparent_elevation, sp.azimuth);
+        if d[0] * n[0] + d[1] * n[1] + d[2] * n[2] <= 0.0 { return 0.0; }
+        samples.iter().filter(|&&o| bvh.occluded(o, d, 0)).count() as f32 / samples.len() as f32
+    }).collect();
+    // Cosine-weighted directions around the module normal; only sky directions (z > 0) count.
+    let (t1, t2) = { let up = if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+        let c = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        let norm = |v: [f64; 3]| { let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt(); [v[0] / l, v[1] / l, v[2] / l] };
+        let t1 = norm(c(up, n)); (t1, c(n, t1)) };
+    let (nr, nphi) = (12usize, 24usize);
+    let probe: Vec<_> = samples.iter().step_by(6).copied().collect();
+    let (mut sky, mut visible) = (0usize, 0usize);
+    for ir in 0..nr { for ip in 0..nphi {
+        let r = ((ir as f64 + 0.5) / nr as f64).sqrt();
+        let phi = (ip as f64 + 0.5) / nphi as f64 * std::f64::consts::TAU;
+        let (x, y, z) = (r * phi.cos(), r * phi.sin(), (1.0 - r * r).sqrt());
+        let d = [0, 1, 2].map(|k| t1[k] * x + t2[k] * y + n[k] * z);
+        if d[2] <= 0.0 { continue; }
+        for &o in &probe { sky += 1; if !bvh.occluded(o, d, 0) { visible += 1; } }
+    } }
+    let diffuse_factor = if sky > 0 { visible as f64 / sky as f64 } else { 1.0 };
+    Some(NearShading { beam_shaded, diffuse_factor, obstacles: roof.face.obstacles.len() })
 }

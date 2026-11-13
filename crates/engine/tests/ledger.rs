@@ -68,3 +68,38 @@ fn deterministic() {
     let b = simulate(&p, &w, "h", |_| true).unwrap();
     assert_eq!(serde_json::to_string(&a.annual).unwrap(), serde_json::to_string(&b.annual).unwrap());
 }
+
+fn with_roof(lat: f64, lon: f64, chimney_h: Option<f64>) -> Project {
+    let mut p = project(lat, lon, 10.0);
+    let obstacles = if chimney_h.is_some() { serde_json::json!([[[4.6, 1.0], [5.4, 1.0], [5.4, 1.8], [4.6, 1.8]]]) } else { serde_json::json!([]) };
+    let heights = chimney_h.map_or(serde_json::json!([]), |h| serde_json::json!([h]));
+    p.set_by_pointer("/arrays/0/roof", serde_json::json!({
+        "face": {"outline": [[0.0, 0.0], [10.0, 0.0], [10.0, 6.0], [0.0, 6.0]], "obstacles": obstacles, "obstacle_heights": heights},
+        "params": {"module_length": 0.0, "module_width": 0.0, "orientation": "best", "gap_x": 0.02, "gap_y": 0.02, "setback": 0.3, "obstacle_clearance": 0.2, "search_step": 0.05},
+        "modules": [], "orientation": "best", "inputs_key": ""})).unwrap();
+    p
+}
+
+fn shading_loss(r: &solarcraft_engine::SimResult) -> f64 {
+    -r.irradiance_ledger.iter().find(|s| s.key == "shading").unwrap().delta_pct
+}
+
+#[test]
+fn chimney_shading_is_counted_and_grows_with_height() {
+    let (lat, lon) = (40.4, -3.7);
+    let w = synthetic(lat, lon);
+    let none = simulate(&with_roof(lat, lon, None), &w, "h", |_| true).unwrap();
+    assert!(shading_loss(&none).abs() < 1e-9);
+    let low = simulate(&with_roof(lat, lon, Some(0.5)), &w, "h", |_| true).unwrap();
+    let tall = simulate(&with_roof(lat, lon, Some(2.5)), &w, "h", |_| true).unwrap();
+    let (l, t) = (shading_loss(&low), shading_loss(&tall));
+    println!("chimney shading loss: 0.5 m -> {l:.2} %, 2.5 m -> {t:.2} %");
+    assert!(l > 0.0 && t > l && t < 30.0, "low {l} % tall {t} %");
+    assert!(tall.manifest.ledger_closure_error_kwh.abs() < 1e-6);
+    assert!(tall.warnings.iter().any(|n| n.code == "NEAR_SHADING"));
+    let a = &with_roof(lat, lon, Some(2.5)).arrays[0];
+    let obs = spa::Observer::new(lat, lon, 0.0);
+    let sun: Vec<_> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, 69.0)).collect();
+    let s = solarcraft_engine::near_shading(a, &sun).unwrap();
+    assert!(s.beam_shaded.iter().all(|f| (0.0..=1.0).contains(f)) && s.diffuse_factor > 0.5 && s.diffuse_factor <= 1.0, "svf {}", s.diffuse_factor);
+}

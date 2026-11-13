@@ -2742,8 +2742,10 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "solarcraft-geometry",
  "solarcraft-model",
  "solarcraft-pv",
+ "solarcraft-shading",
  "solarcraft-weather",
 ]
 
@@ -2807,6 +2809,10 @@ dependencies = [
  "typst-layout",
  "typst-pdf",
 ]
+
+[[package]]
+name = "solarcraft-shading"
+version = "0.0.1"
 
 [[package]]
 name = "solarcraft-store"

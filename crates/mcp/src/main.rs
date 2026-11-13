@@ -98,6 +98,9 @@ struct RoofArgs {
     /// Obstacles (chimneys, skylights) as polygons in the same coordinates.
     #[serde(default)]
     obstacles: Vec<Vec<[f64; 2]>>,
+    /// Height of each obstacle above the roof, metres (default 1 m); used for near shading.
+    #[serde(default)]
+    obstacle_heights: Vec<f64>,
     /// Optional layout parameters: setback, obstacle_clearance, gap_x, gap_y (m), orientation (portrait|landscape|best).
     #[serde(default)]
     params: Option<serde_json::Map<String, Value>>,
@@ -221,7 +224,7 @@ impl SolarCraftMcp {
     #[tool(description = "Set (or remove) the roof face of an array and place modules on it, respecting edge setback and obstacle clearance. In Easy mode the system size follows the modules that fit. Returns modules_fit and issues.")]
     async fn set_roof(&self, Parameters(a): Parameters<RoofArgs>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;
-        let req = json!({"file": f.to_string_lossy(), "array": a.array, "outline": a.outline, "obstacles": a.obstacles, "params": a.params});
+        let req = json!({"file": f.to_string_lossy(), "array": a.array, "outline": a.outline, "obstacles": a.obstacles, "obstacle_heights": a.obstacle_heights, "params": a.params});
         match app::api::dispatch("set_roof", &req, &mut |_| true) { Ok(v) => ok(v), Err(e) => app_err(e) }
     }
 

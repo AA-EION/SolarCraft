@@ -74,6 +74,8 @@
   #text(size: 9pt, fill: muted, s.losses_intro)
   #image("waterfall.svg", width: 100%)
 ]
+#grid-table(d.irr_rows, widths: (1fr, auto, auto), header: (s.irradiation, "kWh/m²", s.change), align-cols: (left, right, right))
+#v(6pt)
 #grid-table(d.loss_rows, widths: (1fr, auto, auto), header: (s.step, s.energy + " (kWh)", s.change), align-cols: (left, right, right))
 
 = #s.monthly_table

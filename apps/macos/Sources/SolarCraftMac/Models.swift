@@ -24,7 +24,18 @@ struct ProjectDoc: Decodable {
         let roof: RoofDoc?
     }
     struct RoofDoc: Decodable {
-        struct Face: Decodable { let outline: [[Double]]; let obstacles: [[[Double]]] }
+        struct Face: Decodable {
+            let outline: [[Double]]
+            let obstacles: [[[Double]]]
+            let obstacle_heights: [Double]
+            enum CodingKeys: String, CodingKey { case outline, obstacles, obstacle_heights }
+            init(from d: Decoder) throws {
+                let c = try d.container(keyedBy: CodingKeys.self)
+                outline = try c.decode([[Double]].self, forKey: .outline)
+                obstacles = try c.decode([[[Double]]].self, forKey: .obstacles)
+                obstacle_heights = try c.decodeIfPresent([Double].self, forKey: .obstacle_heights) ?? []
+            }
+        }
         struct Params: Decodable { let setback: Double; let obstacle_clearance: Double }
         struct ModuleRect: Decodable { let x0: Double; let y0: Double; let x1: Double; let y1: Double }
         let face: Face
@@ -60,7 +71,7 @@ struct SetResult: Decodable { let project: ProjectDoc; let issues: [Issue] }
 struct Annual: Decodable { let dc_kwp: Double; let ac_kw: Double; let ac_kwh: Double; let specific_yield_kwh_kwp: Double; let performance_ratio: Double; let ghi_kwh_m2: Double; let poa_kwh_m2: Double }
 struct Step: Decodable, Identifiable { let key: String; let label: String; let value: Double; let delta: Double; let delta_pct: Double; var id: String { key } }
 struct Month: Decodable, Identifiable { let month: Int; let ac_kwh: Double; var id: Int { month } }
-struct Explain: Decodable { let annual: Annual; let energy_kwh: [Step]; let monthly: [Month] }
+struct Explain: Decodable { let annual: Annual; let irradiance_kwh_m2: [Step]; let energy_kwh: [Step]; let monthly: [Month] }
 struct WeatherSummary: Decodable { let weather_ref: ProjectDoc.WeatherRef }
 struct ReportOutput: Decodable { let path: String; let bytes: Int }
 

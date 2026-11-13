@@ -1,0 +1,8 @@
+[package]
+name = "solarcraft-shading"
+description = "SolarCraft ray-cast shading (BVH)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]

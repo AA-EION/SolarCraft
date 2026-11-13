@@ -148,8 +148,14 @@ public sealed partial class MainWindow : Window
 
     public static List<List<double[]>> ParseObstacles(string text) => text.Split(';', StringSplitOptions.RemoveEmptyEntries)
         .Select(p => p.Split(',').Select(v => double.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray())
-        .Where(v => v.Length == 4 && !v.Any(double.IsNaN) && v[2] > 0 && v[3] > 0)
+        .Where(v => (v.Length == 4 || v.Length == 5) && !v.Any(double.IsNaN) && v[2] > 0 && v[3] > 0)
         .Select(v => new List<double[]> { new[] { v[0], v[1] }, new[] { v[0] + v[2], v[1] }, new[] { v[0] + v[2], v[1] + v[3] }, new[] { v[0], v[1] + v[3] } }).ToList();
+
+    /// Heights (5th value, metres; default 1) of the obstacles accepted by ParseObstacles.
+    public static List<double> ParseObstacleHeights(string text) => text.Split(';', StringSplitOptions.RemoveEmptyEntries)
+        .Select(p => p.Split(',').Select(v => double.TryParse(v.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray())
+        .Where(v => (v.Length == 4 || v.Length == 5) && !v.Any(double.IsNaN) && v[2] > 0 && v[3] > 0)
+        .Select(v => v.Length == 5 ? v[4] : 1.0).ToList();
 
     private void OnRoofShape(object sender, SelectionChangedEventArgs e)
     {
@@ -231,7 +237,7 @@ public sealed partial class MainWindow : Window
         {
             var r = outline is null
                 ? Api.Invoke("set_roof", new { file = _file, array = 0, outline = (object?)null })!
-                : Api.Invoke("set_roof", new { file = _file, array = 0, outline, obstacles = ParseObstacles(ObstaclesBox.Text), @params = new { setback = SetbackBox.Value, obstacle_clearance = ClearanceBox.Value } })!;
+                : Api.Invoke("set_roof", new { file = _file, array = 0, outline, obstacles = ParseObstacles(ObstaclesBox.Text), obstacle_heights = ParseObstacleHeights(ObstaclesBox.Text), @params = new { setback = SetbackBox.Value, obstacle_clearance = ClearanceBox.Value } })!;
             if (r["modules_fit"] is JsonNode n) ShowInfo($"{n.GetValue<int>()} {T("modules_fit")}");
         });
         Reload();
@@ -302,6 +308,19 @@ public sealed partial class MainWindow : Window
             MonthlyBars.Children.Add(col);
         }
         int row = 0;
+        foreach (var st in r["irradiance_kwh_m2"]!.AsArray())
+        {
+            var key = st!["key"]!.GetValue<string>();
+            LossGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var cells = new[] {
+                new TextBlock { Text = T("irr_" + key) },
+                new TextBlock { Text = st["value"]!.GetValue<double>().ToString("N1", CultureInfo.CurrentCulture) + " kWh/m²", HorizontalAlignment = HorizontalAlignment.Right },
+                new TextBlock { Text = key is "ghi" or "effective" ? "" : st["delta_pct"]!.GetValue<double>().ToString("N2", CultureInfo.CurrentCulture) + " %", HorizontalAlignment = HorizontalAlignment.Right, Opacity = 0.7 } };
+            for (int c = 0; c < 3; c++) { Grid.SetRow(cells[c], row); Grid.SetColumn(cells[c], c); LossGrid.Children.Add(cells[c]); }
+            row++;
+        }
+        LossGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(12) });
+        row++;
         foreach (var st in r["energy_kwh"]!.AsArray())
         {
             var key = st!["key"]!.GetValue<string>();

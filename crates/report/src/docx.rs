@@ -75,6 +75,8 @@ pub fn render(v: &View) -> Result<Vec<u8>, String> {
         .add_paragraph(heading(s["losses"]))
         .add_paragraph(Paragraph::new().add_run(text(s["losses_intro"]).size(18).color(MUTED)))
         .add_paragraph(image_para(&v.waterfall_svg, width)?)
+        .add_table(table_of(Some(&[s["irradiation"].to_string(), "kWh/m²".to_string(), s["change"].to_string()]), &v.irr_rows))
+        .add_paragraph(para(""))
         .add_table(table_of(Some(&[s["step"].to_string(), format!("{} (kWh)", s["energy"]), s["change"].to_string()]), &v.loss_rows))
         .add_paragraph(heading(s["monthly_table"]))
         .add_table(table_of(Some(&v.monthly_header), &v.monthly_rows))
