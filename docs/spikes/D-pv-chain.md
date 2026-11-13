@@ -55,6 +55,6 @@ python -m venv .venv && .venv/bin/pip install pvlib==0.16.1
 - **The other 62** get the best physically valid compromise. A `FitReport` returns the errors so the UI can flag the module. The worst STC Pmp error is 1.2%.
 - pvlib's own 5-parameter `fit_desoto` fails on 262 of 300 of these datasheets, because the 5-parameter model is inconsistent with typical datasheets. That is why the 6-parameter CEC method exists.
 
-**Known gap.** SAM's parameters reproduce all 300 datasheets, so solutions exist for the 62. Fix: port SAM's solver (`ssc/shared/6par_*.h`, BSD-3) directly, including its band-gap constant and P(T) solver, instead of approximating its conventions. Tracked in feature row SIM-007.
+**Correction (2026-11-13): there is no solver gap.** The equations evaluated at the CEC-listed (SAM-fitted) parameters leave a median residual of 1.0% of Isc (max 4.1%) for the modules we flag as approximate, against 0.03% for those we fit exactly. SAM's published parameters for these datasheets are compromises too: the datasheets are internally inconsistent under the six-parameter model. SolarCraft's flag is therefore correct, and its compromise keeps the STC point within 1.2%. Porting SAM's solver would not change this, so the item is closed. A remaining difference from SAM is the band-gap constant: SAM uses 11600 K/eV, SolarCraft the exact 1/k = 11604.5 K/eV.
 
 Reproduce: `.venv/bin/python -I spikes/pv-oracle/models.py target/release/pvmodels /tmp/pvm 300`

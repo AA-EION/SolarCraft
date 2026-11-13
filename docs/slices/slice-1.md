@@ -16,4 +16,4 @@ Status on 2026-11-12. The row IDs refer to [feature-matrix.tsv](../discovery/fea
 ## Remaining for slice 1
 1. Interactive check of both shells on real desktops: CI proves they build and that the API calls the UI makes work, not the look and feel. Screenshots from a real machine are needed.
 2. 2D roof layout (polygon, setbacks, module placement), starting the IngeTrazo geometry port.
-3. Port SAM's 6-parameter solver so every CEC datasheet fits exactly (SIM-007).
+3. ~~Port SAM's 6-parameter solver~~ Closed: the datasheets we flag are inconsistent for SAM too (see the spike D addendum).
