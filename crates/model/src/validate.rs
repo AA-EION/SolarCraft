@@ -42,6 +42,10 @@ pub fn validate(p: &Project) -> Vec<Issue> {
         }
         if strings_per_inv > inv.mppt_count as f64 * (inv.i_max_per_mppt / m.i_sc).floor().max(1.0) { push("INVERTER_INPUTS", Severity::Error, format!("{base}/strings"), "More strings than the inverter can accept.".into()); }
         if let Some(roof) = &a.roof {
+            let roof_kwp = roof.modules.len() as f64 * m.pmp_stc() / 1000.0;
+            if a.target_kwp.is_user() && a.target_kwp.value > roof_kwp + 1e-6 {
+                push("ROOF_LIMITS_SIZE", Severity::Warning, format!("{base}/target_kwp"), format!("The roof fits {} modules ({roof_kwp:.2} kWp); the requested {:.2} kWp cannot be reached.", roof.modules.len(), a.target_kwp.value));
+            }
             let placed = (a.modules_per_string.value * a.strings.value) as usize;
             if placed > roof.modules.len() {
                 push("ROOF_CAPACITY", Severity::Error, format!("{base}/strings"), format!("{placed} modules in strings, but only {} fit on the roof layout.", roof.modules.len()));

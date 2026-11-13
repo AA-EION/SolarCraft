@@ -70,12 +70,17 @@ pub fn derive(p: &mut Project) {
         let a = &mut p.arrays[i];
         let Some(inv) = p.library.inverter(&a.inverter_id.value).cloned() else { continue };
         // Modules per string: largest count with cold Voc ≤ Vdc,max and hot Vmp ≥ MPPT min.
+        // A roof layout caps the module count: strings never use more modules than fit.
+        let roof_cap = a.roof.as_ref().map(|r| r.modules.len() as u32);
+        let wanted = (a.target_kwp.value * 1000.0 / module.pmp_stc()).round().max(1.0) as u32;
+        let modules_total = roof_cap.map_or(wanted, |c| wanted.min(c)).max(1);
+        // Strings per length: round to the target without a roof; never exceed the roof with one.
+        let strings_for = |n: u32| -> u32 { if roof_cap.is_some() { (modules_total / n).max(1) } else { ((modules_total as f64 / n as f64).round() as u32).max(1) } };
         if !a.modules_per_string.is_user() {
             let (voc_cold, _) = module_voltages(&module, T_CELL_MIN);
             let (_, vmp_hot) = module_voltages(&module, T_CELL_MAX);
             let n_max = (inv.v_dc_max / voc_cold).floor().max(1.0) as u32;
             let n_min = (inv.mppt_v_min / vmp_hot).ceil().max(1.0) as u32;
-            let modules_total = (a.target_kwp.value * 1000.0 / module.pmp_stc()).round().max(1.0) as u32;
             // String capacity of the inverter(s): MPPTs × parallel strings per MPPT.
             let per_mppt = (inv.i_max_per_mppt / module.i_sc).floor().max(1.0) as u32;
             let capacity = inv.mppt_count * per_mppt * a.inverter_count.value.max(1);
@@ -83,14 +88,13 @@ pub fn derive(p: &mut Project) {
             // modules, then prefer longer strings (fewer strings, lower current).
             let n = (n_min..=n_max.max(n_min))
                 .filter(|&n| modules_total.div_ceil(n) <= capacity || n == n_max)
-                .min_by_key(|&n| { let s = (modules_total as f64 / n as f64).round().max(1.0) as u32; ((s * n).abs_diff(modules_total), u32::MAX - n) })
+                .min_by_key(|&n| { let s = strings_for(n); ((s * n).abs_diff(modules_total), u32::MAX - n) })
                 .unwrap_or(n_max)
                 .min(modules_total.max(1));
             a.modules_per_string.derive(n);
         }
         if !a.strings.is_user() {
-            let per_string = a.modules_per_string.value.max(1) as f64 * module.pmp_stc();
-            a.strings.derive((a.target_kwp.value * 1000.0 / per_string).round().max(1.0) as u32);
+            a.strings.derive(strings_for(a.modules_per_string.value.max(1)));
         }
         // In Detailed mode the actual kWp follows the counts.
         if !a.target_kwp.is_user() || (a.modules_per_string.is_user() && a.strings.is_user()) {

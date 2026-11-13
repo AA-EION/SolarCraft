@@ -91,3 +91,18 @@ fn roof_layout_drives_easy_mode_size_and_detailed_capacity() {
     p.set_by_pointer("/arrays/0/strings", json!(2)).unwrap();
     assert!(validate(&p).iter().any(|i| i.code == "ROOF_CAPACITY"));
 }
+
+#[test]
+fn user_size_larger_than_roof_is_capped_with_warning() {
+    // Reproduces the shell self-test failure: user asks 4 kWp, roof fits fewer modules.
+    let mut p = Project::new("c", "Cap", 6.2442, -75.5812);
+    p.set_by_pointer("/arrays/0/target_kwp", json!(4.0)).unwrap();
+    p.set_by_pointer("/arrays/0/roof", json!({"face": {"outline": [[0.0, 0.0], [11.0, 0.0], [8.0, 5.0], [3.0, 5.0]], "obstacles": [[[5.0, 2.0], [5.8, 2.0], [5.8, 2.8], [5.0, 2.8]]]},
+        "params": {"module_length": 0.0, "module_width": 0.0, "orientation": "best", "gap_x": 0.02, "gap_y": 0.02, "setback": 0.4, "obstacle_clearance": 0.3, "search_step": 0.05}, "modules": [], "orientation": "best", "inputs_key": ""})).unwrap();
+    let fit = p.arrays[0].roof.as_ref().unwrap().modules.len() as u32;
+    let used = p.arrays[0].modules_per_string.value * p.arrays[0].strings.value;
+    assert!(used <= fit && used > 0, "uses {used}, fits {fit}");
+    let issues = validate(&p);
+    assert!(!issues.iter().any(|i| i.code == "ROOF_CAPACITY"), "{issues:?}");
+    assert!(issues.iter().any(|i| i.code == "ROOF_LIMITS_SIZE"));
+}
