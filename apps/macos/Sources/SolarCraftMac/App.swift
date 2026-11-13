@@ -318,7 +318,19 @@ struct RoofPage: View {
                     if shape == "trapezoid" { TextField(m.t("ridge_length"), value: $ridge, format: .number) }
                     TextField(m.t("slope_length"), value: $slope, format: .number)
                 }
-                if shape == "custom" { TextField(m.t("custom_points"), text: $custom) }
+                if shape == "custom" {
+                    TextField(m.t("custom_points"), text: $custom)
+                    Text(m.t("click_to_add")).font(.caption).foregroundStyle(.secondary)
+                    DraftCanvas(text: $custom).frame(height: 280)
+                    HStack {
+                        Button(m.t("undo_point")) {
+                            var pts = parsePoints(custom)
+                            if !pts.isEmpty { pts.removeLast() }
+                            custom = formatPoints(pts)
+                        }
+                        Button(m.t("clear_points")) { custom = "" }
+                    }
+                }
                 if shape != "none" {
                     TextField(m.t("obstacles"), text: $obstacles)
                     TextField(m.t("setback"), value: $setback, format: .number)
@@ -378,5 +390,47 @@ struct RoofPreview: View {
             for ob in roof.face.obstacles { ctx.fill(poly(ob), with: .color(.gray)) }
         }
         .accessibilityLabel("Roof layout")
+    }
+}
+
+func formatPoints(_ pts: [[Double]]) -> String {
+    pts.map { String(format: "%.1f,%.1f", $0[0], $0[1]) }.joined(separator: "; ")
+}
+
+/// Click-to-add outline editor on a 1 m grid (origin bottom-left, y up the slope).
+struct DraftCanvas: View {
+    @Binding var text: String
+    var body: some View {
+        let pts = parsePoints(text)
+        let w = max(12.0, (pts.map { $0[0] }.max() ?? 0) + 2)
+        let h = max(8.0, (pts.map { $0[1] }.max() ?? 0) + 2)
+        return GeometryReader { geo in
+            let scale = min(geo.size.width / w, geo.size.height / h)
+            Canvas { ctx, _ in
+                func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: x * scale, y: (h - y) * scale) }
+                var grid = Path()
+                for gx in 0...Int(w) { grid.move(to: pt(Double(gx), 0)); grid.addLine(to: pt(Double(gx), h)) }
+                for gy in 0...Int(h) { grid.move(to: pt(0, Double(gy))); grid.addLine(to: pt(w, Double(gy))) }
+                ctx.stroke(grid, with: .color(.gray.opacity(0.25)), lineWidth: 0.5)
+                if pts.count >= 2 {
+                    var poly = Path()
+                    for (i, p) in pts.enumerated() { if i == 0 { poly.move(to: pt(p[0], p[1])) } else { poly.addLine(to: pt(p[0], p[1])) } }
+                    if pts.count >= 3 { poly.closeSubpath(); ctx.fill(poly, with: .color(.gray.opacity(0.15))) }
+                    ctx.stroke(poly, with: .color(.primary), lineWidth: 1.5)
+                }
+                for p in pts {
+                    let c = pt(p[0], p[1])
+                    ctx.fill(Path(ellipseIn: CGRect(x: c.x - 4, y: c.y - 4, width: 8, height: 8)), with: .color(.accentColor))
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(coordinateSpace: .local) { loc in
+                let x = (loc.x / scale * 10).rounded() / 10
+                let y = ((h * scale - loc.y) / scale * 10).rounded() / 10
+                guard x >= 0, y >= 0, x <= w, y <= h else { return }
+                text = formatPoints(parsePoints(text) + [[x, y]])
+            }
+        }
+        .accessibilityLabel("Roof outline editor")
     }
 }

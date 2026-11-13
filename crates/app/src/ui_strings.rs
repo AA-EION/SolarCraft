@@ -86,5 +86,8 @@ ui! {
     clearance => ["Obstacle clearance (m)", "Despeje de obstáculos (m)", "Abstand zu Hindernissen (m)", "Afastamento de obstáculos (m)"],
     apply_roof => ["Place modules", "Colocar módulos", "Module platzieren", "Posicionar módulos"],
     modules_fit => ["modules fit", "módulos caben", "Module passen", "módulos cabem"],
+    click_to_add => ["Click the grid to add outline points (1 m grid, 0.1 m snap).", "Haga clic en la rejilla para añadir puntos del contorno (rejilla de 1 m, ajuste de 0,1 m).", "Klicken Sie ins Raster, um Konturpunkte hinzuzufügen (1-m-Raster, 0,1-m-Fang).", "Clique na grade para adicionar pontos do contorno (grade de 1 m, ajuste de 0,1 m)."],
+    undo_point => ["Remove last point", "Quitar último punto", "Letzten Punkt entfernen", "Remover último ponto"],
+    clear_points => ["Clear points", "Borrar puntos", "Punkte löschen", "Limpar pontos"],
     roof_hint => ["Coordinates in the roof plane: x along the eave, y up the slope.", "Coordenadas en el plano del techo: x a lo largo del alero, y hacia la cumbrera.", "Koordinaten in der Dachebene: x entlang der Traufe, y zum First.", "Coordenadas no plano do telhado: x ao longo do beiral, y em direção à cumeeira."],
 }

@@ -71,7 +71,17 @@
             <NumberBox x:Name="EaveBox" Width="220" HorizontalAlignment="Left" Value="10" />
             <NumberBox x:Name="RidgeBox" Width="220" HorizontalAlignment="Left" Value="6" Visibility="Collapsed" />
             <NumberBox x:Name="SlopeBox" Width="220" HorizontalAlignment="Left" Value="5" />
-            <TextBox x:Name="CustomBox" Width="520" HorizontalAlignment="Left" Visibility="Collapsed" />
+            <TextBox x:Name="CustomBox" Width="520" HorizontalAlignment="Left" Visibility="Collapsed" TextChanged="OnCustomChanged" />
+            <StackPanel x:Name="DraftPanel" Spacing="6" Visibility="Collapsed">
+              <TextBlock x:Name="ClickHint" Opacity="0.7" />
+              <Border BorderBrush="Gray" BorderThickness="1" HorizontalAlignment="Left">
+                <Canvas x:Name="DraftCanvas" Width="700" Height="280" Background="Transparent" PointerPressed="OnDraftPressed" />
+              </Border>
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="UndoPointButton" Click="OnUndoPoint" />
+                <Button x:Name="ClearPointsButton" Click="OnClearPoints" />
+              </StackPanel>
+            </StackPanel>
             <TextBox x:Name="ObstaclesBox" Width="520" HorizontalAlignment="Left" />
             <NumberBox x:Name="SetbackBox" Width="220" HorizontalAlignment="Left" Value="0.4" SmallChange="0.05" />
             <NumberBox x:Name="ClearanceBox" Width="220" HorizontalAlignment="Left" Value="0.3" SmallChange="0.05" />

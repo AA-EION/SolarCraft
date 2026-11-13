@@ -56,6 +56,7 @@ public sealed partial class MainWindow : Window
         RoofShapeBox.ItemsSource = new[] { T("roof_rect"), T("roof_trapezoid"), T("roof_custom"), T("roof_none") };
         EaveBox.Header = T("eave_length"); RidgeBox.Header = T("ridge_length"); SlopeBox.Header = T("slope_length");
         CustomBox.Header = T("custom_points"); ObstaclesBox.Header = T("obstacles"); SetbackBox.Header = T("setback"); ClearanceBox.Header = T("clearance");
+        ClickHint.Text = T("click_to_add"); UndoPointButton.Content = T("undo_point"); ClearPointsButton.Content = T("clear_points");
         RoofHint.Text = T("roof_hint"); ApplyRoofButton.Content = T("apply_roof");
         LangBox.Header = T("language"); FormatBox.Header = T("format"); DesignerBox.Header = T("designer"); ExportButton.Content = T("export_report");
         var two = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
@@ -155,9 +156,64 @@ public sealed partial class MainWindow : Window
         var i = RoofShapeBox.SelectedIndex;
         EaveBox.Visibility = SlopeBox.Visibility = i is 0 or 1 ? Visibility.Visible : Visibility.Collapsed;
         RidgeBox.Visibility = i == 1 ? Visibility.Visible : Visibility.Collapsed;
-        CustomBox.Visibility = i == 2 ? Visibility.Visible : Visibility.Collapsed;
+        CustomBox.Visibility = DraftPanel.Visibility = i == 2 ? Visibility.Visible : Visibility.Collapsed;
         ObstaclesBox.Visibility = SetbackBox.Visibility = ClearanceBox.Visibility = i == 3 ? Visibility.Collapsed : Visibility.Visible;
     }
+
+    // ---- Click-to-add outline editor (1 m grid, 0.1 m snap, y up the slope) ----
+    private static string FormatPoints(IEnumerable<double[]> pts) => string.Join("; ", pts.Select(p => string.Format(CultureInfo.InvariantCulture, "{0:0.0},{1:0.0}", p[0], p[1])));
+
+    private (double w, double h, double scale) DraftExtent(List<double[]> pts)
+    {
+        var w = Math.Max(12, (pts.Count > 0 ? pts.Max(p => p[0]) : 0) + 2);
+        var h = Math.Max(8, (pts.Count > 0 ? pts.Max(p => p[1]) : 0) + 2);
+        return (w, h, Math.Min(DraftCanvas.Width / w, DraftCanvas.Height / h));
+    }
+
+    private void DrawDraft()
+    {
+        DraftCanvas.Children.Clear();
+        var pts = ParsePoints(CustomBox.Text);
+        var (w, h, scale) = DraftExtent(pts);
+        var gridBrush = new SolidColorBrush(ColorHelper.FromArgb(60, 128, 128, 128));
+        for (var gx = 0; gx <= (int)w; gx++) DraftCanvas.Children.Add(new Line { X1 = gx * scale, Y1 = 0, X2 = gx * scale, Y2 = h * scale, Stroke = gridBrush, StrokeThickness = 0.5 });
+        for (var gy = 0; gy <= (int)h; gy++) DraftCanvas.Children.Add(new Line { X1 = 0, Y1 = (h - gy) * scale, X2 = w * scale, Y2 = (h - gy) * scale, Stroke = gridBrush, StrokeThickness = 0.5 });
+        if (pts.Count >= 2)
+        {
+            var pg = new Polygon { Stroke = new SolidColorBrush(Colors.Gray), StrokeThickness = 1.5, Fill = pts.Count >= 3 ? new SolidColorBrush(ColorHelper.FromArgb(40, 128, 128, 128)) : null };
+            foreach (var p in pts) pg.Points.Add(new Windows.Foundation.Point(p[0] * scale, (h - p[1]) * scale));
+            DraftCanvas.Children.Add(pg);
+        }
+        foreach (var p in pts)
+        {
+            var dot = new Ellipse { Width = 8, Height = 8, Fill = new SolidColorBrush(ColorHelper.FromArgb(255, 0x0f, 0x5c, 0x63)) };
+            Canvas.SetLeft(dot, p[0] * scale - 4); Canvas.SetTop(dot, (h - p[1]) * scale - 4);
+            DraftCanvas.Children.Add(dot);
+        }
+    }
+
+    private void OnCustomChanged(object sender, TextChangedEventArgs e) => DrawDraft();
+
+    private void OnDraftPressed(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+    {
+        var pos = e.GetCurrentPoint(DraftCanvas).Position;
+        var pts = ParsePoints(CustomBox.Text);
+        var (w, h, scale) = DraftExtent(pts);
+        var x = Math.Round(pos.X / scale * 10) / 10;
+        var y = Math.Round((h * scale - pos.Y) / scale * 10) / 10;
+        if (x < 0 || y < 0 || x > w || y > h) return;
+        pts.Add(new[] { x, y });
+        CustomBox.Text = FormatPoints(pts);
+    }
+
+    private void OnUndoPoint(object sender, RoutedEventArgs e)
+    {
+        var pts = ParsePoints(CustomBox.Text);
+        if (pts.Count > 0) pts.RemoveAt(pts.Count - 1);
+        CustomBox.Text = FormatPoints(pts);
+    }
+
+    private void OnClearPoints(object sender, RoutedEventArgs e) => CustomBox.Text = "";
 
     private void OnApplyRoof(object sender, RoutedEventArgs e)
     {
