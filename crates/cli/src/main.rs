@@ -157,7 +157,7 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
         Cmd::Section { file, section, value } => {
             let text = if std::path::Path::new(&value).is_file() { std::fs::read_to_string(&value).map_err(|x| app::AppError { code: "FILE_READ", message: x.to_string() })? } else { value };
             let v: Value = serde_json::from_str(&text).map_err(|x| app::AppError { code: "INVALID_ARGUMENT", message: format!("value: {x}") })?;
-            let r = api(&"set_section".to_string(), serde_json::json!({"file": file, "section": section, "value": v}))?;
+            let r = api("set_section", serde_json::json!({"file": file, "section": section, "value": v}))?;
             print(j, &r, || { println!("Updated {section}."); issues(&r["issues"]); });
         }
         Cmd::Equipment { file, kind, spec } => {
@@ -189,7 +189,7 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
             let q = serde_json::json!({"day_of_year": day, "top": top, "start": start, "count": count});
             let r = app::plant_ops::results_hours(&file, &q)?;
             print(j, &r, || {
-                println!("{:>5} {:>3} {:>3} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7}  {}", "idx", "mo", "day", "hour", "PV AC", "load", "→batt", "batt→", "import", "export", "SOC%", "backup", "curtail", "");
+                println!("{:>5} {:>3} {:>3} {:>5} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>6} {:>7} {:>7}", "idx", "mo", "day", "hour", "PV AC", "load", "→batt", "batt→", "import", "export", "SOC%", "backup", "curtail");
                 for h in r["hours"].as_array().into_iter().flatten() {
                     let g = |k: &str| h[k].as_f64().unwrap_or(0.0);
                     println!("{:>5} {:>3} {:>3} {:>5} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {:>7.0} {:>7.0}  {}", g("index"), g("month"), g("day_of_year"), format!("{:02}:00", g("hour") as u32), g("pv_ac_wh"), g("load_wh"), g("batt_charge_wh"), g("batt_discharge_wh"), g("import_wh"), g("export_wh"), g("soc_pct"), g("backup_wh"), g("curtailed_wh"), if h["outage"] == Value::Bool(true) { "OUTAGE" } else { "" });
@@ -228,7 +228,7 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn api(method: &String, params: Value) -> Result<Value, app::AppError> { app::api::dispatch(method, &params, &mut |_| true) }
+fn api(method: &str, params: Value) -> Result<Value, app::AppError> { app::api::dispatch(method, &params, &mut |_| true) }
 
 fn issues(v: &Value) {
     for i in v.as_array().into_iter().flatten() { println!("{:<8} {:<20} {}", i["severity"].as_str().unwrap_or("").to_uppercase(), i["code"].as_str().unwrap_or(""), i["message"].as_str().unwrap_or("")); }
