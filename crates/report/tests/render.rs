@@ -21,7 +21,7 @@ fn fixture() -> (Project, solarcraft_engine::SimResult) {
         "params": {"module_length": 0.0, "module_width": 0.0, "orientation": "best", "gap_x": 0.02, "gap_y": 0.02, "setback": 0.4, "obstacle_clearance": 0.3, "search_step": 0.05}, "modules": [], "orientation": "best", "inputs_key": ""})).unwrap();
     p.customer.name = "Cliente Ñandú & Hijos <S.A.>".into(); // markup-like characters must print literally
     p.weather = Some(solarcraft_model::WeatherRef { hash: "abc".into(), provider: "test".into(), summary: String::new() });
-    let r = solarcraft_engine::simulate(&p, &w, "abc", |_| true).unwrap();
+    let r = solarcraft_engine::simulate(&p, &w, "abc", None, |_| true).unwrap();
     (p, r)
 }
 

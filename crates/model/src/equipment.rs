@@ -78,6 +78,83 @@ pub struct InverterSpec {
     pub i_max_per_mppt: f64,
     /// Night tare consumption, W.
     pub night_w: f64,
+    /// Maximum DC input power, W (None: no separate DC limit).
+    #[serde(default)]
+    pub pdc_max_w: Option<f64>,
+    /// Part-load efficiency curve: (P_dc / P_dc,nominal, efficiency) knots, ascending.
+    /// When absent the PVWatts curve with `eta_nominal` is used.
+    #[serde(default)]
+    pub efficiency_curve: Vec<[f64; 2]>,
+    /// DC battery port of a hybrid inverter.
+    #[serde(default)]
+    pub battery_port: Option<BatteryPort>,
+    #[serde(default)]
+    pub datasheet_ref: String,
+}
+
+/// DC battery input of a hybrid inverter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatteryPort {
+    pub v_min: f64,
+    pub v_max: f64,
+    pub p_charge_max_w: f64,
+    pub p_discharge_max_w: f64,
+    /// DC/DC conversion efficiency between the PV bus and the battery.
+    pub dc_dc_efficiency: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Chemistry { Lfp, Nmc, LeadAcid, Other }
+
+/// A battery unit (pack or modular system with its BMS).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatterySpec {
+    pub id: String,
+    pub manufacturer: String,
+    pub model: String,
+    pub provenance: Provenance,
+    pub chemistry: Chemistry,
+    pub capacity_kwh: f64,
+    pub nominal_voltage_v: f64,
+    /// Hardware SOC limits, % of nominal capacity.
+    pub soc_min_pct: f64,
+    pub soc_max_pct: f64,
+    pub p_charge_max_kw: f64,
+    pub p_discharge_max_kw: f64,
+    /// DC round-trip efficiency of the cells/BMS.
+    pub roundtrip_efficiency: f64,
+    pub self_discharge_pct_per_month: f64,
+    /// Full equivalent cycles to 80 % remaining capacity.
+    pub cycle_life: f64,
+    #[serde(default)]
+    pub datasheet_ref: String,
+}
+
+/// A bidirectional battery inverter on the AC bus (AC coupling).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatteryInverterSpec {
+    pub id: String,
+    pub manufacturer: String,
+    pub model: String,
+    pub provenance: Provenance,
+    pub p_ac_max_w: f64,
+    /// (P / P_rated, efficiency) knots; used in both directions.
+    pub efficiency_curve: Vec<[f64; 2]>,
+    pub standby_w: f64,
+    #[serde(default)]
+    pub datasheet_ref: String,
+}
+
+/// Interpolate an efficiency curve at a load fraction (0 at zero load, flat beyond the last knot).
+pub fn curve_efficiency(curve: &[[f64; 2]], x: f64) -> f64 {
+    if curve.is_empty() || x <= 0.0 { return 0.0; }
+    let mut prev = [0.0, 0.0];
+    for k in curve {
+        if x <= k[0] { let t = if k[0] > prev[0] { (x - prev[0]) / (k[0] - prev[0]) } else { 1.0 }; return prev[1] + t * (k[1] - prev[1]); }
+        prev = *k;
+    }
+    prev[1]
 }
 
 impl InverterSpec {
@@ -101,8 +178,50 @@ impl InverterSpec {
             // ≤ 6 kW: one string per MPPT; larger: two (and more for > 30 kW).
             i_max_per_mppt: if large { 40.0 } else if pac_kw > 6.0 { 32.0 } else { 16.0 },
             night_w: 1.0,
+            pdc_max_w: None,
+            efficiency_curve: vec![],
+            battery_port: None,
+            datasheet_ref: String::new(),
         }
     }
+
+    /// SolarCraft's generic hybrid inverter (illustrative values, not a real product).
+    pub fn generic_hybrid(pac_kw: f64) -> Self {
+        let mut i = InverterSpec::generic(pac_kw);
+        i.id = format!("generic-hybrid-{pac_kw}kw");
+        i.model = format!("hybrid inverter {pac_kw} kW");
+        i.mppt_count = 2;
+        i.i_max_per_mppt = 16.0;
+        i.pdc_max_w = Some(pac_kw * 1500.0);
+        i.efficiency_curve = vec![[0.05, 0.90], [0.10, 0.935], [0.20, 0.955], [0.30, 0.965], [0.50, 0.97], [0.75, 0.968], [1.0, 0.965]];
+        i.battery_port = Some(BatteryPort { v_min: 90.0, v_max: 500.0, p_charge_max_w: pac_kw * 1000.0, p_discharge_max_w: pac_kw * 1000.0, dc_dc_efficiency: 0.98 });
+        i
+    }
+
+    /// AC efficiency at a DC input power (W), before clipping.
+    pub fn efficiency(&self, pdc_w: f64) -> f64 {
+        if pdc_w <= 0.0 { return 0.0; }
+        if self.efficiency_curve.is_empty() {
+            return solarcraft_pv::inverter::pvwatts_unclipped(pdc_w, self.pdc0_w(), self.eta_nominal, 0.9637) / pdc_w;
+        }
+        curve_efficiency(&self.efficiency_curve, pdc_w / self.pdc0_w())
+    }
+}
+
+impl BatterySpec {
+    pub fn generic_lfp(kwh: f64) -> Self {
+        BatterySpec { id: format!("generic-bat-lfp-{kwh}kwh"), manufacturer: "Generic".into(), model: format!("LFP battery {kwh} kWh"), provenance: Provenance::Generic,
+            chemistry: Chemistry::Lfp, capacity_kwh: kwh, nominal_voltage_v: 204.8, soc_min_pct: 5.0, soc_max_pct: 100.0,
+            p_charge_max_kw: kwh * 0.5, p_discharge_max_kw: kwh * 0.5, roundtrip_efficiency: 0.95, self_discharge_pct_per_month: 2.0, cycle_life: 6000.0, datasheet_ref: String::new() }
+    }
+}
+
+impl BatteryInverterSpec {
+    pub fn generic(kw: f64) -> Self {
+        BatteryInverterSpec { id: format!("generic-batinv-{kw}kw"), manufacturer: "Generic".into(), model: format!("battery inverter {kw} kW"), provenance: Provenance::Generic,
+            p_ac_max_w: kw * 1000.0, efficiency_curve: vec![[0.05, 0.85], [0.10, 0.91], [0.20, 0.94], [0.50, 0.955], [1.0, 0.95]], standby_w: 5.0, datasheet_ref: String::new() }
+    }
+    pub fn efficiency(&self, p_w: f64) -> f64 { curve_efficiency(&self.efficiency_curve, p_w.abs() / self.p_ac_max_w) }
 }
 
 pub const GENERIC_INVERTER_SIZES_KW: [f64; 15] = [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0, 25.0, 30.0, 50.0, 60.0, 100.0];
@@ -111,6 +230,10 @@ pub const GENERIC_INVERTER_SIZES_KW: [f64; 15] = [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 
 pub struct Library {
     pub modules: Vec<ModuleSpec>,
     pub inverters: Vec<InverterSpec>,
+    #[serde(default)]
+    pub batteries: Vec<BatterySpec>,
+    #[serde(default)]
+    pub battery_inverters: Vec<BatteryInverterSpec>,
 }
 
 impl Library {
@@ -122,10 +245,12 @@ impl Library {
             v_oc: 48.9, i_sc: 10.6, v_mp: 40.4, i_mp: 9.9, alpha_sc: 0.0053, beta_voc: -0.140, gamma_pmp: -0.36, model_params: None,
         };
         m.fit().expect("generic module fits");
-        Library { modules: vec![m], inverters: vec![] }
+        Library { modules: vec![m], inverters: vec![], batteries: vec![], battery_inverters: vec![] }
     }
     pub fn module(&self, id: &str) -> Option<&ModuleSpec> { self.modules.iter().find(|m| m.id == id) }
     pub fn inverter(&self, id: &str) -> Option<&InverterSpec> { self.inverters.iter().find(|i| i.id == id) }
+    pub fn battery(&self, id: &str) -> Option<&BatterySpec> { self.batteries.iter().find(|i| i.id == id) }
+    pub fn battery_inverter(&self, id: &str) -> Option<&BatteryInverterSpec> { self.battery_inverters.iter().find(|i| i.id == id) }
     pub fn ensure_inverter(&mut self, inv: InverterSpec) -> String {
         if self.inverter(&inv.id).is_none() { self.inverters.push(inv.clone()); }
         inv.id

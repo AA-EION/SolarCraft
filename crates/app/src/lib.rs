@@ -15,21 +15,23 @@ use solarcraft_weather::{QcReport, Weather};
 use std::path::Path;
 
 pub mod api;
+pub mod plant_ops;
 pub mod ui_strings;
+pub mod userlib;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppError { pub code: &'static str, pub message: String }
 impl std::fmt::Display for AppError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{} ({})", self.message, self.code) } }
 impl std::error::Error for AppError {}
 pub type Result<T> = std::result::Result<T, AppError>;
-fn e(code: &'static str, m: impl std::fmt::Display) -> AppError { AppError { code, message: m.to_string() } }
+pub(crate) fn e(code: &'static str, m: impl std::fmt::Display) -> AppError { AppError { code, message: m.to_string() } }
 
-fn open(path: &Path) -> Result<(Store, Project)> {
+pub(crate) fn open(path: &Path) -> Result<(Store, Project)> {
     let s = Store::open(path).map_err(|x| e("PROJECT_OPEN", x))?;
     let p = s.load().map_err(|x| e("PROJECT_LOAD", x))?;
     Ok((s, p))
 }
-fn save(s: &mut Store, p: &Project, op: &str) -> Result<()> { s.save(p, op).map_err(|x| e("PROJECT_SAVE", x)) }
+pub(crate) fn save(s: &mut Store, p: &Project, op: &str) -> Result<()> { s.save(p, op).map_err(|x| e("PROJECT_SAVE", x)) }
 
 pub fn create_project(path: &Path, name: &str, lat: f64, lon: f64, target_kwp: Option<f64>) -> Result<Project> {
     let id = format!("prj-{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
@@ -106,7 +108,8 @@ pub fn load_weather(s: &Store, p: &Project) -> Result<(Weather, String)> {
 pub fn simulate(path: &Path, progress: impl FnMut(f64) -> bool) -> Result<SimResult> {
     let (mut s, p) = open(path)?;
     let (w, hash) = load_weather(&s, &p)?;
-    let r = solarcraft_engine::simulate(&p, &w, &hash, progress).map_err(|x| if x.0 == "cancelled" { e("CANCELLED", x) } else { e("SIMULATION", x) })?;
+    let series = plant_ops::load_series(&s, &p)?;
+    let r = solarcraft_engine::simulate(&p, &w, &hash, series.as_deref(), progress).map_err(|x| if x.0 == "cancelled" { e("CANCELLED", x) } else { e("SIMULATION", x) })?;
     let bytes = serde_json::to_vec(&r).map_err(|x| e("RESULT_ENCODE", x))?;
     s.put_blob("results", "application/vnd.solarcraft.results+json", &bytes).map_err(|x| e("PROJECT_SAVE", x))?;
     Ok(r)

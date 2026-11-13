@@ -22,7 +22,16 @@ fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Va
 pub const METHODS: &[&str] = &[
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
     "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
+    "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
+    "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
+    "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import",
 ];
+
+/// Project sections that `set_section` replaces as a whole (validated on save).
+pub const SECTIONS: &[&str] = &["grid", "loads", "storage", "tariff", "economics", "electrical", "losses", "simulation", "customer", "site"];
+
+fn lib_path(p: &Value) -> PathBuf { p.get("library").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::userlib::default_path) }
+fn bad(m: impl std::fmt::Display) -> AppError { AppError { code: "INVALID_ARGUMENT", message: m.to_string() } }
 
 /// Dispatch `method` with JSON `params`. `progress(fraction) -> continue?` is used by long methods.
 pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> bool) -> Result<Value, AppError> {
@@ -77,9 +86,43 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let m: app::ModuleInput = serde_json::from_value(arg(params, "module")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("module: {e}") })?;
             Ok(v(&app::add_module(&path(params, "file")?, m)?))
         }
-        "simulate" => { let r = app::simulate(&path(params, "file")?, progress)?; Ok(json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings})) }
+        "simulate" => { let r = app::simulate(&path(params, "file")?, progress)?; Ok(summary(&r)) }
+        "results_summary" => match app::latest_results(&path(params, "file")?)? { Some(r) => Ok(summary(&r)), None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }) },
+        "results_hours" => app::plant_ops::results_hours(&path(params, "file")?, params),
+        "cash_flow" => match app::latest_results(&path(params, "file")?)? { Some(r) => Ok(v(&r.finance)), None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }) },
+        "set_section" => {
+            let sec = s(params, "section")?;
+            if !SECTIONS.contains(&sec.as_str()) { return Err(bad(format!("section must be one of {}", SECTIONS.join(", ")))); }
+            let p = app::set_fields(&path(params, "file")?, &[(format!("/{sec}"), arg(params, "value")?.clone())])?;
+            let issues = solarcraft_model::validate::validate(&p);
+            Ok(json!({"section": sec, "value": serde_json::to_value(&p).ok().and_then(|x| x.get(&sec).cloned()), "issues": issues}))
+        }
+        "add_equipment" => app::plant_ops::add_equipment(&path(params, "file")?, &s(params, "kind")?, arg(params, "record")?),
+        "add_generic_storage_equipment" => Ok(json!({"ids": app::plant_ops::add_generic_storage_equipment(&path(params, "file")?)?})),
+        "import_load" => app::plant_ops::import_load_series(&path(params, "file")?, &path(params, "source")?, params.get("unit").and_then(Value::as_str).unwrap_or("kwh")),
+        "stringing" => app::plant_ops::stringing(&path(params, "file")?),
+        "set_stringing" => {
+            // {file, manual: bool, inverters?: [...]} — manual=false returns to derived stringing.
+            let file = path(params, "file")?;
+            let manual = params.get("manual").and_then(Value::as_bool).unwrap_or(true);
+            let value = if manual { json!({"manual": true, "inverters": arg(params, "inverters")?}) } else { json!({"manual": false, "inverters": []}) };
+            app::set_fields(&file, &[("/electrical".into(), value)])?;
+            app::plant_ops::stringing(&file)
+        }
+        "create_variant" => Ok(v(&app::plant_ops::create_variant(&path(params, "file")?, &s(params, "name")?)?)),
+        "list_variants" => Ok(json!({"variants": app::get_project(&path(params, "file")?)?.variants.iter().map(|x| json!({"id": x.id, "name": x.name, "created_unix": x.created_unix})).collect::<Vec<_>>()})),
+        "apply_variant" => Ok(v(&app::plant_ops::apply_variant(&path(params, "file")?, &s(params, "id")?, params.get("keep_current").and_then(Value::as_bool).unwrap_or(false))?)),
+        "delete_variant" => { app::plant_ops::delete_variant(&path(params, "file")?, &s(params, "id")?)?; Ok(json!({"deleted": true})) }
+        "compare_variants" => Ok(json!({"variants": app::plant_ops::compare_variants(&path(params, "file")?)?})),
+        "library_list" => Ok(json!({"path": lib_path(params), "items": app::userlib::list(&lib_path(params), params.get("kind").and_then(Value::as_str), params.get("query").and_then(Value::as_str))?})),
+        "library_get" => Ok(v(&app::userlib::get(&lib_path(params), &s(params, "kind")?, &s(params, "id")?)?)),
+        "library_history" => Ok(json!({"revisions": app::userlib::history(&lib_path(params), &s(params, "kind")?, &s(params, "id")?)?})),
+        "library_save" => Ok(v(&app::userlib::put(&lib_path(params), &s(params, "kind")?, arg(params, "record")?, params.get("source").and_then(Value::as_str).unwrap_or("user"))?)),
+        "library_delete" => { app::userlib::delete(&lib_path(params), &s(params, "kind")?, &s(params, "id")?)?; Ok(json!({"deleted": true})) }
+        "library_pin" => app::userlib::pin(&lib_path(params), &path(params, "file")?, &s(params, "kind")?, &s(params, "id")?),
+        "library_import" => Ok(json!({"items": app::userlib::import_file(&lib_path(params), &path(params, "source")?, params.get("source_kind").and_then(Value::as_str).unwrap_or("imported"))?})),
         "explain" => match app::latest_results(&path(params, "file")?)? {
-            Some(r) => Ok(json!({"annual": r.annual, "irradiance_kwh_m2": r.irradiance_ledger, "energy_kwh": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest, "warnings": r.warnings})),
+            Some(r) => Ok(json!({"annual": r.annual, "irradiance_kwh_m2": r.irradiance_ledger, "energy_kwh": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical})),
             None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }),
         },
         "export_report" => {
@@ -92,6 +135,12 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "history" => Ok(json!({"changes": app::history(&path(params, "file")?, 50)?.into_iter().map(|(seq, op, at)| json!({"seq": seq, "op": op, "at_unix": at})).collect::<Vec<_>>()})),
         _ => Err(AppError { code: "UNKNOWN_METHOD", message: format!("unknown method '{method}'") }),
     }
+}
+
+/// Compact result summary (hourly series are fetched with `results_hours`).
+pub fn summary(r: &solarcraft_engine::SimResult) -> Value {
+    json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical,
+           "finance": r.finance.as_ref().map(|f| json!({"currency": f.currency, "investment": f.investment, "npv": f.npv, "irr_pct": f.irr_pct, "payback_years": f.payback_years, "lcoe_per_kwh": f.lcoe_per_kwh, "bill_without": f.bill_without, "bill_with": f.bill_with}))})
 }
 
 /// Envelope used over the C ABI: `{"method": "...", "params": {...}}` →

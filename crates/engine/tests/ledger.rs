@@ -28,7 +28,7 @@ fn project(lat: f64, lon: f64, kwp: f64) -> Project {
 #[test]
 fn ledger_closes_and_is_consistent() {
     for (lat, lon) in [(52.52, 13.405), (4.711, -74.072), (-33.87, 151.2)] {
-        let r = simulate(&project(lat, lon, 10.0), &synthetic(lat, lon), "h", |_| true).unwrap();
+        let r = simulate(&project(lat, lon, 10.0), &synthetic(lat, lon), "h", None, |_| true).unwrap();
         assert!(r.manifest.ledger_closure_error_kwh.abs() < 1e-6, "closure {}", r.manifest.ledger_closure_error_kwh);
         let monthly: f64 = r.monthly.iter().map(|m| m.ac_kwh).sum();
         assert!((monthly - r.annual.ac_kwh).abs() < 1e-6 * r.annual.ac_kwh.max(1.0));
@@ -46,7 +46,7 @@ fn clipping_appears_when_inverter_is_undersized() {
     p.set_mode(solarcraft_model::DesignMode::Detailed);
     p.library.ensure_inverter(solarcraft_model::equipment::InverterSpec::generic(6.0));
     p.set_by_pointer("/arrays/0/inverter_id", serde_json::json!("generic-inv-6kw")).unwrap();
-    let r = simulate(&p, &synthetic(40.4, -3.7), "h", |_| true).unwrap();
+    let r = simulate(&p, &synthetic(40.4, -3.7), "h", None, |_| true).unwrap();
     let clip = r.energy_ledger.iter().find(|s| s.key == "clipping").unwrap();
     assert!(clip.delta < -50.0, "expected clipping, got {}", clip.delta);
 }
@@ -54,18 +54,18 @@ fn clipping_appears_when_inverter_is_undersized() {
 #[test]
 fn cancellation_and_errors() {
     let w = synthetic(40.4, -3.7);
-    assert_eq!(simulate(&project(40.4, -3.7, 5.0), &w, "h", |f| f < 0.5).unwrap_err().0, "cancelled");
+    assert_eq!(simulate(&project(40.4, -3.7, 5.0), &w, "h", None, |f| f < 0.5).unwrap_err().0, "cancelled");
     let mut p = project(40.4, -3.7, 5.0);
     p.weather = None;
-    assert!(simulate(&p, &w, "h", |_| true).unwrap_err().0.contains("WEATHER_MISSING"));
+    assert!(simulate(&p, &w, "h", None, |_| true).unwrap_err().0.contains("WEATHER_MISSING"));
 }
 
 #[test]
 fn deterministic() {
     let w = synthetic(4.711, -74.072);
     let p = project(4.711, -74.072, 5.0);
-    let a = simulate(&p, &w, "h", |_| true).unwrap();
-    let b = simulate(&p, &w, "h", |_| true).unwrap();
+    let a = simulate(&p, &w, "h", None, |_| true).unwrap();
+    let b = simulate(&p, &w, "h", None, |_| true).unwrap();
     assert_eq!(serde_json::to_string(&a.annual).unwrap(), serde_json::to_string(&b.annual).unwrap());
 }
 
@@ -88,10 +88,10 @@ fn shading_loss(r: &solarcraft_engine::SimResult) -> f64 {
 fn chimney_shading_is_counted_and_grows_with_height() {
     let (lat, lon) = (40.4, -3.7);
     let w = synthetic(lat, lon);
-    let none = simulate(&with_roof(lat, lon, None), &w, "h", |_| true).unwrap();
+    let none = simulate(&with_roof(lat, lon, None), &w, "h", None, |_| true).unwrap();
     assert!(shading_loss(&none).abs() < 1e-9);
-    let low = simulate(&with_roof(lat, lon, Some(0.5)), &w, "h", |_| true).unwrap();
-    let tall = simulate(&with_roof(lat, lon, Some(2.5)), &w, "h", |_| true).unwrap();
+    let low = simulate(&with_roof(lat, lon, Some(0.5)), &w, "h", None, |_| true).unwrap();
+    let tall = simulate(&with_roof(lat, lon, Some(2.5)), &w, "h", None, |_| true).unwrap();
     let (l, t) = (shading_loss(&low), shading_loss(&tall));
     println!("chimney shading loss: 0.5 m -> {l:.2} %, 2.5 m -> {t:.2} %");
     assert!(l > 0.0 && t > l && t < 30.0, "low {l} % tall {t} %");

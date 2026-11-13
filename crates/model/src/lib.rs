@@ -8,11 +8,13 @@
 //! fields whose origin is not [`Origin::User`].
 pub mod derive;
 pub mod equipment;
+pub mod plant;
 pub mod validate;
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2: plant sections (electrical, grid, loads, storage, tariff, economics, variants).
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +65,13 @@ pub struct Site {
     /// Metres above sea level.
     pub elevation: Field<f64>,
     pub albedo: Field<f64>,
+    /// Local standard time offset from UTC, hours (no daylight saving). Derived from longitude unless set.
+    #[serde(default)]
+    pub utc_offset_h: Option<Field<f64>>,
+}
+
+impl Site {
+    pub fn utc_offset(&self) -> f64 { self.utc_offset_h.as_ref().map_or((self.longitude.value / 15.0).round(), |f| f.value) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +174,20 @@ pub struct Project {
     pub weather: Option<WeatherRef>,
     /// Equipment pinned into the project (portable, catalog-independent).
     pub library: equipment::Library,
+    #[serde(default)]
+    pub electrical: plant::Electrical,
+    #[serde(default)]
+    pub grid: plant::Grid,
+    #[serde(default)]
+    pub loads: plant::Loads,
+    #[serde(default)]
+    pub storage: Option<plant::Storage>,
+    #[serde(default)]
+    pub tariff: plant::Tariff,
+    #[serde(default)]
+    pub economics: plant::Economics,
+    #[serde(default)]
+    pub variants: Vec<plant::Variant>,
 }
 
 impl Project {
@@ -179,7 +202,7 @@ impl Project {
             name: Field::user(name.to_string()),
             customer: Customer::default(),
             mode: DesignMode::Easy,
-            site: Site { name: Field::default(String::new()), latitude: Field::user(latitude), longitude: Field::user(longitude), elevation: Field::default(0.0), albedo: Field::default(0.2) },
+            site: Site { name: Field::default(String::new()), latitude: Field::user(latitude), longitude: Field::user(longitude), elevation: Field::default(0.0), albedo: Field::default(0.2), utc_offset_h: None },
             arrays: vec![Array {
                 id: "array-1".into(),
                 name: Field::default("Array 1".into()),
@@ -200,9 +223,31 @@ impl Project {
             simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
+            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None,
+            tariff: Default::default(), economics: Default::default(), variants: vec![],
         };
         derive::derive(&mut p);
         p
+    }
+
+    /// The design without variants (what a variant snapshot stores).
+    pub fn design_snapshot(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or_default();
+        if let Some(o) = v.as_object_mut() { o.remove("variants"); o.remove("customer"); o.remove("id"); o.remove("name"); }
+        v
+    }
+
+    /// Replace the design with a snapshot, keeping identity, customer and variants.
+    pub fn apply_snapshot(&mut self, design: &serde_json::Value) -> Result<(), String> {
+        let mut v = design.clone();
+        let o = v.as_object_mut().ok_or("variant design is not an object")?;
+        o.insert("variants".into(), serde_json::to_value(&self.variants).map_err(|e| e.to_string())?);
+        o.insert("customer".into(), serde_json::to_value(&self.customer).map_err(|e| e.to_string())?);
+        o.insert("id".into(), serde_json::Value::from(self.id.clone()));
+        o.insert("name".into(), serde_json::to_value(&self.name).map_err(|e| e.to_string())?);
+        let p: Project = serde_json::from_value(v).map_err(|e| format!("invalid variant design: {e}"))?;
+        *self = p;
+        Ok(())
     }
 
     /// Switch design mode. Never modifies values (D-06).

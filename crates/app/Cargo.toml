@@ -12,6 +12,7 @@ schema = ["dep:schemars"]
 schemars = { version = "1.0", optional = true }
 serde.workspace = true
 serde_json.workspace = true
+rusqlite.workspace = true
 solarcraft-pv = { path = "../pv" }
 solarcraft-model = { path = "../model" }
 solarcraft-geometry = { path = "../geometry" }

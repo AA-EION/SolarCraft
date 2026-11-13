@@ -8,6 +8,7 @@ version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 solarcraft-pv = { path = "../pv" }
 solarcraft-model = { path = "../model" }
 solarcraft-weather = { path = "../weather" }
@@ -16,3 +17,4 @@ solarcraft-shading = { path = "../shading" }
 
 [dev-dependencies]
 serde_json.workspace = true
+sha2.workspace = true

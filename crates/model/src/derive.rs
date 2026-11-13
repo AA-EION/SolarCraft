@@ -104,3 +104,36 @@ pub fn derive(p: &mut Project) {
         }
     }
 }
+
+/// The stringing used for simulation: the user's manual assignment, or one
+/// derived from each array's strings and inverter selection (strings spread
+/// evenly over the inverters and their MPPT inputs).
+pub fn electrical(p: &Project) -> crate::plant::Electrical {
+    use crate::plant::{Electrical, InverterUnit, StringGroup};
+    if p.electrical.manual && !p.electrical.inverters.is_empty() { return p.electrical.clone(); }
+    let mut units = vec![];
+    for a in &p.arrays {
+        let Some(inv) = p.library.inverter(&a.inverter_id.value) else { continue };
+        let n_inv = a.inverter_count.value.max(1);
+        let total = a.strings.value;
+        for u in 0..n_inv {
+            let s_u = total / n_inv + u32::from(u < total % n_inv);
+            let mppts = inv.mppt_count.max(1);
+            let mut groups: Vec<Vec<StringGroup>> = vec![vec![]; mppts as usize];
+            for m in 0..mppts {
+                let s_m = s_u / mppts + u32::from(m < s_u % mppts);
+                if s_m > 0 { groups[m as usize].push(StringGroup { array_id: a.id.clone(), modules_per_string: a.modules_per_string.value, strings: s_m }); }
+            }
+            let id = if n_inv == 1 { format!("{}-inv", a.id) } else { format!("{}-inv{}", a.id, u + 1) };
+            units.push(InverterUnit { id, name: format!("{} · {} {}", a.name.value, inv.manufacturer, inv.model), inverter_id: inv.id.clone(), mppts: groups });
+        }
+    }
+    Electrical { manual: false, inverters: units }
+}
+
+/// Modules assigned to strings per array id.
+pub fn modules_by_array(e: &crate::plant::Electrical) -> std::collections::BTreeMap<String, u32> {
+    let mut m = std::collections::BTreeMap::new();
+    for u in &e.inverters { for g in u.mppts.iter().flatten() { *m.entry(g.array_id.clone()).or_insert(0) += g.modules_per_string * g.strings; } }
+    m
+}

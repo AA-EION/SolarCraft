@@ -2713,6 +2713,7 @@ dependencies = [
 name = "solarcraft-app"
 version = "0.0.1"
 dependencies = [
+ "rusqlite",
  "schemars",
  "serde",
  "serde_json",
@@ -2742,6 +2743,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "solarcraft-geometry",
  "solarcraft-model",
  "solarcraft-pv",

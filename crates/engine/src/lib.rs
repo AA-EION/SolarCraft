@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#![allow(clippy::needless_range_loop)]
 //! Annual grid-connected PV simulation (slice 1).
 //!
 //! Every loss is the difference between two consecutive stages of one chain
@@ -10,8 +11,14 @@
 use serde::{Deserialize, Serialize};
 use solarcraft_model::validate::{validate, Severity};
 use solarcraft_model::{Project, TranspositionModel};
-use solarcraft_pv::{diode, iam, inverter, irradiance as irr, spa, temperature};
+use solarcraft_pv::{diode, iam, irradiance as irr, spa, temperature};
 use solarcraft_weather::Weather;
+
+pub mod calendar;
+pub mod electrical;
+pub mod energy;
+pub mod finance;
+pub mod loads;
 
 pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"));
 
@@ -28,7 +35,11 @@ pub struct Annual {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunManifest { pub engine: String, pub weather_hash: String, pub weather_provider: String, pub transposition: String, pub hours: usize, pub ledger_closure_error_kwh: f64 }
+pub struct RunManifest {
+    /// SHA-256 of the design inputs (project without customer, name and variants), weather and engine version.
+    #[serde(default)]
+    pub inputs_hash: String,
+    pub engine: String, pub weather_hash: String, pub weather_provider: String, pub transposition: String, pub hours: usize, pub ledger_closure_error_kwh: f64 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hourly { pub unix_mid: Vec<i64>, pub poa_w_m2: Vec<f32>, pub t_cell_c: Vec<f32>, pub dc_w: Vec<f32>, pub ac_w: Vec<f32> }
@@ -40,6 +51,19 @@ pub struct Note { pub code: String, pub subject: String, pub value: f64, pub tex
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimResult {
     pub manifest: RunManifest,
+    /// Per inverter and MPPT: stringing and simulated energy.
+    #[serde(default)]
+    pub electrical: Vec<UnitResult>,
+    /// Hourly energy flows (PV, consumption, battery, grid).
+    #[serde(default)]
+    pub flows: energy::Flows,
+    #[serde(default)]
+    pub balance: energy::Balance,
+    #[serde(default)]
+    pub finance: Option<finance::Finance>,
+    /// Local hour of year (reference calendar) for each simulated hour.
+    #[serde(default)]
+    pub local_hour: Vec<u32>,
     pub annual: Annual,
     /// Irradiance chain (kWh/m², area-weighted over arrays).
     pub irradiance_ledger: Vec<Step>,
@@ -50,6 +74,12 @@ pub struct SimResult {
     pub warnings: Vec<Note>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MpptResult { pub index: u32, pub strings: String, pub stc_kw: f64, pub dc_kwh: f64, pub limited_hours: u32, pub mismatch_kwh: f64, pub limit_loss_kwh: f64 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnitResult { pub id: String, pub name: String, pub inverter_id: String, pub stc_kw: f64, pub ac_kw: f64, pub dc_ac_ratio: f64, pub dc_kwh: f64, pub ac_kwh: f64, pub clipped_kwh: f64, pub mppts: Vec<MpptResult> }
+
 #[derive(Debug)]
 pub struct SimError(pub String);
 impl std::fmt::Display for SimError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) } }
@@ -59,16 +89,16 @@ const IRR_KEYS: [(&str, &str); 6] = [
     ("ghi", "Global horizontal irradiation"), ("poa", "Global incident in plane (transposition)"), ("shading", "After near shading (obstacles)"),
     ("iam", "After incidence angle (reflection)"), ("soiling", "After soiling"), ("effective", "Effective irradiation on modules"),
 ];
-const E_KEYS: [(&str, &str); 15] = [
+const E_KEYS: [(&str, &str); 16] = [
     ("nominal", "Nominal energy at STC efficiency"), ("irradiance_level", "Irradiance level"), ("temperature", "Module temperature"),
-    ("mpp_window", "Inverter MPP voltage window"), ("quality", "Module quality"), ("lid", "Light-induced degradation"),
+    ("strings", "Parallel-string mismatch"), ("mpp_window", "Inverter input limits (MPP window, current)"), ("quality", "Module quality"), ("lid", "Light-induced degradation"),
     ("mismatch", "Mismatch"), ("dc_wiring", "DC wiring"), ("dc_out", "Array DC output"),
     ("inverter", "Inverter efficiency"), ("clipping", "Inverter clipping (power limit)"), ("night", "Inverter night consumption"),
     ("ac_wiring", "AC wiring"), ("availability", "Availability"), ("grid", "Energy to grid"),
 ];
 
 /// `progress(fraction) -> continue?`
-pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl FnMut(f64) -> bool) -> Result<SimResult, SimError> {
+pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Option<&[f64]>, mut progress: impl FnMut(f64) -> bool) -> Result<SimResult, SimError> {
     let errors: Vec<_> = validate(p).into_iter().filter(|i| i.severity == Severity::Error).collect();
     if !errors.is_empty() {
         return Err(SimError(format!("project has errors: {}", errors.iter().map(|e| format!("{} ({})", e.message, e.code)).collect::<Vec<_>>().join("; "))));
@@ -81,38 +111,39 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
     };
     let l = &p.losses;
     let f = |x: f64| 1.0 - x / 100.0;
-    let mut irr_tot = [0.0f64; 6]; // area-weighted Wh/m²·m²
-    let mut e_tot = [0.0f64; 15];
+    let elec = solarcraft_model::derive::electrical(p);
+    let assigned = solarcraft_model::derive::modules_by_array(&elec);
+    let mut irr_tot = [0.0f64; 6];
+    let mut e_tot = [0.0f64; 16];
     let mut area_tot = 0.0;
     let mut monthly = vec![Month::default(); 12];
     for (i, m) in monthly.iter_mut().enumerate() { m.month = i as u32 + 1; }
+    let month_of: Vec<usize> = w.hours.iter().map(|h| solarcraft_pv::civil_from_days(h.unix_mid.div_euclid(86400)).1 as usize - 1).collect();
     let mut hourly = Hourly { unix_mid: w.hours.iter().map(|h| h.unix_mid).collect(), poa_w_m2: vec![0.0; n], t_cell_c: vec![0.0; n], dc_w: vec![0.0; n], ac_w: vec![0.0; n] };
-    let (mut dc_kwp, mut ac_kw) = (0.0, 0.0);
     let mut warnings: Vec<Note> = vec![];
     if w.horizon_applied { warnings.push(Note { code: "HORIZON_IN_WEATHER".into(), subject: String::new(), value: 0.0, text: "Weather beam irradiance already includes far-horizon shading; no additional horizon applied.".into() }); }
-
-    // Solar position once per hour (shared by arrays).
     let sun: Vec<spa::SolarPosition> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, spa::delta_t_estimate(2025.0))).collect();
 
+    // 1. Per array: plane-of-array irradiance, shading, cell temperature and module diode parameters.
+    struct ArrayHours { params: Vec<Option<diode::DiodeParams>>, voc: Vec<f64> }
+    let mut arr_hours: std::collections::HashMap<String, ArrayHours> = Default::default();
+    let mut dc_kwp = 0.0;
     for (ai, a) in p.arrays.iter().enumerate() {
         let module = p.library.module(&a.module_id.value).ok_or_else(|| SimError("module missing".into()))?;
         let params = module.desoto().ok_or_else(|| SimError("module not fitted".into()))?;
-        let inv = p.library.inverter(&a.inverter_id.value).ok_or_else(|| SimError("inverter missing".into()))?;
-        let ns = a.modules_per_string.value as f64;
-        let n_mod = ns * a.strings.value as f64;
-        let n_inv = a.inverter_count.value.max(1) as f64;
+        let n_mod = assigned.get(&a.id).copied().unwrap_or(0) as f64;
+        if n_mod == 0.0 { continue; }
         let area = n_mod * module.area();
         let p_stc = n_mod * module.pmp_stc();
         dc_kwp += p_stc / 1000.0;
-        ac_kw += inv.pac_max_w * n_inv / 1000.0;
         area_tot += area;
         let iam_beam = |aoi: f64| iam::physical(aoi, 1.526, 4.0, 0.002);
         let iam_sky = iam::diffuse_average(iam_beam, a.tilt.value, true);
         let iam_gnd = if a.tilt.value > 0.0 { iam::diffuse_average(iam_beam, a.tilt.value, false) } else { 0.0 };
         let shade = near_shading(a, &sun);
-        let mut window_hours = 0usize;
+        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n] };
         for (k, h) in w.hours.iter().enumerate() {
-            if ai == 0 && k % 876 == 0 && !progress(k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
+            if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
             let sp = &sun[k];
             let (ghi, dni, dhi) = (h.ghi.max(0.0), h.dni.max(0.0), h.dhi.max(0.0));
             let geo = irr::Geometry { tilt: a.tilt.value, surface_azimuth: a.azimuth.value, zenith: sp.apparent_zenith, sun_azimuth: sp.azimuth };
@@ -124,60 +155,116 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
             let (dir_s, sky_s) = (poa.direct * beam_f, poa.sky_diffuse * diff_f);
             let after_shade = dir_s + sky_s + poa.ground_diffuse;
             let after_iam = dir_s * iam_beam(aoi) + sky_s * iam_sky + poa.ground_diffuse * iam_gnd;
-            let after_soil = after_iam * f(l.soiling_pct.value);
-            let e_eff = after_soil;
-            let irr_stages = [ghi, poa.global, after_shade, after_iam, after_soil, e_eff];
-            for s in 0..6 { irr_tot[s] += irr_stages[s] * area; }
-
+            let e_eff = after_iam * f(l.soiling_pct.value);
+            for (s, v) in [ghi, poa.global, after_shade, after_iam, e_eff, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
             let tc = temperature::faiman(poa.global, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
-            let nominal = e_eff / 1000.0 * p_stc;
-            let (dc25, dcm, dcw) = if e_eff > 0.0 {
-                let d25 = diode::calcparams_desoto(e_eff, 25.0, &params).mpp().2 * n_mod;
+            e_tot[0] += e_eff / 1000.0 * p_stc;
+            if e_eff > 0.0 {
+                e_tot[1] += diode::calcparams_desoto(e_eff, 25.0, &params).mpp().2 * n_mod;
                 let dp = diode::calcparams_desoto(e_eff, tc, &params);
-                let (vmp, _, pmp) = dp.mpp();
-                let v_string = vmp * ns;
-                // Inverter tracks within its MPPT window; outside, it operates at the bound.
-                let pw = if v_string < inv.mppt_v_min || v_string > inv.mppt_v_max {
-                    window_hours += 1;
-                    let vb = v_string.clamp(inv.mppt_v_min, inv.mppt_v_max) / ns;
-                    (vb * dp.current(vb)).max(0.0)
-                } else { pmp };
-                (d25, pmp * n_mod, pw * n_mod)
-            } else { (0.0, 0.0, 0.0) };
-            let q = dcw * f(l.module_quality_pct.value);
-            let lid = q * f(l.lid_pct.value);
-            let mm = lid * f(l.mismatch_pct.value);
-            let dcwire = mm * f(l.dc_wiring_pct.value);
-            let pdc_inv = dcwire / n_inv;
-            let (ac_unclipped, ac_clipped) = if pdc_inv > 0.0 {
-                let eff_ac = inverter::pvwatts_unclipped(pdc_inv, inv.pdc0_w(), inv.eta_nominal, 0.9637);
-                (eff_ac * n_inv, eff_ac.min(inv.pac_max_w) * n_inv)
-            } else { (0.0, 0.0) };
-            let night = if pdc_inv > 0.0 { ac_clipped } else { -inv.night_w * n_inv };
-            let acw = if night > 0.0 { night * f(l.ac_wiring_pct.value) } else { night };
-            let avail = acw * f(l.availability_pct.value);
-            let e_stages = [nominal, dc25, dcm, dcw, q, lid, mm, dcwire, dcwire, ac_unclipped, ac_clipped, night, acw, avail, avail];
-            for s in 0..15 { e_tot[s] += e_stages[s]; }
-            let mo = solarcraft_pv::civil_from_days(h.unix_mid.div_euclid(86400)).1 as usize - 1;
-            monthly[mo].ghi_kwh_m2 += ghi * area / 1000.0;
-            monthly[mo].poa_kwh_m2 += poa.global * area / 1000.0;
-            monthly[mo].dc_kwh += dcwire / 1000.0;
-            monthly[mo].ac_kwh += avail / 1000.0;
+                e_tot[2] += dp.mpp().2 * n_mod;
+                ah.voc[k] = dp.voc();
+                ah.params[k] = Some(dp);
+            }
+            monthly[month_of[k]].ghi_kwh_m2 += ghi * area / 1000.0;
+            monthly[month_of[k]].poa_kwh_m2 += poa.global * area / 1000.0;
             hourly.poa_w_m2[k] += (poa.global * area) as f32;
             hourly.t_cell_c[k] = tc as f32;
-            hourly.dc_w[k] += dcwire as f32;
-            hourly.ac_w[k] += avail as f32;
         }
         if let Some(sh) = &shade {
             warnings.push(Note { code: "NEAR_SHADING".into(), subject: a.name.value.clone(), value: sh.obstacles as f64,
-                text: format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); electrical mismatch from partial shading is not yet modelled.", a.name.value, sh.obstacles, sh.diffuse_factor) });
+                text: format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); bypass-diode effects of partial shading within a module are not yet modelled.", a.name.value, sh.obstacles, sh.diffuse_factor) });
         }
-        if window_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: a.name.value.clone(), value: window_hours as f64, text: format!("{}: {window_hours} h outside the inverter MPP voltage window", a.name.value) }); }
+        arr_hours.insert(a.id.clone(), ah);
     }
-    progress(1.0);
-    if area_tot <= 0.0 { return Err(SimError("no modules".into())); }
+    if area_tot <= 0.0 { return Err(SimError("no modules assigned to inverters".into())); }
+
+    // 2. Per inverter unit and MPPT: tracker operating point, DC losses, inverter.
+    let dc_chain = f(l.module_quality_pct.value) * f(l.lid_pct.value) * f(l.mismatch_pct.value) * f(l.dc_wiring_pct.value);
+    let f_ac = f(l.ac_wiring_pct.value) * f(l.availability_pct.value);
+    let mut unit_inputs = vec![];
+    let mut unit_results = vec![];
+    let mut ac_kw = 0.0;
+    let nu = elec.inverters.len().max(1);
+    for (ui, u) in elec.inverters.iter().enumerate() {
+        let inv = p.library.inverter(&u.inverter_id).ok_or_else(|| SimError("inverter missing".into()))?;
+        ac_kw += inv.pac_max_w / 1000.0;
+        let mut dc = vec![0.0f64; n];
+        let mut ur = UnitResult { id: u.id.clone(), name: u.name.clone(), inverter_id: inv.id.clone(), ac_kw: inv.pac_max_w / 1000.0, ..Default::default() };
+        for (mi, groups) in u.mppts.iter().enumerate() {
+            if groups.is_empty() { continue; }
+            let mut mr = MpptResult { index: mi as u32 + 1, ..Default::default() };
+            mr.strings = groups.iter().map(|g| format!("{} × {} ({})", g.strings, g.modules_per_string, p.arrays.iter().find(|a| a.id == g.array_id).map_or(g.array_id.clone(), |a| a.name.value.clone()))).collect::<Vec<_>>().join(" + ");
+            mr.stc_kw = groups.iter().filter_map(|g| { let a = p.arrays.iter().find(|a| a.id == g.array_id)?; let m = p.library.module(&a.module_id.value)?; Some(g.strings as f64 * g.modules_per_string as f64 * m.pmp_stc() / 1000.0) }).sum();
+            ur.stc_kw += mr.stc_kw;
+            for k in 0..n {
+                if k % 2190 == 0 && !progress(0.6 + 0.3 * (ui as f64 + k as f64 / n as f64) / nu as f64) { return Err(SimError("cancelled".into())); }
+                let states: Vec<electrical::StringState> = groups.iter().filter_map(|g| {
+                    let ah = arr_hours.get(&g.array_id)?;
+                    let dp = ah.params[k].as_ref()?;
+                    Some(electrical::StringState { params: dp, voc_module: ah.voc[k], modules: g.modules_per_string as f64, strings: g.strings as f64 })
+                }).collect();
+                if states.is_empty() { continue; }
+                let t = electrical::operate(&states, inv.mppt_v_min, inv.mppt_v_max, inv.i_max_per_mppt);
+                e_tot[3] += t.p_combined;
+                e_tot[4] += t.p_operating;
+                if t.window_limited { mr.limited_hours += 1; }
+                mr.mismatch_kwh += (t.p_independent - t.p_combined) / 1000.0;
+                mr.limit_loss_kwh += (t.p_combined - t.p_operating) / 1000.0;
+                let d = t.p_operating * dc_chain;
+                mr.dc_kwh += d / 1000.0;
+                dc[k] += d;
+            }
+            if mr.limited_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: format!("{} MPPT {}", u.name, mi + 1), value: mr.limited_hours as f64, text: format!("{} MPPT {}: {} h limited by the MPP voltage window or input current", u.name, mi + 1, mr.limited_hours) }); }
+            ur.mppts.push(mr);
+        }
+        // PV-only inverter chain for the loss ledger.
+        for k in 0..n {
+            let q = dc[k] / dc_chain;
+            let qual = q * f(l.module_quality_pct.value);
+            let lid = qual * f(l.lid_pct.value);
+            let mm = lid * f(l.mismatch_pct.value);
+            let dcw = mm * f(l.dc_wiring_pct.value);
+            let (unclipped, clipped) = if dcw > 0.0 { (dcw * inv.efficiency(dcw), energy::inverter_ac(inv, dcw).0) } else { (0.0, 0.0) };
+            let night = if dcw > 0.0 { clipped } else { -inv.night_w };
+            let acw = if night > 0.0 { night * f(l.ac_wiring_pct.value) } else { night };
+            let avail = acw * f(l.availability_pct.value);
+            for (s, v) in [qual, lid, mm, dcw, dcw, unclipped, clipped, night, acw, avail, avail].into_iter().enumerate() { e_tot[5 + s] += v; }
+            ur.dc_kwh += dcw / 1000.0; ur.ac_kwh += avail.max(0.0) / 1000.0; ur.clipped_kwh += (unclipped - clipped) / 1000.0;
+            monthly[month_of[k]].dc_kwh += dcw / 1000.0;
+            monthly[month_of[k]].ac_kwh += avail / 1000.0;
+            hourly.dc_w[k] += dcw as f32;
+            hourly.ac_w[k] += avail as f32;
+        }
+        ur.dc_ac_ratio = if ur.ac_kw > 0.0 { ur.stc_kw / ur.ac_kw } else { 0.0 };
+        unit_results.push(ur);
+        unit_inputs.push((u.id.clone(), inv, dc));
+    }
     for m in &mut monthly { m.ghi_kwh_m2 /= area_tot; m.poa_kwh_m2 /= area_tot; }
     for v in &mut hourly.poa_w_m2 { *v /= area_tot as f32; }
+
+    // 3. Consumption, storage and grid.
+    let off = p.site.utc_offset();
+    let local_hour: Vec<u32> = w.hours.iter().map(|h| calendar::local_hour_of_year(h.unix_mid, off)).collect();
+    let profile: Vec<f64> = match (&p.loads.profile, load_series) {
+        (solarcraft_model::plant::LoadProfile::None, _) => vec![0.0; 8760],
+        (solarcraft_model::plant::LoadProfile::Synthetic { profile }, _) => loads::synthetic(*profile, p.loads.annual_kwh, p.site.latitude.value),
+        (solarcraft_model::plant::LoadProfile::Series { .. }, Some(s)) => loads::hourly_from_series(s).map_err(SimError)?,
+        (solarcraft_model::plant::LoadProfile::Series { name, .. }, None) => return Err(SimError(format!("load series '{name}' is missing from the project file"))),
+    };
+    let load_w: Vec<f64> = local_hour.iter().map(|&h| profile[h as usize % profile.len()]).collect();
+    let units: Vec<energy::UnitInput> = unit_inputs.iter().map(|(id, spec, dc)| energy::UnitInput { id, spec, dc_w: dc.clone() }).collect();
+    let en = energy::dispatch(p, &units, &load_w, &local_hour, f_ac).map_err(SimError)?;
+    progress(0.95);
+
+    // 4. Bills and cash flow.
+    let battery_kwh = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id).map(|b| b.capacity_kwh * s.units as f64)).unwrap_or(0.0);
+    let zero = vec![0.0f32; n];
+    let load_f32: Vec<f32> = load_w.iter().map(|&x| x as f32).collect();
+    let without = finance::bill(&p.tariff, &load_f32, &zero, &local_hour);
+    let with = finance::bill(&p.tariff, &en.flows.import, &en.flows.export, &local_hour);
+    let fin = finance::cash_flow(&p.tariff, &p.economics, &finance::Plant { dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_ac_kwh }, without, with);
+    progress(1.0);
 
     let mk = |keys: &[(&str, &str)], vals: &[f64], scale: f64| -> Vec<Step> {
         let mut out: Vec<Step> = vec![];
@@ -193,13 +280,24 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, mut progress: impl
     let closure = energy_ledger[0].value + energy_ledger.iter().skip(1).map(|s| s.delta).sum::<f64>() - energy_ledger.last().unwrap().value;
     let ac_kwh = energy_ledger.last().unwrap().value;
     let poa = irradiance_ledger[1].value;
+    let inputs_hash = inputs_hash(p, weather_hash);
     Ok(SimResult {
-        manifest: RunManifest { engine: ENGINE_VERSION.into(), weather_hash: weather_hash.into(), weather_provider: w.provenance.provider.clone(), transposition: format!("{:?}", p.simulation.transposition.value), hours: n, ledger_closure_error_kwh: closure },
+        manifest: RunManifest { inputs_hash, engine: ENGINE_VERSION.into(), weather_hash: weather_hash.into(), weather_provider: w.provenance.provider.clone(), transposition: format!("{:?}", p.simulation.transposition.value), hours: n, ledger_closure_error_kwh: closure },
         annual: Annual { dc_kwp, ac_kw, ghi_kwh_m2: irradiance_ledger[0].value, poa_kwh_m2: poa, ac_kwh, specific_yield_kwh_kwp: ac_kwh / dc_kwp, performance_ratio: ac_kwh / (poa * dc_kwp) },
+        electrical: unit_results, flows: en.flows, balance: en.balance, finance: Some(fin), local_hour,
         irradiance_ledger, energy_ledger, monthly, hourly, warnings,
     })
 }
 
+/// Fingerprint of everything that determines a result.
+pub fn inputs_hash(p: &Project, weather_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(serde_json::to_vec(&p.design_snapshot()).unwrap_or_default());
+    h.update(weather_hash.as_bytes());
+    h.update(ENGINE_VERSION.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Near shading of an array's modules by its roof obstacles.
 pub struct NearShading {
