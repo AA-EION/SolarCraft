@@ -34,6 +34,29 @@ public static unsafe class SelfTest
         sw.Stop();
         Check(sum == 4294934528 && sw.Elapsed.TotalMilliseconds < 5, $"1 MiB FFI probe {sw.Elapsed.TotalMilliseconds:F3} ms");
         Check(Core.sc_panic_probe() == Core.InternalError, "core panic is contained");
+        // Full offline workflow through the JSON API used by the UI.
+        var dir = Path.Combine(Path.GetTempPath(), "sc-selftest-" + Environment.ProcessId);
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, "t.solarcraft");
+        try
+        {
+            Api.Invoke("create_project", new { file, name = "Selftest", latitude = 6.2442, longitude = -75.5812, target_kwp = 4.0 });
+            var set = Api.Invoke("set_fields", new { file, edits = new[] { new { pointer = "/arrays/0/tilt", value = 12.0 } } })!;
+            Check(Api.Num(set["project"]!["arrays"]![0]!["tilt"]) == 12 && Api.IsUser(set["project"]!["arrays"]![0]!["tilt"]), "set_fields");
+            Api.Invoke("use_demo_weather", new { file });
+            var calls = 0;
+            Api.Invoke("simulate", new { file }, new SyncProgress(_ => calls++));
+            var e = Api.Invoke("explain", new { file })!;
+            var kwh = e["annual"]!["ac_kwh"]!.GetValue<double>();
+            Check(e["monthly"]!.AsArray().Count == 12 && kwh > 1000 && calls > 0, $"workflow simulate/explain {kwh:F0} kWh");
+            var rep = Api.Invoke("export_report", new { file, output = Path.Combine(dir, "r.pdf"), format = "pdf", lang = "es" })!;
+            Check(rep["bytes"]!.GetValue<int>() > 20000, "report PDF");
+            Check(Api.Invoke("ui_strings", new { lang = "es" })!["simulate"]!.GetValue<string>() == "Simular", "UI strings (es)");
+            try { Api.Invoke("fetch_weather_pvgis", new { file }); Check(false, "consent enforced"); }
+            catch (CoreError ce) { Check(ce.Code == "CONSENT_REQUIRED", "consent enforced"); }
+        }
+        catch (Exception ex) { Check(false, "workflow: " + ex.Message); }
+        finally { try { Directory.Delete(dir, true); } catch { } }
         File.WriteAllText(outPath, sb.ToString());
         return failures == 0 ? 0 : 1;
     }
