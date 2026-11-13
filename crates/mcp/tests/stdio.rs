@@ -51,6 +51,8 @@ fn design_flow_and_safety() {
     assert_eq!(r["result"]["isError"], json!(true));
     assert_eq!(r["result"]["structuredContent"]["code"], json!("WEATHER_MISSING"));
 
+    let r = c.call("set_roof", json!({"file": "a.solarcraft", "outline": [[0,0],[9,0],[9,5],[0,5]], "obstacles": [[[4,2],[5,2],[5,3],[4,3]]]}));
+    assert!(r["result"]["structuredContent"]["modules_fit"].as_u64().unwrap() > 4, "{r}");
     // Offline flow to a report.
     let r = c.call("use_demo_weather", json!({"file": "a.solarcraft"}));
     assert_eq!(r["result"]["isError"], json!(false), "{r}");

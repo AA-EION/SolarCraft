@@ -88,6 +88,22 @@ struct ModuleArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct RoofArgs {
+    file: String,
+    /// Array index (default 0).
+    #[serde(default)]
+    array: u32,
+    /// Roof outline in the roof plane, metres: x along the eave, y up the slope. Null removes the roof.
+    outline: Option<Vec<[f64; 2]>>,
+    /// Obstacles (chimneys, skylights) as polygons in the same coordinates.
+    #[serde(default)]
+    obstacles: Vec<Vec<[f64; 2]>>,
+    /// Optional layout parameters: setback, obstacle_clearance, gap_x, gap_y (m), orientation (portrait|landscape|best).
+    #[serde(default)]
+    params: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct ReportArgs {
     file: String,
     /// Output file in the workspace, ending in .pdf or .docx (must not exist unless overwrite=true).
@@ -200,6 +216,13 @@ impl SolarCraftMcp {
         let f = self.path(&a.file, true, true)?;
         let src = self.path(&a.source, false, true)?;
         match app::import_weather(&f, &src) { Ok(s) => ok(to_value(&s)), Err(e) => app_err(e) }
+    }
+
+    #[tool(description = "Set (or remove) the roof face of an array and place modules on it, respecting edge setback and obstacle clearance. In Easy mode the system size follows the modules that fit. Returns modules_fit and issues.")]
+    async fn set_roof(&self, Parameters(a): Parameters<RoofArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let req = json!({"file": f.to_string_lossy(), "array": a.array, "outline": a.outline, "obstacles": a.obstacles, "params": a.params});
+        match app::api::dispatch("set_roof", &req, &mut |_| true) { Ok(v) => ok(v), Err(e) => app_err(e) }
     }
 
     #[tool(description = "Attach offline clear-sky demonstration weather (no network). Overestimates yield; for trying the workflow only.")]
