@@ -2755,6 +2755,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "solarcraft-geometry"
+version = "0.0.1"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "solarcraft-mcp"
 version = "0.0.1"
 dependencies = [

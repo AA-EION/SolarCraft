@@ -1,0 +1,9 @@
+[package]
+name = "solarcraft-geometry"
+description = "SolarCraft geometry: triangulation (ported from IngeTrazo), polygons, roof module layout"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
