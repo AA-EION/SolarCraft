@@ -79,7 +79,10 @@ pub fn derive(p: &mut Project) {
         if !a.modules_per_string.is_user() {
             let (voc_cold, _) = module_voltages(&module, T_CELL_MIN);
             let (_, vmp_hot) = module_voltages(&module, T_CELL_MAX);
-            let n_max = (inv.v_dc_max / voc_cold).floor().max(1.0) as u32;
+            // Limit: the inverter's DC maximum and the module's maximum system voltage, with the
+            // module's initial (pre-stabilisation) Voc increase.
+            let v_lim = module.max_system_voltage_v.map_or(inv.v_dc_max, |m| m.min(inv.v_dc_max));
+            let n_max = (v_lim / (voc_cold * (1.0 + module.voc_initial_increase.unwrap_or(0.0)))).floor().max(1.0) as u32;
             let n_min = (inv.mppt_v_min / vmp_hot).ceil().max(1.0) as u32;
             // String capacity of the inverter(s): MPPTs × parallel strings per MPPT.
             let per_mppt = (inv.i_max_per_mppt / module.i_sc).floor().max(1.0) as u32;
@@ -125,7 +128,7 @@ pub fn electrical(p: &Project) -> crate::plant::Electrical {
                 if s_m > 0 { groups[m as usize].push(StringGroup { array_id: a.id.clone(), modules_per_string: a.modules_per_string.value, strings: s_m }); }
             }
             let id = if n_inv == 1 { format!("{}-inv", a.id) } else { format!("{}-inv{}", a.id, u + 1) };
-            units.push(InverterUnit { id, name: format!("{} · {} {}", a.name.value, inv.manufacturer, inv.model), inverter_id: inv.id.clone(), mppts: groups });
+            units.push(InverterUnit { id, name: format!("{} · {} {}", a.name.value, inv.manufacturer, inv.model), inverter_id: inv.id.clone(), mppts: groups, interconnected: vec![] });
         }
     }
     Electrical { manual: false, inverters: units }

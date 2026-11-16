@@ -53,7 +53,16 @@ fn refine(groups: &[StringState], mut a: f64, mut b: f64, i_max: f64) -> (f64, f
 }
 
 /// Find the operating point. `v_min..v_max` is the tracker window, `i_max` the input current limit.
-pub fn operate(groups: &[StringState], v_min: f64, v_max: f64, i_max: f64) -> TrackerPoint {
+pub fn operate(groups: &[StringState], v_min: f64, v_max: f64, i_max: f64) -> TrackerPoint { operate_limited(groups, v_min, v_max, i_max, f64::INFINITY) }
+
+/// As [`operate`], with a maximum input power: above it the tracker moves off the MPP.
+pub fn operate_limited(groups: &[StringState], v_min: f64, v_max: f64, i_max: f64, p_max: f64) -> TrackerPoint {
+    let mut t = operate_inner(groups, v_min, v_max, i_max);
+    if t.p_operating > p_max { t.p_operating = p_max; t.window_limited = true; }
+    t
+}
+
+fn operate_inner(groups: &[StringState], v_min: f64, v_max: f64, i_max: f64) -> TrackerPoint {
     let mut out = TrackerPoint::default();
     if groups.is_empty() { return out; }
     out.p_independent = groups.iter().map(|g| g.strings * g.modules * g.params.mpp().2).sum();

@@ -338,8 +338,8 @@ fn levenberg_marquardt<const N: usize>(mut x: [f64; N], res: &impl Fn(&[f64; N])
 
 fn solve_n<const N: usize>(mut m: [[f64; N]; N], mut b: [f64; N]) -> Option<[f64; N]> {
     for c in 0..N {
-        let p = (c..N).max_by(|&a, &q| m[a][c].abs().partial_cmp(&m[q][c].abs()).unwrap())?;
-        if m[p][c].abs() < 1e-300 { return None; }
+        let p = (c..N).max_by(|&a, &q| m[a][c].abs().total_cmp(&m[q][c].abs()))?;
+        if !m[p][c].is_finite() || m[p][c].abs() < 1e-300 { return None; }
         m.swap(c, p); b.swap(c, p);
         for r in 0..N {
             if r != c {

@@ -1,0 +1,15 @@
+[package]
+name = "solarcraft-catalog"
+description = "Equipment and tariff catalog: import of catalog backups, identities and revisions, normalisation with units, tariff schedules, coverage"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+base64 = "0.22"
+solarcraft-model = { path = "../model" }
+solarcraft-store = { path = "../store" }

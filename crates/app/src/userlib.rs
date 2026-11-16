@@ -25,7 +25,8 @@ fn conn(lib: &Path) -> Result<Connection> {
     if let Some(d) = lib.parent() { std::fs::create_dir_all(d).map_err(|x| e("LIBRARY_OPEN", x))?; }
     let c = Connection::open(lib).map_err(|x| e("LIBRARY_OPEN", x))?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-        CREATE TABLE IF NOT EXISTS item (kind TEXT NOT NULL, id TEXT NOT NULL, rev INTEGER NOT NULL, body TEXT NOT NULL, source TEXT NOT NULL, updated_unix INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (kind, id, rev));")
+        CREATE TABLE IF NOT EXISTS item (kind TEXT NOT NULL, id TEXT NOT NULL, rev INTEGER NOT NULL, body TEXT NOT NULL, source TEXT NOT NULL, updated_unix INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (kind, id, rev));
+        CREATE INDEX IF NOT EXISTS item_updated ON item(updated_unix);")
         .map_err(|x| e("LIBRARY_OPEN", x))?;
     Ok(c)
 }
@@ -51,17 +52,48 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item { kind: r.get(0)?, id: r.get(1)?, rev: r.get(2)?, record: serde_json::from_str(&body).unwrap_or(Value::Null), source: r.get(4)?, updated_unix: r.get(5)? })
 }
 
-/// Latest revision of each live record, optionally filtered by kind and a text query.
-pub fn list(lib: &Path, kind: Option<&str>, query: Option<&str>) -> Result<Vec<Item>> {
+/// Latest revision of each live record, optionally filtered by kind and text (every word must
+/// occur in the record), newest first, at most `limit` (default 200).
+pub fn list(lib: &Path, kind: Option<&str>, query: Option<&str>) -> Result<Vec<Item>> { list_limited(lib, kind, query, 200) }
+
+pub fn list_limited(lib: &Path, kind: Option<&str>, query: Option<&str>, limit: usize) -> Result<Vec<Item>> {
     let c = conn(lib)?;
-    let mut st = c.prepare("SELECT i.kind,i.id,i.rev,i.body,i.source,i.updated_unix,i.deleted FROM item i JOIN (SELECT kind,id,MAX(rev) r FROM item GROUP BY kind,id) m ON i.kind=m.kind AND i.id=m.id AND i.rev=m.r ORDER BY i.kind,i.id").map_err(|x| e("LIBRARY", x))?;
-    let q = query.map(str::to_lowercase);
-    let items = st.query_map([], |r| Ok((row(r)?, r.get::<_, i64>(6)?))).map_err(|x| e("LIBRARY", x))?
-        .filter_map(|x| x.ok()).filter(|(_, d)| *d == 0).map(|(i, _)| i)
-        .filter(|i| kind.is_none_or(|k| i.kind == k))
-        .filter(|i| q.as_ref().is_none_or(|q| i.record.to_string().to_lowercase().contains(q)))
-        .collect();
+    let words: Vec<String> = query.unwrap_or("").split_whitespace().map(|w| format!("%{}%", w.to_lowercase())).collect();
+    let mut sql = "SELECT i.kind,i.id,i.rev,i.body,i.source,i.updated_unix FROM item i JOIN (SELECT kind,id,MAX(rev) r FROM item GROUP BY kind,id) m ON i.kind=m.kind AND i.id=m.id AND i.rev=m.r WHERE i.deleted=0".to_string();
+    let mut args: Vec<String> = vec![];
+    if let Some(k) = kind { sql.push_str(" AND i.kind=?"); args.push(k.to_string()); }
+    for w in words { sql.push_str(" AND lower(i.body) LIKE ?"); args.push(w); }
+    sql.push_str(&format!(" ORDER BY i.updated_unix DESC, i.kind, i.id LIMIT {}", limit.max(1)));
+    let mut st = c.prepare(&sql).map_err(|x| e("LIBRARY", x))?;
+    let items = st.query_map(rusqlite::params_from_iter(args.iter()), row).map_err(|x| e("LIBRARY", x))?.filter_map(|x| x.ok()).collect();
     Ok(items)
+}
+
+pub fn count(lib: &Path) -> Result<Vec<(String, i64)>> {
+    let c = conn(lib)?;
+    let mut st = c.prepare("SELECT kind, COUNT(DISTINCT id) FROM item WHERE deleted=0 GROUP BY kind ORDER BY kind").map_err(|x| e("LIBRARY", x))?;
+    let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|x| e("LIBRARY", x))?.filter_map(|x| x.ok()).collect();
+    Ok(v)
+}
+
+/// Save many already-canonical records in one transaction (bulk import). Returns how many were written.
+pub fn put_many(lib: &Path, items: &[(String, Value)], source: &str) -> Result<usize> {
+    let mut c = conn(lib)?;
+    let tx = c.transaction().map_err(|x| e("LIBRARY", x))?;
+    let t = now();
+    let mut n = 0;
+    {
+        let mut next = tx.prepare("SELECT COALESCE(MAX(rev),0)+1 FROM item WHERE kind=?1 AND id=?2").map_err(|x| e("LIBRARY", x))?;
+        let mut ins = tx.prepare("INSERT INTO item(kind,id,rev,body,source,updated_unix) VALUES(?1,?2,?3,?4,?5,?6)").map_err(|x| e("LIBRARY", x))?;
+        for (kind, rec) in items {
+            let Some(id) = rec["id"].as_str() else { continue };
+            let rev: i64 = next.query_row(params![kind, id], |r| r.get(0)).map_err(|x| e("LIBRARY", x))?;
+            ins.execute(params![kind, id, rev, rec.to_string(), source, t]).map_err(|x| e("LIBRARY", x))?;
+            n += 1;
+        }
+    }
+    tx.commit().map_err(|x| e("LIBRARY", x))?;
+    Ok(n)
 }
 
 pub fn get(lib: &Path, kind: &str, id: &str) -> Result<Item> {
@@ -88,11 +120,13 @@ pub fn delete(lib: &Path, kind: &str, id: &str) -> Result<()> {
 /// Copy a library record into a project (the project keeps its own copy).
 pub fn pin(lib: &Path, project: &Path, kind: &str, id: &str) -> Result<Value> {
     let it = get(lib, kind, id)?;
+    // Imported modules are fitted when first used.
+    let rec = canonical_equipment(kind, &it.record)?;
     let (mut s, mut p) = open(project)?;
-    crate::plant_ops::insert(&mut p, kind, it.record.clone())?;
+    crate::plant_ops::insert(&mut p, kind, rec.clone())?;
     solarcraft_model::derive::derive(&mut p);
     save(&mut s, &p, &format!("pin {kind} {id} rev {}", it.rev))?;
-    Ok(it.record)
+    Ok(rec)
 }
 
 /// Import records from a JSON file: `[{"kind": "...", "record": {...}}]` or a catalog bundle `{"items": [...]}`.

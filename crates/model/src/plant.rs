@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- stringing
 
+/// Where an equipment record or tariff came from in an external catalog, pinned to one revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogRef {
+    /// Entity family (module, pvinverter, batterysystem, batteryinverter, generator, tariff, …).
+    pub family: String,
+    pub id: String,
+    pub version: i64,
+    /// SHA-256 of the imported source file and its dataset name.
+    pub source_sha256: String,
+    pub dataset: String,
+}
+
 /// A group of identical strings from one array on one MPPT input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StringGroup {
@@ -26,6 +38,9 @@ pub struct InverterUnit {
     pub inverter_id: String,
     /// `mppts[i]` lists the string groups on MPPT input `i`.
     pub mppts: Vec<Vec<StringGroup>>,
+    /// MPPT inputs connected in parallel to act as one tracker (0-based indices per group).
+    #[serde(default)]
+    pub interconnected: Vec<Vec<usize>>,
 }
 
 /// Electrical design. With `manual == false` the stringing is derived from
@@ -110,6 +125,8 @@ pub enum Coupling {
     DcHybrid { unit_id: String },
     /// On the AC bus through its own bidirectional battery inverter.
     AcCoupled { battery_inverter_id: String },
+    /// Integrated battery system on the AC bus through its own built-in converter.
+    Integrated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -165,6 +182,9 @@ pub struct Storage {
     pub grid_charge_backup: bool,
     pub grid_service: GridService,
     pub outages: Vec<Outage>,
+    /// Backup generator that supplies critical load the battery cannot cover during outages.
+    #[serde(default)]
+    pub generator_id: Option<String>,
 }
 
 impl Storage {
@@ -213,12 +233,49 @@ pub struct Tariff {
     /// Annual price escalation, %.
     pub import_escalation_pct: f64,
     pub export_escalation_pct: f64,
+    /// Zone schedule (time-of-use grid) that sets the import price per hour when present.
+    #[serde(default)]
+    pub zones: Option<ZoneSchedule>,
+    #[serde(default)]
+    pub catalog_ref: Option<CatalogRef>,
+}
+
+/// Rate zones per hour: rows of 12 months × 24 hours (288 slots, zero-based month × 24 + hour),
+/// a row selected per weekday, zone codes (1-based) selecting a price.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneSchedule {
+    /// Row index for each weekday in .NET order: Sunday = 0 … Saturday = 6.
+    pub weekday_rows: [usize; 7],
+    pub rows: Vec<Vec<u32>>,
+    /// Price per zone code (index = code − 1) and its display name.
+    pub zone_prices: Vec<f64>,
+    #[serde(default)]
+    pub zone_names: Vec<String>,
+    /// Source offset in minutes, preserved; not applied by the hourly adapter.
+    #[serde(default)]
+    pub time_plus_minutes: Option<i64>,
+    /// The original encoded payload (Base64 of UTF-16LE JSON).
+    #[serde(default)]
+    pub raw_encoded: String,
+}
+
+impl ZoneSchedule {
+    /// Zone code at a weekday (0 = Monday … 6 = Sunday), zero-based month and hour.
+    pub fn zone(&self, weekday_mon0: u32, month0: u32, hour: u32) -> Option<u32> {
+        let dotnet = ((weekday_mon0 + 1) % 7) as usize;
+        let row = self.rows.get(*self.weekday_rows.get(dotnet)?)?;
+        row.get((month0 * 24 + hour) as usize).copied()
+    }
+    pub fn price(&self, weekday_mon0: u32, month0: u32, hour: u32) -> Option<f64> {
+        let z = self.zone(weekday_mon0, month0, hour)?;
+        self.zone_prices.get(z.checked_sub(1)? as usize).copied()
+    }
 }
 
 impl Default for Tariff {
     fn default() -> Self {
         Tariff { name: "Flat tariff".into(), currency: "EUR".into(), import_price: 0.30, tou: vec![], export: ExportCompensation::Fixed { price: 0.08 },
-                 fixed_per_month: 0.0, demand_charge_per_kw_month: 0.0, import_escalation_pct: 2.0, export_escalation_pct: 0.0 }
+                 fixed_per_month: 0.0, demand_charge_per_kw_month: 0.0, import_escalation_pct: 2.0, export_escalation_pct: 0.0, zones: None, catalog_ref: None }
     }
 }
 

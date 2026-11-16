@@ -24,13 +24,18 @@ pub const METHODS: &[&str] = &[
     "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
     "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
-    "report_preview", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import",
+    "report_preview", "catalog_audit", "catalog_import", "catalog_search", "catalog_details", "catalog_history", "catalog_pin", "catalog_apply_tariff", "catalog_coverage", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import", "library_import_workbook", "library_count",
 ];
 
 /// Project sections that `set_section` replaces as a whole (validated on save).
 pub const SECTIONS: &[&str] = &["grid", "loads", "storage", "tariff", "economics", "electrical", "losses", "simulation", "customer", "site"];
 
 fn lib_path(p: &Value) -> PathBuf { p.get("library").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::userlib::default_path) }
+fn cat_path(p: &Value) -> PathBuf { p.get("catalog").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::catalog_ops::default_catalog) }
+fn sel(p: &Value, k: &str) -> Option<(String, String, Option<i64>)> {
+    let o = p.get(k)?;
+    Some((o.get("family")?.as_str()?.to_string(), o.get("id")?.as_str()?.to_string(), o.get("version").and_then(Value::as_i64)))
+}
 fn bad(m: impl std::fmt::Display) -> AppError { AppError { code: "INVALID_ARGUMENT", message: m.to_string() } }
 
 /// Dispatch `method` with JSON `params`. `progress(fraction) -> continue?` is used by long methods.
@@ -114,12 +119,14 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "apply_variant" => Ok(v(&app::plant_ops::apply_variant(&path(params, "file")?, &s(params, "id")?, params.get("keep_current").and_then(Value::as_bool).unwrap_or(false))?)),
         "delete_variant" => { app::plant_ops::delete_variant(&path(params, "file")?, &s(params, "id")?)?; Ok(json!({"deleted": true})) }
         "compare_variants" => Ok(json!({"variants": app::plant_ops::compare_variants(&path(params, "file")?)?})),
-        "library_list" => Ok(json!({"path": lib_path(params), "items": app::userlib::list(&lib_path(params), params.get("kind").and_then(Value::as_str), params.get("query").and_then(Value::as_str))?})),
+        "library_list" => Ok(json!({"path": lib_path(params), "items": app::userlib::list_limited(&lib_path(params), params.get("kind").and_then(Value::as_str), params.get("query").and_then(Value::as_str), params.get("limit").and_then(Value::as_u64).unwrap_or(200) as usize)?})),
         "library_get" => Ok(v(&app::userlib::get(&lib_path(params), &s(params, "kind")?, &s(params, "id")?)?)),
         "library_history" => Ok(json!({"revisions": app::userlib::history(&lib_path(params), &s(params, "kind")?, &s(params, "id")?)?})),
         "library_save" => Ok(v(&app::userlib::put(&lib_path(params), &s(params, "kind")?, arg(params, "record")?, params.get("source").and_then(Value::as_str).unwrap_or("user"))?)),
         "library_delete" => { app::userlib::delete(&lib_path(params), &s(params, "kind")?, &s(params, "id")?)?; Ok(json!({"deleted": true})) }
         "library_pin" => app::userlib::pin(&lib_path(params), &path(params, "file")?, &s(params, "kind")?, &s(params, "id")?),
+        "library_import_workbook" => Ok(v(&app::workbook_import::import_workbook(&lib_path(params), &path(params, "source")?, params.get("limit").and_then(Value::as_u64).unwrap_or(0) as usize)?)),
+        "library_count" => Ok(json!({"path": lib_path(params), "kinds": app::userlib::count(&lib_path(params))?.into_iter().map(|(k, n)| json!({"kind": k, "count": n})).collect::<Vec<_>>()})),
         "library_import" => Ok(json!({"items": app::userlib::import_file(&lib_path(params), &path(params, "source")?, params.get("source_kind").and_then(Value::as_str).unwrap_or("imported"))?})),
         "explain" => match app::latest_results(&path(params, "file")?)? {
             Some(r) => Ok(json!({"annual": r.annual, "irradiance_kwh_m2": r.irradiance_ledger, "energy_kwh": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical})),
@@ -131,6 +138,17 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let designer = params.get("designer").and_then(Value::as_str).unwrap_or("");
             Ok(v(&app::generate_report(&path(params, "file")?, &path(params, "output")?, fmt, lang, designer)?))
         }
+        "catalog_audit" => app::catalog_ops::audit(&path(params, "source")?),
+        "catalog_import" => app::catalog_ops::import(&path(params, "source")?, &cat_path(params)),
+        "catalog_search" => app::catalog_ops::search(&cat_path(params), params.get("family").and_then(Value::as_str), params.get("query").and_then(Value::as_str).unwrap_or(""), params.get("available_only").and_then(Value::as_bool).unwrap_or(false), params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize),
+        "catalog_details" => app::catalog_ops::details(&cat_path(params), &s(params, "family")?, &s(params, "id")?, params.get("version").and_then(Value::as_i64)),
+        "catalog_history" => app::catalog_ops::history(&cat_path(params)),
+        "catalog_pin" => app::catalog_ops::pin(&cat_path(params), &path(params, "file")?, &s(params, "family")?, &s(params, "id")?, params.get("version").and_then(Value::as_i64)),
+        "catalog_apply_tariff" => {
+            let (i, x) = (sel(params, "import"), sel(params, "export"));
+            app::catalog_ops::apply_tariff(&cat_path(params), &path(params, "file")?, i.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)), x.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)))
+        }
+        "catalog_coverage" => app::catalog_ops::coverage(&path(params, "tsv")?, params.get("catalog").and_then(Value::as_str).map(std::path::Path::new), params.get("output").and_then(Value::as_str).map(std::path::Path::new)),
         "report_preview" => Ok(v(&app::report_view(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"))?)),
         "undo" => Ok(json!({"undone": app::undo(&path(params, "file")?)?.is_some()})),
         "history" => Ok(json!({"changes": app::history(&path(params, "file")?, 50)?.into_iter().map(|(seq, op, at)| json!({"seq": seq, "op": op, "at_unix": at})).collect::<Vec<_>>()})),

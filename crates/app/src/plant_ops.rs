@@ -13,12 +13,16 @@ use solarcraft_store::Store;
 use std::path::Path;
 
 /// Equipment kinds shared by the project library, the user library and the catalog.
-pub const KINDS: [&str; 4] = ["module", "inverter", "battery", "battery_inverter"];
+pub const KINDS: [&str; 5] = ["module", "inverter", "battery", "battery_inverter", "generator"];
 
 fn positive(v: f64, name: &str) -> Result<()> { if v.is_finite() && v > 0.0 { Ok(()) } else { Err(e("EQUIPMENT_INVALID", format!("{name} must be positive"))) } }
 
 /// Check an equipment record and return it in canonical form (modules are fitted).
-pub fn canonical_equipment(kind: &str, record: &Value) -> Result<Value> {
+pub fn canonical_equipment(kind: &str, record: &Value) -> Result<Value> { canonical_equipment_opts(kind, record, true) }
+
+/// As [`canonical_equipment`]; with `fit = false` modules are checked but not fitted
+/// (bulk imports fit when a module is first used in a project).
+pub fn canonical_equipment_opts(kind: &str, record: &Value, fit: bool) -> Result<Value> {
     let bad = |x: serde_json::Error| e("EQUIPMENT_INVALID", format!("{kind}: {x}"));
     Ok(match kind {
         "module" => {
@@ -28,7 +32,7 @@ pub fn canonical_equipment(kind: &str, record: &Value) -> Result<Value> {
             let mut m: solarcraft_model::equipment::ModuleSpec = serde_json::from_value(r).map_err(bad)?;
             for (v, n) in [(m.v_oc, "v_oc"), (m.i_sc, "i_sc"), (m.v_mp, "v_mp"), (m.i_mp, "i_mp"), (m.length_m, "length_m"), (m.width_m, "width_m")] { positive(v, n)?; }
             if m.v_mp >= m.v_oc || m.i_mp >= m.i_sc { return Err(e("EQUIPMENT_INVALID", "module: Vmp must be below Voc and Imp below Isc")); }
-            m.fit().map_err(|x| e("MODULE_FIT", x))?;
+            if fit { m.fit().map_err(|x| e("MODULE_FIT", x))?; }
             serde_json::to_value(m).unwrap_or_default()
         }
         "inverter" => {
@@ -57,6 +61,13 @@ pub fn canonical_equipment(kind: &str, record: &Value) -> Result<Value> {
             if b.efficiency_curve.is_empty() { return Err(e("EQUIPMENT_INVALID", "battery inverter: efficiency curve required")); }
             serde_json::to_value(b).unwrap_or_default()
         }
+        "generator" => {
+            let mut r = record.clone();
+            if r.get("provenance").is_none() { r["provenance"] = Value::from("user"); }
+            let g: solarcraft_model::equipment::GeneratorSpec = serde_json::from_value(r).map_err(bad)?;
+            positive(g.rated_va, "rated_va")?; positive(g.max_va, "max_va")?;
+            serde_json::to_value(g).unwrap_or_default()
+        }
         _ => return Err(e("INVALID_ARGUMENT", format!("unknown equipment kind '{kind}' (use {})", KINDS.join(", ")))),
     })
 }
@@ -81,6 +92,7 @@ pub(crate) fn insert(p: &mut Project, kind: &str, rec: Value) -> Result<()> {
         "inverter" => { l.inverters.retain(|x| x.id != id); l.inverters.push(serde_json::from_value(rec).map_err(bad)?); }
         "battery" => { l.batteries.retain(|x| x.id != id); l.batteries.push(serde_json::from_value(rec).map_err(bad)?); }
         "battery_inverter" => { l.battery_inverters.retain(|x| x.id != id); l.battery_inverters.push(serde_json::from_value(rec).map_err(bad)?); }
+        "generator" => { l.generators.retain(|x| x.id != id); l.generators.push(serde_json::from_value(rec).map_err(bad)?); }
         _ => return Err(e("INVALID_ARGUMENT", format!("unknown equipment kind '{kind}'"))),
     }
     Ok(())

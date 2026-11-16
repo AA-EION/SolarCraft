@@ -191,12 +191,26 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         ac_kw += inv.pac_max_w / 1000.0;
         let mut dc = vec![0.0f64; n];
         let mut ur = UnitResult { id: u.id.clone(), name: u.name.clone(), inverter_id: inv.id.clone(), ac_kw: inv.pac_max_w / 1000.0, ..Default::default() };
-        for (mi, groups) in u.mppts.iter().enumerate() {
+        // Trackers: interconnected MPPT inputs act as one tracker (parallel), the rest singly.
+        let mut trackers: Vec<Vec<usize>> = u.interconnected.iter().filter(|g| !g.is_empty()).cloned().collect();
+        for mi in 0..u.mppts.len() { if !trackers.iter().any(|g| g.contains(&mi)) { trackers.push(vec![mi]); } }
+        trackers.sort_by_key(|g| g[0]);
+        let mut vw = vec![0.0f64; n]; // Σ V·P for the power-weighted unit voltage
+        for members in &trackers {
+            let groups: Vec<&solarcraft_model::plant::StringGroup> = members.iter().filter_map(|&mi| u.mppts.get(mi)).flatten().collect();
             if groups.is_empty() { continue; }
+            let mi = members[0];
             let mut mr = MpptResult { index: mi as u32 + 1, ..Default::default() };
             mr.strings = groups.iter().map(|g| format!("{} × {} ({})", g.strings, g.modules_per_string, p.arrays.iter().find(|a| a.id == g.array_id).map_or(g.array_id.clone(), |a| a.name.value.clone()))).collect::<Vec<_>>().join(" + ");
+            if members.len() > 1 { mr.strings = format!("MPPT {} interconnected: {}", members.iter().map(|m| (m + 1).to_string()).collect::<Vec<_>>().join("+"), mr.strings); }
             mr.stc_kw = groups.iter().filter_map(|g| { let a = p.arrays.iter().find(|a| a.id == g.array_id)?; let m = p.library.module(&a.module_id.value)?; Some(g.strings as f64 * g.modules_per_string as f64 * m.pmp_stc() / 1000.0) }).sum();
             ur.stc_kw += mr.stc_kw;
+            // Combined limits: common voltage window, summed current and power.
+            let ins: Vec<_> = members.iter().map(|&m| inv.input(m)).collect();
+            let v_min = ins.iter().map(|i| i.v_min).fold(f64::MIN, f64::max);
+            let v_max = ins.iter().map(|i| i.v_max).fold(f64::MAX, f64::min);
+            let i_max: f64 = ins.iter().map(|i| i.i_max).sum();
+            let p_max: f64 = if ins.iter().all(|i| i.p_max_w.is_some()) { ins.iter().filter_map(|i| i.p_max_w).sum() } else { f64::INFINITY };
             for k in 0..n {
                 if k % 2190 == 0 && !progress(0.6 + 0.3 * (ui as f64 + k as f64 / n as f64) / nu as f64) { return Err(SimError("cancelled".into())); }
                 let states: Vec<electrical::StringState> = groups.iter().filter_map(|g| {
@@ -205,7 +219,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
                     Some(electrical::StringState { params: dp, voc_module: ah.voc[k], modules: g.modules_per_string as f64, strings: g.strings as f64 })
                 }).collect();
                 if states.is_empty() { continue; }
-                let t = electrical::operate(&states, inv.mppt_v_min, inv.mppt_v_max, inv.i_max_per_mppt);
+                let t = electrical::operate_limited(&states, v_min, v_max, i_max, p_max);
                 e_tot[3] += t.p_combined;
                 e_tot[4] += t.p_operating;
                 if t.window_limited { mr.limited_hours += 1; }
@@ -214,10 +228,12 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
                 let d = t.p_operating * dc_chain;
                 mr.dc_kwh += d / 1000.0;
                 dc[k] += d;
+                vw[k] += t.v_operating * d;
             }
             if mr.limited_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: format!("{} MPPT {}", u.name, mi + 1), value: mr.limited_hours as f64, text: format!("{} MPPT {}: {} h limited by the MPP voltage window or input current", u.name, mi + 1, mr.limited_hours) }); }
             ur.mppts.push(mr);
         }
+        let v_dc: Vec<f64> = (0..n).map(|k| if dc[k] > 0.0 { vw[k] / dc[k] } else { 0.0 }).collect();
         // PV-only inverter chain for the loss ledger.
         for k in 0..n {
             let q = dc[k] / dc_chain;
@@ -225,7 +241,8 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             let lid = qual * f(l.lid_pct.value);
             let mm = lid * f(l.mismatch_pct.value);
             let dcw = mm * f(l.dc_wiring_pct.value);
-            let (unclipped, clipped) = if dcw > 0.0 { (dcw * inv.efficiency(dcw), energy::inverter_ac(inv, dcw).0) } else { (0.0, 0.0) };
+            let vk = Some(v_dc[k]).filter(|v| *v > 0.0);
+            let (unclipped, clipped) = if dcw > 0.0 { let (ac, used) = energy::inverter_ac(inv, dcw, vk); (if used > 0.0 { dcw * inv.efficiency_v(dcw, vk) } else { 0.0 }, ac) } else { (0.0, 0.0) };
             let night = if dcw > 0.0 { clipped } else { -inv.night_w };
             let acw = if night > 0.0 { night * f(l.ac_wiring_pct.value) } else { night };
             let avail = acw * f(l.availability_pct.value);
@@ -238,7 +255,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         }
         ur.dc_ac_ratio = if ur.ac_kw > 0.0 { ur.stc_kw / ur.ac_kw } else { 0.0 };
         unit_results.push(ur);
-        unit_inputs.push((u.id.clone(), inv, dc));
+        unit_inputs.push((u.id.clone(), inv, dc, v_dc));
     }
     for m in &mut monthly { m.ghi_kwh_m2 /= area_tot; m.poa_kwh_m2 /= area_tot; }
     for v in &mut hourly.poa_w_m2 { *v /= area_tot as f32; }
@@ -253,7 +270,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         (solarcraft_model::plant::LoadProfile::Series { name, .. }, None) => return Err(SimError(format!("load series '{name}' is missing from the project file"))),
     };
     let load_w: Vec<f64> = local_hour.iter().map(|&h| profile[h as usize % profile.len()]).collect();
-    let units: Vec<energy::UnitInput> = unit_inputs.iter().map(|(id, spec, dc)| energy::UnitInput { id, spec, dc_w: dc.clone() }).collect();
+    let units: Vec<energy::UnitInput> = unit_inputs.iter().map(|(id, spec, dc, v)| energy::UnitInput { id, spec, dc_w: dc.clone(), v_dc: v.clone() }).collect();
     let en = energy::dispatch(p, &units, &load_w, &local_hour, f_ac).map_err(SimError)?;
     progress(0.95);
 

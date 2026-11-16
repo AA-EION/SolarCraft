@@ -238,7 +238,8 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
     }
     if let (Some(st), Some(bat)) = (&p.storage, p.storage.as_ref().and_then(|st| p.library.battery(&st.battery_id))) {
         let coupling = match &st.coupling { solarcraft_model::plant::Coupling::DcHybrid { unit_id } => format!("{} ({unit_id})", tr(l, "DC, hybrid inverter port", "CC, puerto del inversor híbrido", "DC, Hybrid-Wechselrichter", "CC, porta do inversor híbrido")),
-            solarcraft_model::plant::Coupling::AcCoupled { battery_inverter_id } => format!("{} ({battery_inverter_id})", tr(l, "AC, battery inverter", "CA, inversor de batería", "AC, Batteriewechselrichter", "CA, inversor de bateria")) };
+            solarcraft_model::plant::Coupling::AcCoupled { battery_inverter_id } => format!("{} ({battery_inverter_id})", tr(l, "AC, battery inverter", "CA, inversor de batería", "AC, Batteriewechselrichter", "CA, inversor de bateria")),
+            solarcraft_model::plant::Coupling::Integrated => tr(l, "AC, integrated battery system", "CA, sistema de batería integrado", "AC, integriertes Batteriesystem", "CA, sistema de bateria integrado") };
         let rows = vec![
             vec![tr(l, "Battery", "Batería", "Batterie", "Bateria"), format!("{} × {} {} ({} kWh)", st.units, bat.manufacturer, bat.model, n(bat.capacity_kwh * st.units as f64, 1))],
             vec![tr(l, "Connection", "Conexión", "Anschluss", "Conexão"), coupling],

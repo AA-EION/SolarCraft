@@ -58,6 +58,7 @@ fn electrical_issues(p: &Project, push: &mut Push) {
             if groups.is_empty() { continue; }
             let mp = format!("{base}/mppts/{mi}");
             let lbl = format!("{} MPPT {}", u.name, mi + 1);
+            let inp = inv.input(mi);
             let (mut isc, mut imp) = (0.0, 0.0);
             let mut lens = vec![];
             let mut mods = vec![];
@@ -66,25 +67,51 @@ fn electrical_issues(p: &Project, push: &mut Push) {
                 let Some(m) = p.library.module(&a.module_id.value) else { continue };
                 if g.modules_per_string == 0 || g.strings == 0 { push("STRING_EMPTY", Severity::Error, mp.clone(), format!("{lbl}: a string group has zero modules or strings.")); continue; }
                 let n = g.modules_per_string as f64;
-                let (voc_cold, _) = module_voltages(m, T_CELL_MIN);
+                let (voc_cold0, _) = module_voltages(m, T_CELL_MIN);
+                // Initial (pre-stabilisation) Voc increase applies to the configuration check.
+                let voc_cold = voc_cold0 * (1.0 + m.voc_initial_increase.unwrap_or(0.0));
                 let (_, vmp_hot) = module_voltages(m, T_CELL_MAX);
                 let (_, vmp_cold) = module_voltages(m, T_CELL_MIN);
+                if m.requires_transformer_inverter && inv.transformer == Some(false) { push("MODULE_NEEDS_TRANSFORMER", Severity::Error, mp.clone(), format!("{lbl}: {} {} may only be used with a transformer inverter; {} {} is transformerless.", m.manufacturer, m.model, inv.manufacturer, inv.model)); }
+                if let Some(vmax) = m.max_system_voltage_v { if n * voc_cold > vmax { push("MODULE_SYSTEM_VOLTAGE", Severity::Error, mp.clone(), format!("{lbl}: string Voc {:.0} V at {T_CELL_MIN} °C exceeds the module's maximum system voltage {vmax:.0} V.", n * voc_cold)); } }
                 if n * voc_cold > inv.v_dc_max { push("STRING_VOC_MAX", Severity::Error, mp.clone(), format!("{lbl}: {} modules in series reach Voc {:.0} V at {T_CELL_MIN} °C, above the inverter maximum {:.0} V. Use at most {} modules per string.", g.modules_per_string, n * voc_cold, inv.v_dc_max, (inv.v_dc_max / voc_cold).floor())); }
-                if n * vmp_hot < inv.mppt_v_min { push("STRING_VMP_MIN", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MAX} °C is {:.0} V, below the MPPT minimum {:.0} V: the simulation shows the loss on hot days.", n * vmp_hot, inv.mppt_v_min)); }
-                if n * vmp_cold > inv.mppt_v_max { push("STRING_VMP_MAX", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MIN} °C is {:.0} V, above the MPPT maximum {:.0} V.", n * vmp_cold, inv.mppt_v_max)); }
+                if n * vmp_hot < inp.v_min { push("STRING_VMP_MIN", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MAX} °C is {:.0} V, below the MPPT minimum {:.0} V: the simulation shows the loss on hot days.", n * vmp_hot, inp.v_min)); }
+                if n * vmp_cold > inp.v_max { push("STRING_VMP_MAX", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MIN} °C is {:.0} V, above the MPPT maximum {:.0} V.", n * vmp_cold, inp.v_max)); }
                 isc += g.strings as f64 * m.i_sc;
                 imp += g.strings as f64 * m.i_mp;
                 lens.push(g.modules_per_string);
                 mods.push(m.id.clone());
                 stc_w += n * g.strings as f64 * m.pmp_stc();
             }
-            if isc > inv.i_max_per_mppt * 1.25 { push("MPPT_CURRENT", Severity::Error, mp.clone(), format!("{lbl}: short-circuit current {isc:.1} A exceeds 125 % of the {:.1} A input limit. Move strings to another MPPT.", inv.i_max_per_mppt)); }
-            else if imp > inv.i_max_per_mppt { push("MPPT_CURRENT_LIMITED", Severity::Warning, mp.clone(), format!("{lbl}: MPP current {imp:.1} A exceeds the {:.1} A input limit; the inverter will limit current (simulated).", inv.i_max_per_mppt)); }
+            let (isc_lim, isc_txt) = match inp.i_sc_max { Some(x) => (x, format!("the input's {x:.1} A short-circuit rating")), None => (inp.i_max * 1.25, format!("125 % of the {:.1} A input limit", inp.i_max)) };
+            if isc > isc_lim { push("MPPT_CURRENT", Severity::Error, mp.clone(), format!("{lbl}: short-circuit current {isc:.1} A exceeds {isc_txt}. Move strings to another MPPT.")); }
+            else if imp > inp.i_max { push("MPPT_CURRENT_LIMITED", Severity::Warning, mp.clone(), format!("{lbl}: MPP current {imp:.1} A exceeds the {:.1} A input limit; the inverter will limit current (simulated).", inp.i_max)); }
+            let stc_mppt: f64 = groups.iter().filter_map(|g| { let a = p.arrays.iter().find(|a| a.id == g.array_id)?; let m = p.library.module(&a.module_id.value)?; Some(g.strings as f64 * g.modules_per_string as f64 * m.pmp_stc()) }).sum();
+            if let Some(pm) = inp.p_max_w { if stc_mppt > pm * 1.3 { push("MPPT_POWER", Severity::Warning, mp.clone(), format!("{lbl}: {:.0} W STC on an input rated {pm:.0} W; the input limits power (simulated).", stc_mppt)); } }
             lens.sort(); lens.dedup();
             if lens.len() > 1 { push("MPPT_STRING_LENGTHS", Severity::Warning, mp.clone(), format!("{lbl}: parallel strings of different lengths ({lens:?} modules) share one MPP tracker; the mismatch loss is simulated.")); }
             mods.sort(); mods.dedup();
             if mods.len() > 1 { push("MPPT_MIXED_MODULES", Severity::Warning, mp.clone(), format!("{lbl}: different module types on one MPP tracker.")); }
         }
+        // Aggregate DC limits, connectors and MPPT interconnection rules.
+        let (mut isc_all, mut imp_all, mut n_strings) = (0.0, 0.0, 0u32);
+        for g in u.mppts.iter().flatten() {
+            if let Some(m) = p.arrays.iter().find(|a| a.id == g.array_id).and_then(|a| p.library.module(&a.module_id.value)) { isc_all += g.strings as f64 * m.i_sc; imp_all += g.strings as f64 * m.i_mp; }
+            n_strings += g.strings;
+        }
+        if let Some(x) = inv.i_sc_dc_max { if isc_all > x { push("INVERTER_ISC_TOTAL", Severity::Error, format!("{base}/mppts"), format!("{}: total short-circuit current {isc_all:.1} A exceeds the inverter's {x:.1} A.", u.name)); } }
+        if let Some(x) = inv.i_dc_max { if imp_all > x { push("INVERTER_IDC_TOTAL", Severity::Warning, format!("{base}/mppts"), format!("{}: total MPP current {imp_all:.1} A exceeds the inverter's {x:.1} A operating limit.", u.name)); } }
+        if let Some(c) = inv.dc_connectors { if c > 0 && n_strings > c { push("INVERTER_CONNECTORS", Severity::Warning, format!("{base}/mppts"), format!("{}: {n_strings} strings but {c} DC input connectors; strings must be combined before the inverter.", u.name)); } }
+        if let (Some(ph), 1) = (inv.phases, p.grid.phases) { if ph == 3 { push("INVERTER_PHASES", Severity::Error, format!("{base}/inverter_id"), format!("{}: a three-phase inverter cannot connect to a single-phase grid.", u.name)); } }
+        let used: Vec<usize> = u.mppts.iter().enumerate().filter(|(_, g)| !g.is_empty()).map(|(i, _)| i).collect();
+        let linked: usize = u.interconnected.iter().filter(|g| g.len() > 1).map(|g| g.len()).sum();
+        match inv.mppt_interconnection {
+            Some(0) if linked > 0 => push("MPPT_INTERCONNECT", Severity::Error, format!("{base}/interconnected"), format!("{}: this inverter does not allow interconnecting MPP trackers.", u.name)),
+            Some(2) if linked > 0 && !(u.interconnected.len() == 1 && used.iter().all(|i| u.interconnected[0].contains(i)) && u.interconnected[0].len() == inv.mppt_count as usize) =>
+                push("MPPT_INTERCONNECT", Severity::Error, format!("{base}/interconnected"), format!("{}: this inverter requires either no interconnection or all {} trackers interconnected.", u.name, inv.mppt_count)),
+            _ => {}
+        }
+        if u.interconnected.iter().flatten().any(|&i| i >= inv.mppt_count as usize) { push("MPPT_INTERCONNECT", Severity::Error, format!("{base}/interconnected"), format!("{}: interconnection names an MPPT the inverter does not have.", u.name)); }
         if stc_w > 0.0 {
             let r = stc_w / inv.pac_max_w;
             if !(0.8..=1.5).contains(&r) { push("DC_AC_RATIO", Severity::Warning, format!("{base}/inverter_id"), format!("{}: DC/AC ratio {r:.2} is outside 0.8–1.5.", u.name)); }
@@ -133,9 +160,21 @@ fn plant_issues(p: &Project, push: &mut Push) {
                     },
                 }
             }
+            Coupling::Integrated => if b.converter.is_none() {
+                push("STORAGE_COUPLING", Severity::Error, "/storage/coupling".into(), format!("{} {} has no built-in converter; choose DC or AC coupling.", b.manufacturer, b.model));
+            },
             Coupling::AcCoupled { battery_inverter_id } => if p.library.battery_inverter(battery_inverter_id).is_none() {
                 push("STORAGE_COUPLING", Severity::Error, "/storage/coupling".into(), format!("Battery inverter '{battery_inverter_id}' is not in the project library."));
             },
+        }
+        if let Some(g) = &st.generator_id { if p.library.generator(g).is_none() { push("GENERATOR_MISSING", Severity::Error, "/storage/generator_id".into(), format!("Generator '{g}' is not in the project library.")); } }
+        if let Coupling::AcCoupled { battery_inverter_id } = &st.coupling {
+            if let Some(bi) = p.library.battery_inverter(battery_inverter_id) {
+                let v = b.cells.as_ref().map_or(b.nominal_voltage_v, |c| c.pack_voltage());
+                if bi.battery_v_min.is_some_and(|lo| v < lo) || bi.battery_v_max.is_some_and(|hi| v > hi) {
+                    push("STORAGE_VOLTAGE", Severity::Error, "/storage/battery_id".into(), format!("Battery voltage {v:.0} V is outside the battery inverter's {:.0}–{:.0} V range.", bi.battery_v_min.unwrap_or(0.0), bi.battery_v_max.unwrap_or(f64::INFINITY)));
+                }
+            }
         }
         for (i, o) in st.outages.iter().enumerate() {
             if o.start_hour >= 8760 || o.hours == 0 { push("OUTAGE_RANGE", Severity::Error, format!("/storage/outages/{i}"), "Outage must start within the year (hour 0–8759) and last at least one hour.".into()); }

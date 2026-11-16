@@ -15,9 +15,11 @@ use solarcraft_weather::{QcReport, Weather};
 use std::path::Path;
 
 pub mod api;
+pub mod catalog_ops;
 pub mod plant_ops;
 pub mod ui_strings;
 pub mod userlib;
+pub mod workbook_import;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppError { pub code: &'static str, pub message: String }
@@ -139,6 +141,9 @@ pub fn add_module(path: &Path, m: ModuleInput) -> Result<ModuleSpec> {
         id: m.id, manufacturer: m.manufacturer, model: m.model, provenance: Provenance::User, technology: m.technology,
         cells_in_series: m.cells_in_series, length_m: m.length_m, width_m: m.width_m, v_oc: m.v_oc, i_sc: m.i_sc, v_mp: m.v_mp, i_mp: m.i_mp,
         alpha_sc: m.alpha_sc, beta_voc: m.beta_voc, gamma_pmp: m.gamma_pmp, model_params: None,
+        max_system_voltage_v: None, bypass_diodes: None, bypass_diode_voltage_v: None, half_cell: false, bifaciality: None, low_light: None,
+        thickness_m: None, weight_kg: None, unverified: Default::default(), datasheet_ref: String::new(),
+        catalog_ref: None, voc_initial_increase: None, requires_transformer_inverter: false, nameplate_w: None, description: String::new(),
     };
     spec.fit().map_err(|x| e("MODULE_FIT", x))?;
     p.library.modules.retain(|x| x.id != spec.id);

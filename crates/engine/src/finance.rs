@@ -22,6 +22,8 @@ pub struct Bill { pub energy: f64, pub demand: f64, pub fixed: f64, pub export_c
 
 pub fn import_price(t: &Tariff, hoy: u32) -> f64 {
     let lt = local_time(hoy);
+    // Zone schedule (hourly demand adapter): weekday row, slot = zero-based month × 24 + hour.
+    if let Some(z) = &t.zones { if let Some(p) = z.price(lt.weekday, lt.month - 1, lt.hour) { return p; } }
     let weekend = lt.weekday >= 5;
     for p in &t.tou {
         if !p.months.is_empty() && !p.months.contains(&lt.month) { continue; }
