@@ -341,6 +341,7 @@ struct ElectricalPage: View {
                     }
                 }
             }
+            CatalogPanel()
             GroupBox(m.t("my_library")) {
                 VStack(alignment: .leading) {
                     HStack { TextField("", text: $query).frame(width: 220); Button("🔍") { m.loadLibrary(query) } }
@@ -650,6 +651,44 @@ struct PlansReportsPage: View {
                         let s = m.previewSections[i]
                         Text(str(s, "title")).font(.headline)
                         SimpleTable(header: (s["header"] as? [String]) ?? [], rows: (s["rows"] as? [[String]]) ?? []).font(.caption)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - catalog
+
+/// Search the imported catalog (companies, countries, revisions) and use entries in the project.
+struct CatalogPanel: View {
+    @EnvironmentObject var m: AppModel
+    @State private var family = "module"
+    @State private var query = ""
+    private let families = ["module", "pvinverter", "batterysystem", "batteryinverter", "generator", "demandtariff", "netmeteringtariff", "feedintariff"]
+    var body: some View {
+        GroupBox(m.t("catalog")) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Picker("", selection: $family) { ForEach(families, id: \.self) { Text($0).tag($0) } }.frame(width: 180)
+                    TextField("", text: $query).frame(width: 240).onSubmit { m.catalogSearch(family, query) }
+                    Button(m.t("search")) { m.catalogSearch(family, query) }
+                    Spacer()
+                    Button(m.t("import_catalog")) { m.importCatalog() }
+                }
+                ForEach(m.catalogHits.indices, id: \.self) { i in
+                    let h = m.catalogHits[i]
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(str(h, "name")).fontWeight(.medium)
+                            Text("\(str(h, "company")) \(str(h, "country")) · v\(int(h, "version")) · \(int(h, "versions")) \(m.t("revisions")) · \(h["summary"] as? String ?? "")").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if str(h, "family").hasSuffix("tariff") {
+                            Button(str(h, "family") == "feedintariff" ? m.t("use_as_export") : m.t("use_as_import")) { m.catalogTariff(str(h, "family"), str(h, "id")) }
+                        } else {
+                            Button(m.t("use_in_project")) { m.catalogPin(str(h, "family"), str(h, "id")) }
+                        }
                     }
                 }
             }

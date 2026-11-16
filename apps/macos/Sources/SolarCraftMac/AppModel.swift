@@ -23,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var variantRows: [JSONDict] = []
     @Published var libraryItems: [JSONDict] = []
     @Published var previewSections: [JSONDict] = []
+    @Published var catalogHits: [JSONDict] = []
     private var running: Core.Progress?
 
     static let projectType = UTType(filenameExtension: "solarcraft") ?? .data
@@ -112,6 +113,25 @@ final class AppModel: ObservableObject {
                 self.busy = false
             }
         }
+    }
+
+    func catalogSearch(_ family: String, _ query: String) {
+        run { catalogHits = (try Core.invokeJSON("catalog_search", ["family": family, "query": query, "limit": 50])["hits"] as? [JSONDict]) ?? [] }
+    }
+    func catalogPin(_ family: String, _ id: String) { run { _ = try Core.invokeRaw("catalog_pin", ["file": file, "family": family, "id": id]); notice = "\(family) ✓" }; reload() }
+    func catalogTariff(_ family: String, _ id: String) {
+        run {
+            let side = family == "feedintariff" ? "export" : "import"
+            let r = try Core.invokeJSON("catalog_apply_tariff", ["file": file, side: ["family": family, "id": id]])
+            let applied = (r["applied"] as? [JSONDict])?.first
+            notice = ((applied?["notes"] as? [String]) ?? []).joined(separator: "; ")
+        }
+        reload()
+    }
+    func importCatalog() {
+        let panel = NSOpenPanel()
+        guard panel.runModal() == .OK, let u = panel.url else { return }
+        background("catalog_import", ["source": u.path])
     }
 
     func loadPreview(_ lang: String) { run { previewSections = (try Core.invokeJSON("report_preview", ["file": file, "lang": lang])["sections"] as? [JSONDict]) ?? [] } }

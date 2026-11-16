@@ -14,6 +14,13 @@ macro_rules! ui {
 }
 
 ui! {
+    catalog => ["Catalog", "Catálogo", "Katalog", "Catálogo"],
+    import_catalog => ["Import catalog backup…", "Importar copia del catálogo…", "Katalog-Sicherung importieren…", "Importar cópia do catálogo…"],
+    search => ["Search", "Buscar", "Suchen", "Buscar"],
+    revisions => ["revisions", "revisiones", "Revisionen", "revisões"],
+    use_as_import => ["Use as grid tariff", "Usar como tarifa de red", "Als Bezugstarif verwenden", "Usar como tarifa da rede"],
+    use_as_export => ["Use as feed-in tariff", "Usar como tarifa de inyección", "Als Einspeisetarif verwenden", "Usar como tarifa de injeção"],
+
     site_climate => ["Site, climate & grid", "Sitio, clima y red", "Standort, Klima & Netz", "Local, clima e rede"],
     electrical => ["Electrical", "Eléctrica", "Elektrik", "Elétrica"],
     storage_loads => ["Storage & loads", "Almacenamiento y consumo", "Speicher & Verbrauch", "Armazenamento e consumo"],

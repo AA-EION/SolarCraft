@@ -199,6 +199,33 @@ public sealed partial class MainWindow
         p.Children.Add(Table(new[] { "", "", "" }, rows));
         p.Children.Add(Row(Btn(T("new_module"), () => _ = NewEquipment("module")), Btn(T("new_inverter"), () => _ = NewEquipment("inverter")), Btn(T("new_battery"), () => _ = NewEquipment("battery"))));
 
+        p.Children.Add(H(T("catalog")));
+        var fam = Combo("", new[] { "module", "pvinverter", "batterysystem", "batteryinverter", "generator", "demandtariff", "netmeteringtariff", "feedintariff" }.Select(x => (x, x)).ToList(), "module");
+        var cq = new TextBox { Width = 260 };
+        var hits = new StackPanel { Spacing = 4 };
+        void CatSearch()
+        {
+            hits.Children.Clear();
+            JsonArray found;
+            try { found = Arr(Api.Invoke("catalog_search", new { family = Sel(fam), query = cq.Text, limit = 50 })?["hits"]); } catch (Exception ex) { ShowError(ex.Message); return; }
+            foreach (var h in found)
+            {
+                var f = S(h, "family"); var id = S(h, "id");
+                var info = new TextBlock { Text = $"{S(h, "name")} — {S(h, "company")} {S(h, "country")} · v{N(h, "version")} · {N(h, "versions")} {T("revisions")} · {h?["summary"]}", Width = 640, TextWrapping = TextWrapping.Wrap };
+                var act = f.EndsWith("tariff")
+                    ? Btn(f == "feedintariff" ? T("use_as_export") : T("use_as_import"), () => { if (Try(() => { var side = f == "feedintariff" ? "export" : "import"; var r = Api.Invoke("catalog_apply_tariff", new JsonObject { ["file"] = _file, [side] = new JsonObject { ["family"] = f, ["id"] = id } }); ShowInfo(string.Join("; ", Arr(r?["applied"]?[0]?["notes"]).Select(x => x?.ToString()))); })) Reload(); })
+                    : Btn(T("use_in_project"), () => { if (Try(() => Api.Invoke("catalog_pin", new { file = _file, family = f, id }))) Reload(); });
+                hits.Children.Add(Row(info, act));
+            }
+        }
+        p.Children.Add(Row(fam, cq, Btn(T("search"), CatSearch), Btn(T("import_catalog"), async () =>
+        {
+            var picker = new FileOpenPicker(); picker.FileTypeFilter.Add(".sqlite"); picker.FileTypeFilter.Add("*"); InitPicker(picker);
+            var f = await picker.PickSingleFileAsync();
+            if (f is not null) { var r = await RunLong("catalog_import", new { source = f.Path }); if (r) ShowInfo(T("catalog") + " ✓"); }
+        })));
+        p.Children.Add(hits);
+
         p.Children.Add(H(T("my_library")));
         var query = new TextBox { Width = 260 };
         var list = new StackPanel { Spacing = 4 };

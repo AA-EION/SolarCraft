@@ -106,6 +106,30 @@ struct LoadArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct CatalogSearchArgs {
+    /// module, pvinverter, batterysystem, batteryinverter, generator, feedintariff, netmeteringtariff, demandtariff, company, country, optimizer, ev, battery.
+    family: Option<String>,
+    /// Words matched in name, company (name, short name) and country (all locales, ISO codes).
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    available_only: bool,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct CatalogItemArgs { family: String, id: String, /// Revision; latest when omitted.
+    version: Option<i64> }
+
+#[derive(Deserialize, JsonSchema)]
+struct CatalogPinArgs { file: String, family: String, id: String, version: Option<i64> }
+
+#[derive(Deserialize, JsonSchema)]
+struct CatalogTariffArgs { file: String, /// {family: demandtariff|netmeteringtariff, id, version?}
+    import: Option<Value>, /// {family: feedintariff, id, version?}
+    export: Option<Value> }
+
+#[derive(Deserialize, JsonSchema)]
 struct CreateArgs {
     /// New project file name relative to the workspace, ending in `.solarcraft`.
     file: String,
@@ -445,6 +469,28 @@ impl SolarCraftMcp {
         self.api("import_load", json!({"file": f, "source": src, "unit": a.unit.unwrap_or_else(|| "kwh".into())}))
     }
 
+    #[tool(description = "Search the imported equipment and tariff catalog (workspace catalog.sqlite). Returns the latest revision per entity with its revision count, company and country.")]
+    async fn catalog_search(&self, Parameters(a): Parameters<CatalogSearchArgs>) -> Result<CallToolResult, ErrorData> {
+        self.api("catalog_search", json!({"catalog": self.catalog(), "family": a.family, "query": a.query, "available_only": a.available_only, "limit": a.limit.unwrap_or(25)}))
+    }
+
+    #[tool(description = "Catalog entry details: normalised SolarCraft record with units, original record, issues, join checks, all revisions and the changelog history.")]
+    async fn catalog_details(&self, Parameters(a): Parameters<CatalogItemArgs>) -> Result<CallToolResult, ErrorData> {
+        self.api("catalog_details", json!({"catalog": self.catalog(), "family": a.family, "id": a.id, "version": a.version}))
+    }
+
+    #[tool(description = "Pin a catalog revision (latest when version is omitted) into the project library; the project keeps the record and its catalog reference.")]
+    async fn catalog_pin(&self, Parameters(a): Parameters<CatalogPinArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("catalog_pin", json!({"catalog": self.catalog(), "file": f, "family": a.family, "id": a.id, "version": a.version}))
+    }
+
+    #[tool(description = "Apply catalog tariffs to the project billing: import side (demand or net-metering tariff with its decoded time-of-use schedule) and/or export side (feed-in tariff). Reports applied and not-applied rules.")]
+    async fn catalog_apply_tariff(&self, Parameters(a): Parameters<CatalogTariffArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("catalog_apply_tariff", json!({"catalog": self.catalog(), "file": f, "import": a.import, "export": a.export}))
+    }
+
     #[tool(description = "Undo the last saved change to the project.")]
     async fn undo(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;
@@ -460,6 +506,7 @@ impl SolarCraftMcp {
 
 impl SolarCraftMcp {
     fn library(&self) -> PathBuf { self.workspace.join("library.sqlite") }
+    fn catalog(&self) -> PathBuf { self.workspace.join("catalog.sqlite") }
     fn api(&self, method: &str, params: Value) -> Result<CallToolResult, ErrorData> {
         match app::api::dispatch(method, &params, &mut |_| true) { Ok(v) => ok(v), Err(e) => app_err(e) }
     }
