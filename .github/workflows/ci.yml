@@ -80,6 +80,22 @@ jobs:
           name: solarcraft-${{ matrix.rid }}
           path: out/${{ matrix.rid }}
           retention-days: 7
+      - name: Screenshots of every workflow page (demo project simulated offline)
+        if: matrix.run
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\screens-windows"
+          $p = Start-Process -FilePath out/${{ matrix.rid }}/SolarCraft.exe -ArgumentList "--screenshots", $out -PassThru
+          if (-not $p.WaitForExit(240000)) { $p.Kill(); throw "screenshot run timed out" }
+          Get-ChildItem $out
+          if (Test-Path "$out\error.txt") { Get-Content "$out\error.txt"; throw "screenshots failed" }
+      - uses: actions/upload-artifact@v4
+        if: matrix.run && always()
+        with:
+          name: screenshots-windows
+          path: ${{ runner.temp }}/screens-windows/*.png
+          retention-days: 30
       - name: Build Inno Setup installer
         shell: pwsh
         run: |

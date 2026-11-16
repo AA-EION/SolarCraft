@@ -21,11 +21,14 @@
         <NavigationViewItem x:Name="NavSite" Tag="site" Icon="World" />
         <NavigationViewItem x:Name="NavDesign" Tag="design" Icon="ViewAll" />
         <NavigationViewItem x:Name="NavRoof" Tag="roof" Icon="Home" />
+        <NavigationViewItem x:Name="NavElectrical" Tag="electrical" Icon="Switch" />
+        <NavigationViewItem x:Name="NavStorage" Tag="storage" Icon="Shuffle" />
         <NavigationViewItem x:Name="NavResults" Tag="results" Icon="Calculator" />
+        <NavigationViewItem x:Name="NavEconomics" Tag="economics" Icon="Shop" />
         <NavigationViewItem x:Name="NavReport" Tag="report" Icon="Print" />
       </NavigationView.MenuItems>
       <ScrollViewer>
-        <Grid Padding="24" MaxWidth="820" HorizontalAlignment="Left">
+        <Grid x:Name="PageHost" Padding="24" MaxWidth="1100" HorizontalAlignment="Left">
           <TextBlock x:Name="EmptyText" Style="{StaticResource SubtitleTextBlockStyle}" />
 
           <StackPanel x:Name="ProjectPage" Spacing="10" Visibility="Collapsed">
@@ -47,7 +50,12 @@
               <Button x:Name="DemoButton" Click="OnDemo" />
             </StackPanel>
             <TextBlock x:Name="DemoWarning" Opacity="0.7" TextWrapping="Wrap" />
+            <StackPanel x:Name="GridPanel" Spacing="8" Margin="0,16,0,0" />
           </StackPanel>
+
+          <StackPanel x:Name="ElectricalPage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="StoragePage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="EconomicsPage" Spacing="10" Visibility="Collapsed" />
 
           <StackPanel x:Name="DesignPage" Spacing="10" Visibility="Collapsed">
             <RadioButtons x:Name="ModeRadios" SelectionChanged="OnMode" MaxColumns="2">
@@ -93,6 +101,7 @@
 
           <StackPanel x:Name="ResultsPage" Spacing="14" Visibility="Collapsed">
             <TextBlock x:Name="NoResults" Opacity="0.7" />
+            <StackPanel x:Name="PlantResults" Spacing="12" />
             <StackPanel x:Name="Kpis" Orientation="Horizontal" Spacing="12" />
             <TextBlock x:Name="MonthlyHeader" Style="{StaticResource SubtitleTextBlockStyle}" />
             <StackPanel x:Name="MonthlyBars" Orientation="Horizontal" Spacing="6" Height="220" />
@@ -115,6 +124,7 @@
             </ComboBox>
             <TextBox x:Name="DesignerBox" Width="360" HorizontalAlignment="Left" />
             <Button x:Name="ExportButton" Style="{StaticResource AccentButtonStyle}" Click="OnExport" />
+            <StackPanel x:Name="PreviewPanel" Spacing="8" Margin="0,16,0,0" />
           </StackPanel>
         </Grid>
       </ScrollViewer>

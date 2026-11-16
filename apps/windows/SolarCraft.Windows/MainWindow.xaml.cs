@@ -33,6 +33,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception ex) { ShowError(ex.Message); }
         ApplyStrings();
+        if (Program.ScreenshotDir is string shots) DispatcherQueue.TryEnqueue(async () => Environment.ExitCode = await CaptureAll(shots) ? 0 : 1);
     }
 
     private string T(string k) => _s.TryGetValue(k, out var v) ? v : k;
@@ -42,7 +43,8 @@ public sealed partial class MainWindow : Window
         Title = T("app_title");
         NewButton.Label = T("new_project"); OpenButton.Label = T("open_project"); UndoButton.Label = T("undo");
         SimulateButton.Label = T("simulate"); CancelButton.Label = T("cancel");
-        NavProject.Content = T("project"); NavSite.Content = T("site_weather"); NavDesign.Content = T("design"); NavRoof.Content = T("roof"); NavResults.Content = T("results"); NavReport.Content = T("report");
+        NavProject.Content = T("project"); NavSite.Content = T("site_weather"); NavDesign.Content = T("design"); NavRoof.Content = T("roof"); NavResults.Content = T("simulation"); NavReport.Content = T("plans_reports");
+        NavSite.Content = T("site_climate"); NavElectrical.Content = T("electrical"); NavStorage.Content = T("storage_loads"); NavEconomics.Content = T("economics");
         EmptyText.Text = T("no_project");
         NameBox.Header = T("name"); CustomerBox.Header = T("customer"); AddressBox.Header = T("address");
         LatBox.Header = T("latitude"); LonBox.Header = T("longitude"); ElevBox.Header = T("elevation"); AlbedoBox.Header = T("albedo");
@@ -115,6 +117,7 @@ public sealed partial class MainWindow : Window
             JsonNode? r = null;
             try { r = Api.Invoke("explain", new { file = _file }); } catch (CoreError ce) when (ce.Code == "NO_RESULTS") { }
             ShowResults(r);
+            BuildPlantPages();
         });
     }
 
@@ -344,6 +347,9 @@ public sealed partial class MainWindow : Window
         DesignPage.Visibility = tag == "design" ? Visibility.Visible : Visibility.Collapsed;
         RoofPage.Visibility = tag == "roof" ? Visibility.Visible : Visibility.Collapsed;
         ResultsPage.Visibility = tag == "results" ? Visibility.Visible : Visibility.Collapsed;
+        ElectricalPage.Visibility = tag == "electrical" ? Visibility.Visible : Visibility.Collapsed;
+        StoragePage.Visibility = tag == "storage" ? Visibility.Visible : Visibility.Collapsed;
+        EconomicsPage.Visibility = tag == "economics" ? Visibility.Visible : Visibility.Collapsed;
         ReportPage.Visibility = tag == "report" ? Visibility.Visible : Visibility.Collapsed;
     }
 

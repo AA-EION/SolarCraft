@@ -1,0 +1,556 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Plant workflow pages (grid, electrical design and equipment, storage and loads,
+// simulation inspection, economics and variants, report contents). Every edit
+// goes through the core's validated JSON API, the same contract as CLI and MCP.
+using Microsoft.UI;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Shapes;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices.WindowsRuntime;
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Pickers;
+
+using IOPath = System.IO.Path;
+
+namespace SolarCraft;
+
+public sealed partial class MainWindow
+{
+    private JsonNode? _summary, _stringing, _cash;
+    private JsonArray? _dayRows, _compareRows, _previewSections, _libraryItems;
+
+    // ---- small helpers ----
+    private static double N(JsonNode? n, string k, double d = 0) { try { return n?[k]?.GetValue<double>() ?? d; } catch { return d; } }
+    private static string S(JsonNode? n, string k) => n?[k] is JsonValue v && v.TryGetValue<string>(out var s) ? s : "";
+    private static string F(double v, int digits = 0) => v.ToString("N" + digits, CultureInfo.CurrentCulture);
+    private static JsonArray Arr(JsonNode? n) => n as JsonArray ?? new JsonArray();
+    private static TextBlock H(string text) => new() { Text = text, Style = (Style)Application.Current.Resources["SubtitleTextBlockStyle"], Margin = new Thickness(0, 10, 0, 0) };
+    private static TextBlock Note(string text) => new() { Text = text, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
+    private static NumberBox Num(string header, double value, double width = 220) => new() { Header = header, Value = value, Width = width, HorizontalAlignment = HorizontalAlignment.Left, SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact };
+    private static ComboBox Combo(string header, IList<(string tag, string label)> items, string selected)
+    {
+        var c = new ComboBox { Header = header, MinWidth = 260 };
+        foreach (var (tag, label) in items) c.Items.Add(new ComboBoxItem { Content = label, Tag = tag });
+        c.SelectedIndex = Math.Max(0, items.ToList().FindIndex(i => i.tag == selected));
+        return c;
+    }
+    private static string Sel(ComboBox c) => (c.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+    private static StackPanel Row(params UIElement[] items) { var p = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 }; foreach (var i in items) p.Children.Add(i); return p; }
+    private Button Btn(string text, Action onClick, bool accent = false)
+    {
+        var b = new Button { Content = text };
+        if (accent) b.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
+        b.Click += (_, _) => onClick();
+        return b;
+    }
+
+    /// <summary>A compact table; the first column is left-aligned.</summary>
+    private static Grid Table(IList<string> header, IEnumerable<IList<string>> rows, double fontSize = 13)
+    {
+        var g = new Grid { ColumnSpacing = 14, RowSpacing = 2 };
+        var all = rows.ToList();
+        int cols = Math.Max(header.Count, all.Count > 0 ? all.Max(r => r.Count) : 1);
+        for (int c = 0; c < cols; c++) g.ColumnDefinitions.Add(new ColumnDefinition { Width = c == 0 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+        int row = 0;
+        void Add(IList<string> cells, bool head)
+        {
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            for (int c = 0; c < cells.Count; c++)
+            {
+                var t = new TextBlock { Text = cells[c], FontSize = fontSize, HorizontalAlignment = c == 0 ? HorizontalAlignment.Left : HorizontalAlignment.Right, Opacity = head ? 0.7 : 1, FontWeight = head ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal };
+                Grid.SetRow(t, row); Grid.SetColumn(t, c); g.Children.Add(t);
+            }
+            row++;
+        }
+        if (header.Count > 0) Add(header, true);
+        foreach (var r in all) Add(r, false);
+        return g;
+    }
+
+    private void IssuesInto(Panel p, Func<string, bool> filter)
+    {
+        try
+        {
+            foreach (var i in Arr(Api.Invoke("validate", new { file = _file })?["issues"]))
+            {
+                if (!filter(S(i, "pointer")) && !filter(S(i, "code"))) continue;
+                var err = S(i, "severity") == "error";
+                p.Children.Add(new TextBlock { Text = (err ? "✖ " : "⚠ ") + S(i, "message"), TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(err ? Colors.Firebrick : Colors.DarkOrange) });
+            }
+        }
+        catch { }
+    }
+
+    private void SetSection(string name, JsonNode? value)
+    {
+        if (!Try(() =>
+        {
+            var r = Api.Invoke("set_section", new JsonObject { ["file"] = _file, ["section"] = name, ["value"] = value })!;
+            var errs = Arr(r["issues"]).Where(i => S(i, "severity") == "error").Select(i => S(i, "message")).ToList();
+            if (errs.Count > 0) ShowError(string.Join("\n", errs)); else ShowInfo(T("apply") + " ✓");
+        })) return;
+        Reload();
+    }
+
+    // ---- page construction (rebuilt on every reload) ----
+    private void BuildPlantPages()
+    {
+        if (_file is null || _project is null) return;
+        try { _summary = Api.Invoke("results_summary", new { file = _file }); } catch { _summary = null; }
+        try { _stringing = Api.Invoke("stringing", new { file = _file }); } catch { _stringing = null; }
+        try { _cash = Api.Invoke("cash_flow", new { file = _file }); } catch { _cash = null; }
+        BuildGridPanel();
+        BuildElectrical();
+        BuildStorage();
+        BuildSimulationPanels();
+        BuildEconomics();
+        BuildPreview();
+    }
+
+    private void BuildGridPanel()
+    {
+        GridPanel.Children.Clear();
+        var g = _project!["grid"];
+        GridPanel.Children.Add(H(T("grid")));
+        var feed = Combo(T("feed_in"), new[] { ("surplus", T("surplus")), ("full", T("full_feed_in")) }, S(g, "feed_in"));
+        var limit = Num(T("export_limit"), g?["export_limit_kw"] is null ? double.NaN : N(g, "export_limit_kw"));
+        var phases = Combo(T("phases"), new[] { ("1", "1"), ("3", "3") }, ((int)N(g, "phases", 1)).ToString(CultureInfo.InvariantCulture));
+        var volt = Num(T("voltage"), N(g, "voltage_v", 230));
+        GridPanel.Children.Add(feed); GridPanel.Children.Add(limit); GridPanel.Children.Add(phases); GridPanel.Children.Add(volt);
+        GridPanel.Children.Add(Btn(T("apply"), () => SetSection("grid", new JsonObject
+        {
+            ["feed_in"] = Sel(feed), ["export_limit_kw"] = double.IsNaN(limit.Value) ? null : (JsonNode)limit.Value, ["phases"] = int.Parse(Sel(phases), CultureInfo.InvariantCulture), ["voltage_v"] = volt.Value,
+        })));
+    }
+
+    // Stringing is edited as text per MPPT: "array-1: 7x2 + array-2: 6x1" (modules × strings).
+    private void BuildElectrical()
+    {
+        var p = ElectricalPage; p.Children.Clear();
+        p.Children.Add(H(T("stringing")));
+        var manual = new ToggleSwitch { Header = T("manual_stringing"), IsOn = _stringing?["manual"]?.GetValue<bool>() == true };
+        p.Children.Add(manual);
+        p.Children.Add(Note("MPPT: array-1: 7x2 + array-2: 6x1  (" + T("modules_per_string_short") + " x " + T("strings_short") + ")"));
+        var inverters = Arr(_project!["library"]?["inverters"]);
+        var invItems = inverters.Select(i => (S(i, "id"), $"{S(i, "manufacturer")} {S(i, "model")}")).ToList();
+        var editors = new List<(TextBox name, ComboBox inv, List<TextBox> mppts, string id)>();
+        foreach (var entry in Arr(_stringing?["inverters"]))
+        {
+            var u = entry!["unit"];
+            var name = new TextBox { Header = T("inverter"), Text = S(u, "name"), Width = 320, HorizontalAlignment = HorizontalAlignment.Left };
+            var inv = Combo("", invItems, S(u, "inverter_id"));
+            var mpptBoxes = new List<TextBox>();
+            var count = Math.Max(Arr(u?["mppts"]).Count, (int)N(inverters.FirstOrDefault(i => S(i, "id") == S(u, "inverter_id")), "mppt_count", 1));
+            var panel = new StackPanel { Spacing = 4 };
+            panel.Children.Add(Row(name, inv));
+            for (int m = 0; m < count; m++)
+            {
+                var groups = m < Arr(u?["mppts"]).Count ? Arr(u!["mppts"]![m]) : new JsonArray();
+                var tb = new TextBox { Header = $"MPPT {m + 1}", Width = 520, HorizontalAlignment = HorizontalAlignment.Left, Text = string.Join(" + ", groups.Select(g => $"{S(g, "array_id")}: {N(g, "modules_per_string")}x{N(g, "strings")}")) };
+                mpptBoxes.Add(tb); panel.Children.Add(tb);
+            }
+            p.Children.Add(panel);
+            editors.Add((name, inv, mpptBoxes, S(u, "id")));
+        }
+        p.Children.Add(Btn(T("apply"), () =>
+        {
+            if (!manual.IsOn) { Try(() => Api.Invoke("set_stringing", new { file = _file, manual = false })); Reload(); return; }
+            var units = new JsonArray();
+            foreach (var (name, inv, mppts, id) in editors)
+            {
+                var mp = new JsonArray();
+                foreach (var tb in mppts)
+                {
+                    var groups = new JsonArray();
+                    foreach (var part in tb.Text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        var kv = part.Split(':', StringSplitOptions.TrimEntries);
+                        var dims = (kv.Length > 1 ? kv[1] : kv[0]).Split('x', StringSplitOptions.TrimEntries);
+                        if (dims.Length != 2 || !int.TryParse(dims[0], out var mods) || !int.TryParse(dims[1], out var strs)) { ShowError($"MPPT: '{part}'"); return; }
+                        groups.Add(new JsonObject { ["array_id"] = kv.Length > 1 ? kv[0] : "array-1", ["modules_per_string"] = mods, ["strings"] = strs });
+                    }
+                    mp.Add(groups);
+                }
+                units.Add(new JsonObject { ["id"] = id, ["name"] = name.Text, ["inverter_id"] = Sel(inv), ["mppts"] = mp });
+            }
+            Try(() => Api.Invoke("set_stringing", new JsonObject { ["file"] = _file, ["manual"] = true, ["inverters"] = units }));
+            Reload();
+        }, true));
+        foreach (var i in Arr(_stringing?["issues"]))
+        {
+            var err = S(i, "severity") == "error";
+            p.Children.Add(new TextBlock { Text = (err ? "✖ " : "⚠ ") + S(i, "message"), TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(err ? Colors.Firebrick : Colors.DarkOrange) });
+        }
+
+        p.Children.Add(H(T("equipment")));
+        var lib = _project!["library"];
+        var rows = new List<IList<string>>();
+        foreach (var kind in new[] { "modules", "inverters", "batteries", "battery_inverters" })
+            foreach (var r in Arr(lib?[kind])) rows.Add(new[] { $"{S(r, "manufacturer")} {S(r, "model")}", kind.TrimEnd('s'), S(r, "provenance") });
+        p.Children.Add(Table(new[] { "", "", "" }, rows));
+        p.Children.Add(Row(Btn(T("new_module"), () => _ = NewEquipment("module")), Btn(T("new_inverter"), () => _ = NewEquipment("inverter")), Btn(T("new_battery"), () => _ = NewEquipment("battery"))));
+
+        p.Children.Add(H(T("my_library")));
+        var query = new TextBox { Width = 260 };
+        var list = new StackPanel { Spacing = 4 };
+        void Fill()
+        {
+            list.Children.Clear();
+            try { _libraryItems = Arr(Api.Invoke("library_list", new { query = query.Text })?["items"]); } catch { _libraryItems = new JsonArray(); }
+            foreach (var it in _libraryItems)
+            {
+                var rec = it!["record"];
+                var kind = S(it, "kind"); var id = S(it, "id");
+                list.Children.Add(Row(new TextBlock { Text = $"{kind} · {S(rec, "manufacturer")} {S(rec, "model")} · rev {N(it, "rev")}", Width = 480, VerticalAlignment = VerticalAlignment.Center },
+                    Btn(T("use_in_project"), () => { if (Try(() => Api.Invoke("library_pin", new { file = _file, kind, id }))) Reload(); })));
+            }
+        }
+        p.Children.Add(Row(query, Btn("🔍", Fill)));
+        p.Children.Add(list);
+        Fill();
+    }
+
+    private async Task NewEquipment(string kind)
+    {
+        (string key, string label, double def)[] fields = kind switch
+        {
+            "module" => new[] { ("cells_in_series", "Cells in series", 72.0), ("length_m", "Length (m)", 1.76), ("width_m", "Width (m)", 1.13), ("v_oc", "Voc (V)", 49.6), ("i_sc", "Isc (A)", 11.6), ("v_mp", "Vmp (V)", 41.4), ("i_mp", "Imp (A)", 10.87), ("alpha_sc", "α Isc (A/K)", 0.0058), ("beta_voc", "β Voc (V/K)", -0.134), ("gamma_pmp", "γ Pmp (%/K)", -0.35) },
+            "inverter" => new[] { ("pac_max_w", "Pac max (W)", 5000.0), ("eta_nominal", "Efficiency", 0.97), ("mppt_v_min", "MPPT V min", 120.0), ("mppt_v_max", "MPPT V max", 500.0), ("v_dc_max", "V DC max", 600.0), ("mppt_count", "MPPT inputs", 2.0), ("i_max_per_mppt", "I max per MPPT (A)", 16.0), ("night_w", "Night (W)", 2.0), ("port_v_min", "Battery port V min (0 = none)", 150.0), ("port_v_max", "Battery port V max", 500.0), ("port_p", "Battery port power (W)", 5000.0) },
+            _ => new[] { ("capacity_kwh", "Capacity (kWh)", 10.0), ("nominal_voltage_v", "Nominal voltage (V)", 204.8), ("soc_min_pct", "SOC min (%)", 5.0), ("soc_max_pct", "SOC max (%)", 100.0), ("p_charge_max_kw", "Charge power (kW)", 5.0), ("p_discharge_max_kw", "Discharge power (kW)", 5.0), ("roundtrip_efficiency", "Round-trip efficiency", 0.95), ("self_discharge_pct_per_month", "Self-discharge (%/month)", 2.0), ("cycle_life", "Cycles to 80 %", 6000.0) },
+        };
+        var panel = new StackPanel { Spacing = 6 };
+        var id = new TextBox { Header = "id", Text = $"user-{kind}-{DateTime.Now:HHmmss}" };
+        var man = new TextBox { Header = "manufacturer", Text = "User" };
+        var model = new TextBox { Header = "model", Text = kind };
+        panel.Children.Add(id); panel.Children.Add(man); panel.Children.Add(model);
+        var boxes = fields.Select(f => (f.key, box: Num(f.label, f.def, 260))).ToList();
+        foreach (var (_, box) in boxes) panel.Children.Add(box);
+        var save = new CheckBox { Content = T("save_to_library"), IsChecked = true };
+        panel.Children.Add(save);
+        var dlg = new ContentDialog { Title = T("new_" + kind), Content = new ScrollViewer { Content = panel, MaxHeight = 560 }, PrimaryButtonText = T("apply"), CloseButtonText = T("cancel"), XamlRoot = Content.XamlRoot };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        var v = boxes.ToDictionary(b => b.key, b => b.box.Value);
+        var rec = new JsonObject { ["id"] = id.Text, ["manufacturer"] = man.Text, ["model"] = model.Text };
+        switch (kind)
+        {
+            case "module":
+                rec["technology"] = "c-Si";
+                foreach (var (k, x) in v) rec[k] = k == "cells_in_series" ? (JsonNode)(int)x : x;
+                break;
+            case "inverter":
+                foreach (var k in new[] { "pac_max_w", "eta_nominal", "mppt_v_min", "mppt_v_max", "v_dc_max", "i_max_per_mppt", "night_w" }) rec[k] = v[k];
+                rec["mppt_count"] = (int)v["mppt_count"];
+                if (v["port_v_min"] > 0) rec["battery_port"] = new JsonObject { ["v_min"] = v["port_v_min"], ["v_max"] = v["port_v_max"], ["p_charge_max_w"] = v["port_p"], ["p_discharge_max_w"] = v["port_p"], ["dc_dc_efficiency"] = 0.98 };
+                break;
+            default:
+                rec["chemistry"] = "lfp";
+                foreach (var (k, x) in v) rec[k] = x;
+                break;
+        }
+        if (Try(() =>
+        {
+            Api.Invoke("add_equipment", new JsonObject { ["file"] = _file, ["kind"] = kind, ["record"] = rec.DeepClone() });
+            if (save.IsChecked == true) Api.Invoke("library_save", new JsonObject { ["kind"] = kind, ["record"] = rec.DeepClone() });
+        })) { ShowInfo($"{kind} {id.Text} ✓"); Reload(); }
+    }
+
+    private void BuildStorage()
+    {
+        var p = StoragePage; p.Children.Clear();
+        var l = _project!["loads"];
+        var prof = l?["profile"];
+        var kind = S(prof, "kind");
+        p.Children.Add(H(T("loads")));
+        var profile = Combo(T("load_profile"), new[] { "none", "residential", "office", "retail", "flat", "series" }.Select(x => (x, T("profile_" + x))).ToList(), kind == "synthetic" ? S(prof, "profile") : kind);
+        var annual = Num(T("annual_kwh"), N(l, "annual_kwh", 4000));
+        var critical = Num(T("critical_share"), N(l, "critical_fraction", 0.3));
+        p.Children.Add(profile); p.Children.Add(annual); p.Children.Add(critical);
+        if (kind == "series") p.Children.Add(Note(S(prof, "name")));
+        p.Children.Add(Row(Btn(T("apply"), () =>
+        {
+            JsonNode pr = Sel(profile) switch { "none" => new JsonObject { ["kind"] = "none" }, "series" => prof?.DeepClone() ?? new JsonObject { ["kind"] = "none" }, var x => new JsonObject { ["kind"] = "synthetic", ["profile"] = x } };
+            SetSection("loads", new JsonObject { ["profile"] = pr, ["annual_kwh"] = annual.Value, ["critical_fraction"] = critical.Value });
+        }), Btn(T("import_load"), async () =>
+        {
+            var picker = new FileOpenPicker(); picker.FileTypeFilter.Add(".csv"); picker.FileTypeFilter.Add(".txt"); InitPicker(picker);
+            var f = await picker.PickSingleFileAsync();
+            if (f is not null && Try(() => Api.Invoke("import_load", new { file = _file, source = f.Path }))) Reload();
+        })));
+
+        var s = _project!["storage"];
+        var lib = _project!["library"];
+        p.Children.Add(H(T("use_battery")));
+        var enabled = new ToggleSwitch { IsOn = s is JsonObject };
+        p.Children.Add(enabled);
+        if (Arr(lib?["batteries"]).Count == 0) p.Children.Add(Btn(T("add_generic_storage"), () => { if (Try(() => Api.Invoke("add_generic_storage_equipment", new { file = _file }))) Reload(); }));
+        var battery = Combo(T("battery"), Arr(lib?["batteries"]).Select(b => (S(b, "id"), $"{S(b, "manufacturer")} {S(b, "model")}")).ToList(), S(s, "battery_id"));
+        var units = Num(T("units"), N(s, "units", 1));
+        var c = s?["coupling"];
+        var coupling = Combo(T("coupling"), new[] { ("dc_hybrid", T("dc_hybrid")), ("ac_coupled", T("ac_coupled")) }, S(c, "kind") is "" ? "dc_hybrid" : S(c, "kind"));
+        var hybrids = Arr(_stringing?["inverters"]).Where(i => i?["has_battery_port"]?.GetValue<bool>() == true).Select(i => (S(i!["unit"], "id"), S(i!["unit"], "name"))).ToList();
+        var unit = Combo(T("dc_hybrid"), hybrids, S(c, "unit_id"));
+        var batInv = Combo(T("ac_coupled"), Arr(lib?["battery_inverters"]).Select(b => (S(b, "id"), $"{S(b, "manufacturer")} {S(b, "model")}")).ToList(), S(c, "battery_inverter_id"));
+        var model = Combo(T("battery_model"), new[] { ("simple", T("model_simple")), ("detailed", T("model_detailed")) }, S(s, "model") is "" ? "simple" : S(s, "model"));
+        var socMin = Num(T("soc_window") + " min", N(s, "soc_min_pct", 10)); var socMax = Num("max", N(s, "soc_max_pct", 100)); var init = Num(T("initial_soc"), N(s, "initial_soc_pct", 50));
+        var backup = Num(T("backup_reserve"), N(s, "backup_reserve_pct", 20)); var services = Num(T("grid_services"), N(s, "grid_services_pct", 0));
+        var gs = s?["grid_service"];
+        var gsKind = Combo(T("grid_service"), new[] { ("none", T("gs_none")), ("peak_shaving", T("gs_peak")), ("export_window", T("gs_window")) }, S(gs, "kind") is "" ? "none" : S(gs, "kind"));
+        var gsA = Num("kW / " + T("hour"), N(gs, "import_limit_kw", N(gs, "start_hour", 18))); var gsB = Num(T("hour") + " →", N(gs, "end_hour", 21)); var gsC = Num("kW", N(gs, "power_kw", 3));
+        var gridCharge = new CheckBox { Content = T("grid_charge_backup"), IsChecked = s?["grid_charge_backup"]?.GetValue<bool>() == true };
+        var outages = new TextBox { Header = T("outages") + " (" + T("day") + "," + T("hour") + "," + T("hours_n") + "; …)", Width = 520, HorizontalAlignment = HorizontalAlignment.Left,
+            Text = string.Join("; ", Arr(s?["outages"]).Select(o => $"{(int)N(o, "start_hour") / 24 + 1},{(int)N(o, "start_hour") % 24},{N(o, "hours")}")) };
+        foreach (var el in new UIElement[] { battery, units, coupling, unit, batInv, model, Row(socMin, socMax), init }) p.Children.Add(el);
+        // Allocation bar drawn to scale.
+        p.Children.Add(H(T("allocation")));
+        var bar = new Grid { Height = 18, Width = 520, HorizontalAlignment = HorizontalAlignment.Left, CornerRadius = new CornerRadius(4) };
+        void DrawBar()
+        {
+            bar.Children.Clear(); bar.ColumnDefinitions.Clear();
+            var b = Math.Clamp(backup.Value, 0, 100); var g = Math.Clamp(services.Value, 0, 100 - b); var sc = 100 - b - g;
+            var cols = new[] { (b, Colors.DarkOrange), (sc, Colors.Teal), (g, Colors.MediumPurple) };
+            for (int i = 0; i < 3; i++)
+            {
+                bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(cols[i].Item1, 0.0001), GridUnitType.Star) });
+                var r = new Rectangle { Fill = new SolidColorBrush(cols[i].Item2) }; Grid.SetColumn(r, i); bar.Children.Add(r);
+            }
+        }
+        DrawBar();
+        backup.ValueChanged += (_, _) => DrawBar(); services.ValueChanged += (_, _) => DrawBar();
+        p.Children.Add(bar);
+        p.Children.Add(Note($"■ {T("backup_reserve")}   ■ {T("self_consumption")}   ■ {T("grid_services")}"));
+        foreach (var el in new UIElement[] { Row(backup, services), Note(T("allocation_note")), gsKind, Row(gsA, gsB, gsC), gridCharge, outages }) p.Children.Add(el);
+        p.Children.Add(Btn(T("apply"), () =>
+        {
+            if (!enabled.IsOn) { SetSection("storage", null); return; }
+            var outs = new JsonArray();
+            foreach (var part in outages.Text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var x = part.Split(',', StringSplitOptions.TrimEntries).Select(t => int.TryParse(t, out var n) ? n : -1).ToArray();
+                if (x.Length == 3 && x.All(n => n >= 0)) outs.Add(new JsonObject { ["start_hour"] = (x[0] - 1) * 24 + x[1], ["hours"] = x[2] });
+            }
+            JsonObject gsv = Sel(gsKind) switch
+            {
+                "peak_shaving" => new JsonObject { ["kind"] = "peak_shaving", ["import_limit_kw"] = gsA.Value },
+                "export_window" => new JsonObject { ["kind"] = "export_window", ["start_hour"] = (int)gsA.Value, ["end_hour"] = (int)gsB.Value, ["power_kw"] = gsC.Value },
+                _ => new JsonObject { ["kind"] = "none" },
+            };
+            JsonObject cp = Sel(coupling) == "ac_coupled" ? new JsonObject { ["kind"] = "ac_coupled", ["battery_inverter_id"] = Sel(batInv) } : new JsonObject { ["kind"] = "dc_hybrid", ["unit_id"] = Sel(unit) };
+            SetSection("storage", new JsonObject
+            {
+                ["battery_id"] = Sel(battery), ["units"] = (int)units.Value, ["coupling"] = cp, ["model"] = Sel(model), ["soc_min_pct"] = socMin.Value, ["soc_max_pct"] = socMax.Value, ["initial_soc_pct"] = init.Value,
+                ["backup_reserve_pct"] = backup.Value, ["grid_services_pct"] = services.Value, ["charge_priority"] = new JsonArray("backup", "self_consumption", "grid_services"),
+                ["grid_charge_backup"] = gridCharge.IsChecked == true, ["grid_service"] = gsv, ["outages"] = outs,
+            });
+        }, true));
+        IssuesInto(p, x => x.StartsWith("/storage") || x.StartsWith("/loads") || x.StartsWith("STORAGE") || x.StartsWith("BATTERY"));
+    }
+
+    private void BuildSimulationPanels()
+    {
+        var p = PlantResults; p.Children.Clear();
+        if (_summary is null) return;
+        var b = _summary["balance"];
+        var kpis = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        foreach (var (label, value, unit) in new[] { (T("self_consumption"), F(N(b, "self_consumption_rate") * 100, 1), "%"), (T("autarky"), F(N(b, "autarky") * 100, 1), "%"), (T("grid_import"), F(N(b, "import_kwh")), "kWh"), (T("grid_export"), F(N(b, "export_kwh")), "kWh") })
+        {
+            var sp = new StackPanel { Padding = new Thickness(12), CornerRadius = new CornerRadius(6), Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"], MinWidth = 160 };
+            sp.Children.Add(new TextBlock { Text = label, Opacity = 0.7 });
+            sp.Children.Add(new TextBlock { Text = $"{value} {unit}", Style = (Style)Application.Current.Resources["SubtitleTextBlockStyle"] });
+            kpis.Children.Add(sp);
+        }
+        p.Children.Add(kpis);
+        p.Children.Add(H(T("energy_balance")));
+        p.Children.Add(Table(Array.Empty<string>(), new List<IList<string>>
+        {
+            new[] { "PV DC", F(N(b, "pv_dc_kwh")) + " kWh" }, new[] { T("grid_import"), F(N(b, "import_kwh")) + " kWh" }, new[] { T("loads"), F(N(b, "load_served_kwh")) + " kWh" },
+            new[] { T("grid_export"), F(N(b, "export_kwh")) + " kWh" }, new[] { T("curtailed"), F(N(b, "curtailed_kwh")) + " kWh" }, new[] { T("clipped"), F(N(b, "clipped_kwh")) + " kWh" },
+            new[] { T("batt_charge") + " / " + T("batt_discharge"), F(N(b, "batt_charge_kwh")) + " / " + F(N(b, "batt_discharge_kwh")) + " kWh" },
+            new[] { "Δ max", N(b, "max_abs_residual_wh").ToString("0.0e0", CultureInfo.InvariantCulture) + " Wh" },
+        }));
+        p.Children.Add(H(T("stringing")));
+        var rows = new List<IList<string>>();
+        foreach (var u in Arr(_summary["electrical"]))
+        {
+            rows.Add(new[] { S(u, "name"), F(N(u, "stc_kw"), 2), F(N(u, "dc_kwh")), "", "", "" });
+            foreach (var m in Arr(u?["mppts"])) rows.Add(new[] { $"  MPPT {N(m, "index")} · {S(m, "strings")}", F(N(m, "stc_kw"), 2), F(N(m, "dc_kwh")), F(N(m, "mismatch_kwh"), 1), F(N(m, "limit_loss_kwh"), 1), F(N(m, "limited_hours")) });
+        }
+        p.Children.Add(Table(new[] { T("inverter") + " / MPPT", "kWp", "DC kWh", "mismatch", "limits", "h" }, rows));
+
+        p.Children.Add(H(T("hours_inspector")));
+        var day = Num(T("day"), 172, 160); day.Minimum = 1; day.Maximum = 365;
+        var host = new StackPanel { Spacing = 6 };
+        void Show(JsonArray hours)
+        {
+            _dayRows = hours; host.Children.Clear();
+            if (hours.Count == 0) return;
+            // Lines: PV (gold), load (blue), import (red), battery net (teal).
+            var canvas = new Canvas { Width = 720, Height = 170, Background = new SolidColorBrush(ColorHelper.FromArgb(10, 0, 0, 0)) };
+            var max = Math.Max(1, hours.Max(h => Math.Max(Math.Max(N(h, "pv_ac_wh"), N(h, "load_wh")), Math.Max(N(h, "import_wh"), Math.Abs(N(h, "batt_discharge_wh") - N(h, "batt_charge_wh"))))));
+            foreach (var (key, color) in new[] { ("pv_ac_wh", Colors.Goldenrod), ("load_wh", Colors.SteelBlue), ("import_wh", Colors.Firebrick), ("batt", Colors.Teal) })
+            {
+                var line = new Polyline { Stroke = new SolidColorBrush(color), StrokeThickness = 2 };
+                for (int i = 0; i < hours.Count; i++)
+                {
+                    var v = key == "batt" ? N(hours[i], "batt_discharge_wh") - N(hours[i], "batt_charge_wh") : N(hours[i], key);
+                    line.Points.Add(new Windows.Foundation.Point(10 + 700.0 * i / Math.Max(1, hours.Count - 1), 85 - 80 * v / max));
+                }
+                canvas.Children.Add(line);
+            }
+            host.Children.Add(canvas);
+            host.Children.Add(Note("— PV   — " + T("loads") + "   — " + T("grid_import") + "   — " + T("battery")));
+            host.Children.Add(Table(new[] { T("day"), T("hour"), "PV", T("loads"), "→bat", "bat→", T("grid_import"), T("grid_export"), T("soc"), T("backup_reserve") },
+                hours.Select(h => (IList<string>)new[] { F(N(h, "day_of_year")), $"{(int)N(h, "hour"):00}:00" + (h?["outage"]?.GetValue<bool>() == true ? " ⚡" : ""), F(N(h, "pv_ac_wh")), F(N(h, "load_wh")), F(N(h, "batt_charge_wh")), F(N(h, "batt_discharge_wh")), F(N(h, "import_wh")), F(N(h, "export_wh")), F(N(h, "soc_pct"), 1), F(N(h, "backup_wh")) }).ToList(), 12));
+        }
+        var buttons = new List<UIElement> { day, Btn(T("apply"), () => Try(() => Show(Arr(Api.Invoke("results_hours", new { file = _file, day_of_year = (int)day.Value })?["hours"])))) };
+        foreach (var ch in new[] { "import", "export", "clipped", "curtailed", "unserved", "-soc" })
+            buttons.Add(Btn(ch, () => Try(() => Show(Arr(Api.Invoke("results_hours", new { file = _file, top = ch, count = 24 })?["hours"])))));
+        p.Children.Add(Row(buttons.ToArray()));
+        p.Children.Add(host);
+        if (_dayRows is not null) Show(_dayRows);
+    }
+
+    private void BuildEconomics()
+    {
+        var p = EconomicsPage; p.Children.Clear();
+        var t = _project!["tariff"]; var e = _project!["economics"];
+        p.Children.Add(H(T("tariff")));
+        var currency = new TextBox { Header = T("currency"), Text = S(t, "currency"), Width = 120, HorizontalAlignment = HorizontalAlignment.Left };
+        var imp = Num(T("import_price"), N(t, "import_price"));
+        var ex = t?["export"];
+        var exKind = Combo(T("grid_export"), new[] { ("fixed", T("export_price")), ("net_metering", T("net_metering")), ("none", T("gs_none")) }, S(ex, "kind") is "" ? "fixed" : S(ex, "kind"));
+        var exPrice = Num(T("export_price"), S(ex, "kind") == "net_metering" ? N(ex, "surplus_price") : N(ex, "price"));
+        var fixedM = Num(T("fixed_monthly"), N(t, "fixed_per_month")); var demand = Num(T("demand_charge"), N(t, "demand_charge_per_kw_month"));
+        var escI = Num(T("escalation") + " ↓", N(t, "import_escalation_pct")); var escE = Num(T("escalation") + " ↑", N(t, "export_escalation_pct"));
+        var tou = new TextBox { Header = T("tou_periods") + " (name,price,start,end; …)", Width = 520, HorizontalAlignment = HorizontalAlignment.Left,
+            Text = string.Join("; ", Arr(t?["tou"]).Select(x => string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3}", S(x, "name"), N(x, "price"), N(x, "start_hour"), N(x, "end_hour")))) };
+        foreach (var el in new UIElement[] { currency, imp, Row(exKind, exPrice), Row(fixedM, demand), Row(escI, escE), tou }) p.Children.Add(el);
+        p.Children.Add(Btn(T("apply"), () =>
+        {
+            var nt = t?.DeepClone() as JsonObject ?? new JsonObject { ["name"] = "Tariff" };
+            nt["currency"] = currency.Text; nt["import_price"] = imp.Value; nt["fixed_per_month"] = fixedM.Value; nt["demand_charge_per_kw_month"] = demand.Value;
+            nt["import_escalation_pct"] = escI.Value; nt["export_escalation_pct"] = escE.Value;
+            nt["export"] = Sel(exKind) switch { "none" => new JsonObject { ["kind"] = "none" }, "net_metering" => new JsonObject { ["kind"] = "net_metering", ["surplus_price"] = exPrice.Value }, _ => new JsonObject { ["kind"] = "fixed", ["price"] = exPrice.Value } };
+            var periods = new JsonArray();
+            foreach (var part in tou.Text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var x = part.Split(',', StringSplitOptions.TrimEntries);
+                if (x.Length == 4 && double.TryParse(x[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var pr) && int.TryParse(x[2], out var a) && int.TryParse(x[3], out var bb))
+                    periods.Add(new JsonObject { ["name"] = x[0], ["price"] = pr, ["start_hour"] = a, ["end_hour"] = bb, ["weekdays"] = true, ["weekends"] = true, ["months"] = new JsonArray() });
+            }
+            nt["tou"] = periods;
+            SetSection("tariff", nt);
+        }, true));
+
+        p.Children.Add(H(T("costs")));
+        var fields = new[] { ("horizon_years", "horizon"), ("discount_rate_pct", "discount_rate"), ("cost_fixed", "cost_fixed"), ("cost_per_kwp", "cost_per_kwp"), ("cost_per_battery_kwh", "cost_per_kwh"), ("om_pct_of_investment", "om"), ("degradation_pct_per_year", "degradation") };
+        var boxes = fields.Select(f => (f.Item1, box: Num(T(f.Item2), N(e, f.Item1)))).ToList();
+        foreach (var (_, box) in boxes) p.Children.Add(box);
+        var loan = e?["loan"];
+        var loanOn = new ToggleSwitch { Header = T("loan"), IsOn = loan is JsonObject };
+        var la = Num(T("loan"), N(loan, "amount")); var lr = Num("%", N(loan, "rate_pct", 5), 120); var ly = Num("a", N(loan, "years", 10), 120);
+        p.Children.Add(loanOn); p.Children.Add(Row(la, lr, ly));
+        p.Children.Add(Btn(T("apply"), () =>
+        {
+            var ne = e?.DeepClone() as JsonObject ?? new JsonObject();
+            foreach (var (k, box) in boxes) ne[k] = k == "horizon_years" ? (JsonNode)(int)box.Value : box.Value;
+            ne["loan"] = loanOn.IsOn ? new JsonObject { ["amount"] = la.Value, ["rate_pct"] = lr.Value, ["years"] = (int)ly.Value } : null;
+            SetSection("economics", ne);
+        }, true));
+
+        if (_cash is JsonObject c && Arr(c["years"]).Count > 0)
+        {
+            p.Children.Add(H(T("cash_flow")));
+            p.Children.Add(Note($"{T("npv")} {F(N(c, "npv"))} {S(c, "currency")} · {T("irr")} {(c["irr_pct"] is null ? "–" : F(N(c, "irr_pct"), 1) + " %")} · {T("payback")} {(c["payback_years"] is null ? "–" : F(N(c, "payback_years"), 1))} · LCOE {F(N(c, "lcoe_per_kwh"), 3)}"));
+            var years = Arr(c["years"]);
+            var max = Math.Max(1, years.Max(y => Math.Abs(N(y, "cumulative"))));
+            var bars = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Height = 140 };
+            foreach (var y in years)
+            {
+                var v = N(y, "cumulative");
+                var col = new Grid { Width = 22, Height = 140 };
+                col.Children.Add(new Rectangle { Height = 65 * Math.Abs(v) / max, VerticalAlignment = v >= 0 ? VerticalAlignment.Top : VerticalAlignment.Bottom, Margin = v >= 0 ? new Thickness(0, 70 - 65 * Math.Abs(v) / max, 0, 0) : new Thickness(0, 0, 0, 70 - 65 * Math.Abs(v) / max), Fill = new SolidColorBrush(v >= 0 ? Colors.SeaGreen : Colors.IndianRed) });
+                bars.Children.Add(col);
+            }
+            p.Children.Add(bars);
+            p.Children.Add(Table(new[] { "", "savings", "export", "O&M", "repl.", T("loan"), T("cash_flow"), "Σ" },
+                years.Select(y => (IList<string>)new[] { F(N(y, "year")), F(N(y, "savings")), F(N(y, "export_revenue")), F(N(y, "om")), F(N(y, "replacements")), F(N(y, "loan")), F(N(y, "cash_flow")), F(N(y, "cumulative")) }).ToList(), 12));
+        }
+
+        p.Children.Add(H(T("variants")));
+        var vname = new TextBox { Width = 260, PlaceholderText = T("save_variant") };
+        p.Children.Add(Row(vname, Btn(T("save_variant"), () => { if (Try(() => Api.Invoke("create_variant", new { file = _file, name = vname.Text.Length > 0 ? vname.Text : "Variant" }))) Reload(); }),
+            Btn(T("compare"), async () => { var f = _file; try { _compareRows = Arr(await Task.Run(() => Api.Invoke("compare_variants", new { file = f }))?["variants"]); } catch (Exception ex2) { ShowError(ex2.Message); } BuildEconomics(); })));
+        foreach (var v in Arr(_project!["variants"]))
+        {
+            var id = S(v, "id");
+            p.Children.Add(Row(new TextBlock { Text = S(v, "name"), Width = 300, VerticalAlignment = VerticalAlignment.Center }, Btn(T("activate"), () => { if (Try(() => Api.Invoke("apply_variant", new { file = _file, id, keep_current = true }))) Reload(); })));
+        }
+        if (_compareRows is { Count: > 0 })
+            p.Children.Add(Table(new[] { "", "kWp", "kWh bat", "AC kWh", "SC %", T("autarky") + " %", T("grid_import"), T("npv"), T("irr"), T("payback") },
+                _compareRows.Select(r => (IList<string>)new[] { S(r, "name"), F(N(r, "dc_kwp"), 2), F(N(r, "battery_kwh"), 1), F(N(r, "ac_kwh")), F(N(r, "self_consumption_pct"), 1), F(N(r, "autarky_pct"), 1), F(N(r, "import_kwh")), F(N(r, "npv")),
+                    r?["irr_pct"] is null ? "–" : F(N(r, "irr_pct"), 1), r?["payback_years"] is null ? "–" : F(N(r, "payback_years"), 1) }).ToList(), 12));
+    }
+
+    private void BuildPreview()
+    {
+        var p = PreviewPanel; p.Children.Clear();
+        p.Children.Add(H(T("report_preview")));
+        p.Children.Add(Btn(T("report_preview"), () =>
+        {
+            var lang = (LangBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "en";
+            if (Try(() => _previewSections = Arr(Api.Invoke("report_preview", new { file = _file, lang })?["sections"]))) BuildPreview();
+        }));
+        foreach (var s in _previewSections ?? new JsonArray())
+        {
+            p.Children.Add(new TextBlock { Text = S(s, "title"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
+            p.Children.Add(Table(Arr(s?["header"]).Select(h => h!.GetValue<string>()).ToList(), Arr(s?["rows"]).Select(r => (IList<string>)Arr(r).Select(c => c!.GetValue<string>()).ToList()).ToList(), 12));
+        }
+    }
+
+    // ---- --screenshots: every page of a simulated demo project ----
+    private async Task<bool> CaptureAll(string dir)
+    {
+        var ok = true;
+        try
+        {
+            Directory.CreateDirectory(dir);
+            AppWindow.Resize(new Windows.Graphics.SizeInt32(1400, 1000));
+            var file = SelfTest.BuildDemo(IOPath.Combine(dir, "project"));
+            Open(file);
+            _dayRows = Arr(Api.Invoke("results_hours", new { file, day_of_year = 172 })?["hours"]);
+            _compareRows = Arr(Api.Invoke("compare_variants", new { file })?["variants"]);
+            _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en" })?["sections"]);
+            BuildPlantPages();
+            var items = new[] { NavProject, NavSite, NavDesign, NavRoof, NavElectrical, NavStorage, NavResults, NavEconomics, NavReport };
+            for (int i = 0; i < items.Length; i++)
+            {
+                Nav.SelectedItem = items[i];
+                await Task.Delay(600);
+                PageHost.UpdateLayout();
+                var rtb = new RenderTargetBitmap();
+                await rtb.RenderAsync(PageHost);
+                var pixels = await rtb.GetPixelsAsync();
+                var path = IOPath.Combine(dir, $"{i + 1:00}-{items[i].Tag}.png");
+                using (var fs = File.Create(path))
+                {
+                    var enc = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, fs.AsRandomAccessStream());
+                    enc.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)rtb.PixelWidth, (uint)rtb.PixelHeight, 96, 96, pixels.ToArray());
+                    await enc.FlushAsync();
+                }
+                Console.WriteLine($"PASS screenshot {IOPath.GetFileName(path)} {rtb.PixelWidth}x{rtb.PixelHeight}");
+            }
+        }
+        catch (Exception ex) { ok = false; File.WriteAllText(IOPath.Combine(dir, "error.txt"), ex.ToString()); }
+        Application.Current.Exit();
+        return ok;
+    }
+}

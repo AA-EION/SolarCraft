@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading;
 
 namespace SolarCraft;
@@ -63,9 +64,48 @@ public static unsafe class SelfTest
             catch (CoreError ce) { Check(ce.Code == "CONSENT_REQUIRED", "consent enforced"); }
         }
         catch (Exception ex) { Check(false, "workflow: " + ex.Message); }
+        // Plant workflow: stringing, consumption, DC-coupled battery with reserve, tariff, variants, report contents.
+        try
+        {
+            var f = BuildDemo(Path.Combine(dir, "plant"));
+            var b = Api.Invoke("results_summary", new { file = f })!["balance"]!;
+            var dis = b["batt_discharge_kwh"]!.GetValue<double>();
+            Check(dis > 100 && b["load_kwh"]!.GetValue<double>() > 4000 && b["max_abs_residual_wh"]!.GetValue<double>() < 1e-3, $"battery dispatch and closed balance ({dis:F0} kWh discharged)");
+            var day = Api.Invoke("results_hours", new { file = f, day_of_year = 172 })!["hours"]!.AsArray();
+            Check(day.Count == 24 && day.Count(h => h!["outage"]!.GetValue<bool>()) == 5, "hourly inspection with outage hours");
+            Check(Api.Invoke("cash_flow", new { file = f })!["years"]!.AsArray().Count == 21, "cash flow 20 years");
+            Check(Api.Invoke("compare_variants", new { file = f })!["variants"]!.AsArray().Count == 2, "variant comparison");
+            var sections = Api.Invoke("report_preview", new { file = f, lang = "es" })!["sections"]!.AsArray().Count;
+            Check(sections >= 4, $"report plant sections ({sections})");
+        }
+        catch (Exception ex) { Check(false, "plant workflow: " + ex.Message); }
         finally { try { Directory.Delete(dir, true); } catch { } }
         File.WriteAllText(outPath, sb.ToString());
         return failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>Builds a complete, simulated demo project offline through the JSON API (self-test and screenshots).</summary>
+    public static string BuildDemo(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, "Casa Usaquén.solarcraft");
+        if (File.Exists(file)) File.Delete(file);
+        void Call(string method, string json) { var o = JsonNode.Parse(json)!.AsObject(); o["file"] = file; Api.Invoke(method, o); }
+        Api.Invoke("create_project", new { file, name = "Casa Usaquén", latitude = 4.711, longitude = -74.072, target_kwp = 6.0 });
+        Call("set_mode", "{\"mode\":\"detailed\"}");
+        Call("use_demo_weather", "{}");
+        var ids = Api.Invoke("add_generic_storage_equipment", new { file })!["ids"]!.AsArray().Select(i => i!.GetValue<string>()).ToList();
+        Api.Invoke("set_fields", new { file, edits = new object[] { new { pointer = "/arrays/0/inverter_id", value = (object)ids[0] }, new { pointer = "/arrays/0/tilt", value = (object)15.0 } } });
+        Call("set_roof", "{\"outline\":[[0,0],[12,0],[12,6],[0,6]],\"obstacles\":[[[5,4],[5.8,4],[5.8,4.8],[5,4.8]]],\"obstacle_heights\":[1.5],\"params\":{\"setback\":0.4,\"obstacle_clearance\":0.3}}");
+        var unit = Api.Invoke("stringing", new { file })!["inverters"]![0]!["unit"]!["id"]!.GetValue<string>();
+        Call("set_section", "{\"section\":\"grid\",\"value\":{\"feed_in\":\"surplus\",\"export_limit_kw\":4.0,\"phases\":1,\"voltage_v\":120}}");
+        Call("set_section", "{\"section\":\"loads\",\"value\":{\"profile\":{\"kind\":\"synthetic\",\"profile\":\"residential\"},\"annual_kwh\":4200,\"critical_fraction\":0.3}}");
+        Call("set_section", "{\"section\":\"storage\",\"value\":{\"battery_id\":\"" + ids[1] + "\",\"units\":1,\"coupling\":{\"kind\":\"dc_hybrid\",\"unit_id\":\"" + unit + "\"},\"model\":\"detailed\",\"soc_min_pct\":5,\"soc_max_pct\":100,\"initial_soc_pct\":50,\"backup_reserve_pct\":30,\"grid_services_pct\":0,\"charge_priority\":[\"backup\",\"self_consumption\",\"grid_services\"],\"grid_charge_backup\":false,\"grid_service\":{\"kind\":\"none\"},\"outages\":[{\"start_hour\":4107,\"hours\":5}]}}");
+        Call("set_section", "{\"section\":\"tariff\",\"value\":{\"name\":\"TOU\",\"currency\":\"COP\",\"import_price\":800,\"tou\":[{\"name\":\"Peak\",\"price\":1100,\"start_hour\":18,\"end_hour\":22,\"weekdays\":true,\"weekends\":true,\"months\":[]}],\"export\":{\"kind\":\"fixed\",\"price\":300},\"fixed_per_month\":12000,\"demand_charge_per_kw_month\":0,\"import_escalation_pct\":4,\"export_escalation_pct\":2}}");
+        Call("set_section", "{\"section\":\"economics\",\"value\":{\"horizon_years\":20,\"discount_rate_pct\":9,\"cost_fixed\":3000000,\"cost_per_kwp\":3500000,\"cost_per_battery_kwh\":1800000,\"om_pct_of_investment\":1,\"om_escalation_pct\":4,\"inverter_replacement_year\":13,\"inverter_replacement_cost\":4000000,\"battery_replacement_year\":12,\"battery_replacement_cost\":0,\"degradation_pct_per_year\":0.4,\"subsidy\":0,\"loan\":null}}");
+        Call("simulate", "{}");
+        Call("create_variant", "{\"name\":\"Reserve 30 %\"}");
+        return file;
     }
 
     sealed class SyncProgress(Action<double> a) : IProgress<double> { public void Report(double v) => a(v); }
