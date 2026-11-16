@@ -88,6 +88,8 @@ jobs:
           $out = "$env:RUNNER_TEMP\screens-windows"
           $p = Start-Process -FilePath out/${{ matrix.rid }}/SolarCraft.exe -ArgumentList "--screenshots", $out -PassThru
           if (-not $p.WaitForExit(240000)) { $p.Kill(); throw "screenshot run timed out" }
+          "exit code: $($p.ExitCode); session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId)"
+          if (-not (Test-Path $out)) { throw "no window session: WinUI screenshots need an interactive desktop (GitHub-hosted runners may not provide one)" }
           Get-ChildItem $out
           if (Test-Path "$out\error.txt") { Get-Content "$out\error.txt"; throw "screenshots failed" }
       - uses: actions/upload-artifact@v4

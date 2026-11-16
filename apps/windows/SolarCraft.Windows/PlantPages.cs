@@ -195,7 +195,7 @@ public sealed partial class MainWindow
         var lib = _project!["library"];
         var rows = new List<IList<string>>();
         foreach (var kind in new[] { "modules", "inverters", "batteries", "battery_inverters" })
-            foreach (var r in Arr(lib?[kind])) rows.Add(new[] { $"{S(r, "manufacturer")} {S(r, "model")}", kind.TrimEnd('s'), S(r, "provenance") });
+            foreach (var r in Arr(lib?[kind])) rows.Add(new[] { $"{S(r, "manufacturer")} {S(r, "model")}", kind switch { "batteries" => "battery", "battery_inverters" => "battery inverter", _ => kind.TrimEnd('s') }, S(r, "provenance") });
         p.Children.Add(Table(new[] { "", "", "" }, rows));
         p.Children.Add(Row(Btn(T("new_module"), () => _ = NewEquipment("module")), Btn(T("new_inverter"), () => _ = NewEquipment("inverter")), Btn(T("new_battery"), () => _ = NewEquipment("battery"))));
 
@@ -407,7 +407,7 @@ public sealed partial class MainWindow
             }
             host.Children.Add(canvas);
             host.Children.Add(Note("— PV   — " + T("loads") + "   — " + T("grid_import") + "   — " + T("battery")));
-            host.Children.Add(Table(new[] { T("day"), T("hour"), "PV", T("loads"), "→bat", "bat→", T("grid_import"), T("grid_export"), T("soc"), T("backup_reserve") },
+            host.Children.Add(Table(new[] { T("day"), T("hour"), "PV", T("loads"), "→bat", "bat→", T("grid_import"), T("grid_export"), T("soc"), T("backup_reserve") + " Wh" },
                 hours.Select(h => (IList<string>)new[] { F(N(h, "day_of_year")), $"{(int)N(h, "hour"):00}:00" + (h?["outage"]?.GetValue<bool>() == true ? " ⚡" : ""), F(N(h, "pv_ac_wh")), F(N(h, "load_wh")), F(N(h, "batt_charge_wh")), F(N(h, "batt_discharge_wh")), F(N(h, "import_wh")), F(N(h, "export_wh")), F(N(h, "soc_pct"), 1), F(N(h, "backup_wh")) }).ToList(), 12));
         }
         var buttons = new List<UIElement> { day, Btn(T("apply"), () => Try(() => Show(Arr(Api.Invoke("results_hours", new { file = _file, day_of_year = (int)day.Value })?["hours"])))) };

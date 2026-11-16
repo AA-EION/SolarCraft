@@ -331,7 +331,7 @@ struct ElectricalPage: View {
                     ForEach(["modules", "inverters", "batteries", "battery_inverters"], id: \.self) { k in
                         ForEach(dicts(m.section("library")[k]).indices, id: \.self) { i in
                             let r = dicts(m.section("library")[k])[i]
-                            HStack { Text(k.dropLast()).foregroundStyle(.secondary).frame(width: 110, alignment: .leading); Text("\(str(r, "manufacturer")) \(str(r, "model"))"); Spacer(); Text(str(r, "provenance")).font(.caption).foregroundStyle(.secondary) }
+                            HStack { Text(["modules": "module", "inverters": "inverter", "batteries": "battery", "battery_inverters": "battery inverter"][k] ?? k).foregroundStyle(.secondary).frame(width: 110, alignment: .leading); Text("\(str(r, "manufacturer")) \(str(r, "model"))"); Spacer(); Text(str(r, "provenance")).font(.caption).foregroundStyle(.secondary) }
                         }
                     }
                     HStack {
@@ -488,7 +488,7 @@ struct SimulationPage: View {
                                     LineMark(x: .value("h", i), y: .value("Wh", num(r, "batt_discharge_wh") - num(r, "batt_charge_wh")), series: .value("s", "Battery")).foregroundStyle(.teal)
                                 }
                             }.frame(height: 180)
-                            SimpleTable(header: [m.t("day"), m.t("hour"), "PV", m.t("loads"), "→🔋", "🔋→", m.t("grid_import"), m.t("grid_export"), m.t("soc"), m.t("backup_reserve")],
+                            SimpleTable(header: [m.t("day"), m.t("hour"), "PV", m.t("loads"), "→🔋", "🔋→", m.t("grid_import"), m.t("grid_export"), m.t("soc"), m.t("backup_reserve") + " Wh"],
                                         rows: m.dayRows.map { r in ["\(int(r, "day_of_year"))", String(format: "%02d:00", int(r, "hour")) + ((r["outage"] as? Bool) == true ? " ⚡︎" : ""), fmt(num(r, "pv_ac_wh")), fmt(num(r, "load_wh")), fmt(num(r, "batt_charge_wh")), fmt(num(r, "batt_discharge_wh")), fmt(num(r, "import_wh")), fmt(num(r, "export_wh")), fmt(num(r, "soc_pct"), 1), fmt(num(r, "backup_wh"))] })
                                 .font(.caption)
                         }
