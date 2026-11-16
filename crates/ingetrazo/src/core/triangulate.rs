@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Marco Sumari Tellez and IngeTrazo contributors (original Python).
 // Copyright (C) 2026 SolarCraft contributors (Rust port).
 //
+// Upstream: core/triangulate.py (pin and hash in crates/ingetrazo/upstream.toml).
 // Ported from IngeTrazo `core/triangulate.py` at commit
 // ffc7187bbaf8222ea5f5f19e33f6c4ed81ad4ad5 (GPL-3.0-or-later), which is itself
 // a port of the earcut ear-clipping algorithm by Mapbox (ISC licence).

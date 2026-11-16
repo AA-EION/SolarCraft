@@ -2863,6 +2863,15 @@ name = "solarcraft-geometry"
 version = "0.0.1"
 dependencies = [
  "serde",
+ "solarcraft-ingetrazo",
+]
+
+[[package]]
+name = "solarcraft-ingetrazo"
+version = "0.0.1"
+dependencies = [
+ "rayon",
+ "sha2",
 ]
 
 [[package]]

@@ -1,0 +1,12 @@
+[package]
+name = "solarcraft-ingetrazo"
+description = "IngeTrazo geometry code in SolarCraft: native kernels vendored verbatim and Python modules ported to Rust, pinned to an upstream commit"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rayon = "1.12.0"
+
+[dev-dependencies]
+sha2.workspace = true

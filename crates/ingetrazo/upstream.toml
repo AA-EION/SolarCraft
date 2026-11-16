@@ -1,0 +1,52 @@
+# Upstream pin for code taken from IngeTrazo (GPL-3.0-or-later).
+# Maintained by tools/ingetrazo_sync.py; see PORTING.md.
+
+repository = "https://github.com/ingelibre/ingetrazo"
+commit = "ffc7187bbaf8222ea5f5f19e33f6c4ed81ad4ad5"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/boxes.rs"
+local = "src/upstream/rust/boxes.rs"
+sha256 = "a18308db7b74647992ad0a55c88088db0c68f98c72e2e0bc3fda826e390bf707"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/facegeom.rs"
+local = "src/upstream/rust/facegeom.rs"
+sha256 = "8e7387bc7eb5043d50ce94ac54940b1ff486e9c707de5be17c5e8bad89d6b60b"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/gltape.rs"
+local = "src/upstream/rust/gltape.rs"
+sha256 = "f4b211c6103ec8dae4da122bc1020e10f05fd209f3bbff50f6e696906714c13f"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/hlr.rs"
+local = "src/upstream/rust/hlr.rs"
+sha256 = "7106ed514e73f9f7ff0910204a9e3a8a476670f6ef7db672f3d5bcf8b5371de6"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/instances.rs"
+local = "src/upstream/rust/instances.rs"
+sha256 = "0c91730dd1b8ded519913c8c6bfd0c99a4b6e83b8ce3e397592570d322461833"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/occlusion.rs"
+local = "src/upstream/rust/occlusion.rs"
+sha256 = "ce41fcb5172b7898eb92221e255c94c82d2e682908bd373d67d33a570bba9946"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/parity.rs"
+local = "src/upstream/rust/parity.rs"
+sha256 = "7b8a314ebc1e2992890b6b3c1b41bed5c8f674a566366da0289f03e2577e3c4d"
+
+[[vendored]]
+upstream = "rust/ingetrazo_core/src/weld.rs"
+local = "src/upstream/rust/weld.rs"
+sha256 = "9c3f35c6c2ec5eae490305532ce43580ea270db846d4fc7ef126479782846973"
+
+[[ported]]
+upstream = "core/triangulate.py"
+commit = "ffc7187bbaf8222ea5f5f19e33f6c4ed81ad4ad5"
+local = "src/core/triangulate.rs"
+upstream_sha256 = "1d4b83eb9f3b0c7ec8a7ad591f27182991fb54d9d33e5d0ba47f3233bd9c16ef"
+note = "Python → Rust (index arena instead of linked objects)"
