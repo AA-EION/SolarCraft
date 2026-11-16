@@ -22,7 +22,7 @@ impl std::fmt::Display for DecodeError {
 pub fn decode_htnt(encoded: &str) -> Result<Value, DecodeError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).map_err(|e| DecodeError::Base64(e.to_string()))?;
     if bytes.len() % 2 != 0 { return Err(DecodeError::Utf16("odd byte count".into())); }
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     let text = String::from_utf16(&units).map_err(|e| DecodeError::Utf16(e.to_string()))?;
     serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| DecodeError::Json(e.to_string()))
 }
