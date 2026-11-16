@@ -14,6 +14,15 @@ final class AppModel: ObservableObject {
     @Published var progress = 0.0
     @Published var error: String?
     @Published var notice: String?
+    /// Raw project and result documents for the plant pages (JSON objects from the core).
+    @Published var raw: JSONDict = [:]
+    @Published var summary: JSONDict?
+    @Published var stringingDoc: JSONDict?
+    @Published var dayRows: [JSONDict] = []
+    @Published var cash: JSONDict?
+    @Published var variantRows: [JSONDict] = []
+    @Published var libraryItems: [JSONDict] = []
+    @Published var previewSections: [JSONDict] = []
     private var running: Core.Progress?
 
     static let projectType = UTType(filenameExtension: "solarcraft") ?? .data
@@ -36,8 +45,76 @@ final class AppModel: ObservableObject {
             project = try Core.invoke("get_project", ["file": file], as: ProjectDoc.self)
             issues = try Core.invoke("validate", ["file": file], as: IssuesResult.self).issues
             results = try? Core.invoke("explain", ["file": file], as: Explain.self)
+            raw = (try? Core.invokeJSON("get_project", ["file": file])) ?? [:]
+            summary = try? Core.invokeJSON("results_summary", ["file": file])
+            stringingDoc = try? Core.invokeJSON("stringing", ["file": file])
+            cash = try? Core.invokeJSON("cash_flow", ["file": file])
         }
     }
+
+    // MARK: plant operations (all through the same JSON API as the CLI and MCP)
+
+    func section(_ name: String) -> JSONDict { raw[name] as? JSONDict ?? [:] }
+
+    func setSection(_ name: String, _ value: Any) {
+        run {
+            let r = try Core.invokeJSON("set_section", ["file": file, "section": name, "value": value])
+            let list = (r["issues"] as? [JSONDict]) ?? []
+            let errs = list.filter { ($0["severity"] as? String) == "error" }.compactMap { $0["message"] as? String }
+            notice = errs.isEmpty ? t("apply") + " ✓" : nil
+            if !errs.isEmpty { error = errs.joined(separator: "\n") }
+        }
+        reload()
+    }
+
+    func setStringing(manual: Bool, inverters: [JSONDict]) {
+        run { stringingDoc = try Core.invokeJSON("set_stringing", ["file": file, "manual": manual, "inverters": inverters]) }
+        reload()
+    }
+
+    func addEquipment(_ kind: String, _ record: JSONDict, saveToLibrary: Bool) {
+        run {
+            _ = try Core.invokeRaw("add_equipment", ["file": file, "kind": kind, "record": record])
+            if saveToLibrary { _ = try Core.invokeRaw("library_save", ["kind": kind, "record": record]) }
+            notice = "\(kind) \(record["id"] as? String ?? "") ✓"
+        }
+        reload()
+    }
+
+    func addGenericStorage() { run { _ = try Core.invokeRaw("add_generic_storage_equipment", ["file": file]) }; reload() }
+
+    func loadLibrary(_ query: String = "") {
+        run { libraryItems = (try Core.invokeJSON("library_list", query.isEmpty ? [:] : ["query": query])["items"] as? [JSONDict]) ?? [] }
+    }
+
+    func pin(_ kind: String, _ id: String) { run { _ = try Core.invokeRaw("library_pin", ["file": file, "kind": kind, "id": id]) }; reload() }
+
+    func importLoad() {
+        let panel = NSOpenPanel()
+        guard panel.runModal() == .OK, let u = panel.url else { return }
+        run { _ = try Core.invokeRaw("import_load", ["file": file, "source": u.path]) }
+        reload()
+    }
+
+    func loadDay(_ day: Int) { run { dayRows = (try Core.invokeJSON("results_hours", ["file": file, "day_of_year": day])["hours"] as? [JSONDict]) ?? [] } }
+    func loadTop(_ channel: String) { run { dayRows = (try Core.invokeJSON("results_hours", ["file": file, "top": channel, "count": 24])["hours"] as? [JSONDict]) ?? [] } }
+
+    func saveVariant(_ name: String) { run { _ = try Core.invokeRaw("create_variant", ["file": file, "name": name]) }; reload() }
+    func applyVariant(_ id: String) { run { _ = try Core.invokeRaw("apply_variant", ["file": file, "id": id, "keep_current": true]) }; reload() }
+    func compareVariants() {
+        busy = true
+        let f = file
+        Task.detached {
+            let rows = (try? Core.invokeJSON("compare_variants", ["file": f])["variants"] as? [JSONDict]) ?? []
+            let data = (try? JSONSerialization.data(withJSONObject: rows)) ?? Data()
+            await MainActor.run {
+                self.variantRows = (try? JSONSerialization.jsonObject(with: data) as? [JSONDict]) ?? []
+                self.busy = false
+            }
+        }
+    }
+
+    func loadPreview(_ lang: String) { run { previewSections = (try Core.invokeJSON("report_preview", ["file": file, "lang": lang])["sections"] as? [JSONDict]) ?? [] } }
 
     func newProject() {
         let panel = NSSavePanel()

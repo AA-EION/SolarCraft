@@ -149,6 +149,15 @@ jobs:
         run: |
           softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 "$BIN" --selftest
+      - name: Screenshots of every workflow page (demo project simulated offline)
+        run: |
+          arch -arm64 "$BIN" --screenshots "$RUNNER_TEMP/screens-macos"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-macos
+          path: ${{ runner.temp }}/screens-macos/*.png
+          retention-days: 30
       - name: App bundle and DMG
         run: |
           DMG=$(packaging/macos/make-dmg.sh "$BIN" 0.0.1 ${{ github.run_number }} "$RUNNER_TEMP/dmg" | tail -1)

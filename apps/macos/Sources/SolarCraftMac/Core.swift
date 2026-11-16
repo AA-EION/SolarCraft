@@ -41,6 +41,8 @@ enum Core {
 
 // MARK: - JSON application API (sc_invoke)
 
+typealias JSONDict = [String: Any]
+
 struct CoreError: Error, LocalizedError {
     let code: String
     let message: String
@@ -76,6 +78,12 @@ extension Core {
         }
         let err = obj["error"] as? [String: Any]
         throw CoreError(code: err?["code"] as? String ?? "ERROR", message: err?["message"] as? String ?? "Unknown error")
+    }
+
+    /// Call a method whose result is a JSON object.
+    static func invokeJSON(_ method: String, _ params: [String: Any]) throws -> JSONDict {
+        let data = try invokeRaw(method, params)
+        return (try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? JSONDict) ?? [:]
     }
 
     static func invoke<T: Decodable>(_ method: String, _ params: [String: Any], as type: T.Type, progress: Progress? = nil) throws -> T {

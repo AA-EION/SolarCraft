@@ -6,6 +6,10 @@ import SwiftUI
 enum Entry {
     static func main() {
         if CommandLine.arguments.contains("--selftest") { exit(SelfTest.run()) }
+        if let i = CommandLine.arguments.firstIndex(of: "--screenshots"), i + 1 < CommandLine.arguments.count {
+            let out = CommandLine.arguments[i + 1]
+            exit(MainActor.assumeIsolated { Screenshots.run(out) })
+        }
         SolarCraftApp.main()
     }
 }
@@ -29,16 +33,18 @@ struct SolarCraftApp: App {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case project, site_weather, design, roof, results, report
+    case project, site_climate, design, electrical, storage_loads, simulation, economics, plans_reports
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .project: return "doc.text"
-        case .site_weather: return "sun.max"
-        case .design: return "square.grid.3x3"
-        case .roof: return "house"
-        case .results: return "chart.bar"
-        case .report: return "doc.richtext"
+        case .site_climate: return "sun.max"
+        case .design: return "house"
+        case .electrical: return "bolt"
+        case .storage_loads: return "battery.75percent"
+        case .simulation: return "chart.bar"
+        case .economics: return "banknote"
+        case .plans_reports: return "doc.richtext"
         }
     }
 }
@@ -62,7 +68,7 @@ struct RootView: View {
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
-                        PageView(page: page ?? .project).padding(20).frame(maxWidth: 760, alignment: .leading)
+                        PageView(page: page ?? .project).id(page).padding(20).frame(maxWidth: 980, alignment: .leading)
                     }
                 }
             }
@@ -79,11 +85,13 @@ struct PageView: View {
     @ViewBuilder var body: some View {
         switch page {
         case .project: ProjectPage()
-        case .site_weather: SitePage()
-        case .design: DesignPage()
-        case .roof: RoofPage()
-        case .results: ResultsPage()
-        case .report: ReportPage()
+        case .site_climate: SiteClimatePage()
+        case .design: VStack(alignment: .leading, spacing: 18) { DesignPage(); RoofPage() }
+        case .electrical: ElectricalPage()
+        case .storage_loads: StorageLoadsPage()
+        case .simulation: SimulationPage()
+        case .economics: EconomicsPage()
+        case .plans_reports: PlansReportsPage()
         }
     }
 }

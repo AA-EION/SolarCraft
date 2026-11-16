@@ -51,6 +51,25 @@ enum SelfTest {
             let ui = try Core.invoke("ui_strings", ["lang": "es"], as: [String: String].self)
             check(ui["simulate"] == "Simular", "UI strings (es)")
         } catch { check(false, "workflow: \(error.localizedDescription)") }
+        // Plant workflow: stringing, consumption, DC-coupled battery with reserve, tariff, variants, report contents.
+        do {
+            let f = try DemoProject.build(in: dir.appendingPathComponent("plant"))
+            let s = try Core.invokeJSON("results_summary", ["file": f])
+            let b = s["balance"] as? JSONDict ?? [:]
+            check(num(b, "batt_discharge_kwh") > 100 && num(b, "load_kwh") > 4000 && num(b, "max_abs_residual_wh") < 1e-3, "battery dispatch and closed balance (\(Int(num(b, "batt_discharge_kwh"))) kWh discharged)")
+            let day = try Core.invokeJSON("results_hours", ["file": f, "day_of_year": 172])["hours"] as? [JSONDict] ?? []
+            check(day.count == 24 && day.filter { ($0["outage"] as? Bool) == true }.count == 5, "hourly inspection with outage hours")
+            let fin = try Core.invokeJSON("cash_flow", ["file": f])
+            check((fin["years"] as? [JSONDict])?.count == 21, "cash flow 20 years")
+            let cmp = try Core.invokeJSON("compare_variants", ["file": f])["variants"] as? [JSONDict] ?? []
+            check(cmp.count == 2, "variant comparison")
+            let prev = try Core.invokeJSON("report_preview", ["file": f, "lang": "es"])["sections"] as? [JSONDict] ?? []
+            check(prev.count >= 4, "report plant sections (\(prev.count))")
+            let bad = try Core.invokeJSON("set_section", ["file": f, "section": "storage", "value": ["battery_id": "x", "units": 1, "coupling": ["kind": "dc_hybrid", "unit_id": "nope"], "model": "simple", "soc_min_pct": 5.0, "soc_max_pct": 100.0, "initial_soc_pct": 50.0,
+                "backup_reserve_pct": 70.0, "grid_services_pct": 40.0, "charge_priority": ["backup", "self_consumption", "grid_services"], "grid_charge_backup": false, "grid_service": ["kind": "none"], "outages": [Any]()] as [String: Any]])
+            let codes = (bad["issues"] as? [JSONDict] ?? []).compactMap { $0["code"] as? String }
+            check(codes.contains("BATTERY_MISSING"), "invalid storage reported (\(codes))")
+        } catch { check(false, "plant workflow: \(error.localizedDescription)") }
         do { _ = try Core.invokeRaw("fetch_weather_pvgis", ["file": file]); check(false, "consent enforced") } catch let e as CoreError { check(e.code == "CONSENT_REQUIRED", "consent enforced") } catch { check(false, "consent enforced") }
         try? FileManager.default.removeItem(at: dir)
         return failures == 0 ? 0 : 1
