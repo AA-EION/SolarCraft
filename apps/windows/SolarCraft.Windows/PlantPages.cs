@@ -488,7 +488,7 @@ public sealed partial class MainWindow
         p.Children.Add(H(T("variants")));
         var vname = new TextBox { Width = 260, PlaceholderText = T("save_variant") };
         p.Children.Add(Row(vname, Btn(T("save_variant"), () => { if (Try(() => Api.Invoke("create_variant", new { file = _file, name = vname.Text.Length > 0 ? vname.Text : "Variant" }))) Reload(); }),
-            Btn(T("compare"), async () => { var f = _file; try { _compareRows = Arr(await Task.Run(() => Api.Invoke("compare_variants", new { file = f }))?["variants"]); } catch (Exception ex2) { ShowError(ex2.Message); } BuildEconomics(); })));
+            Btn(T("compare"), async () => { var f = _file; try { _compareRows = Arr((await Task.Run(() => Api.Invoke("compare_variants", new { file = f })))?["variants"]); } catch (Exception ex2) { ShowError(ex2.Message); } BuildEconomics(); })));
         foreach (var v in Arr(_project!["variants"]))
         {
             var id = S(v, "id");
