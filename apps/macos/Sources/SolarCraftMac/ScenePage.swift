@@ -181,7 +181,8 @@ struct ScenePage: View {
             HStack { NumField(label: "x", value: $px); NumField(label: "y", value: $py) }
             switch form {
             case "building":
-                HStack { NumField(label: "W", value: $w); NumField(label: "D", value: $d); NumField(label: m.t("eave_height"), value: $eave) }
+                HStack { NumField(label: "W", value: $w); NumField(label: "D", value: $d) }
+                NumField(label: m.t("eave_height"), value: $eave)
                 HStack {
                     Picker(m.t("roof_type"), selection: $roofType) { ForEach(["flat", "shed", "gable", "hip"], id: \.self) { Text($0).tag($0) } }.frame(width: 200)
                     NumField(label: m.t("pitch"), value: $pitchDeg)
