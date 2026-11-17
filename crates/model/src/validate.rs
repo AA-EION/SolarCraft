@@ -36,7 +36,40 @@ pub fn validate(p: &Project) -> Vec<Issue> {
     }
     electrical_issues(p, &mut push);
     plant_issues(p, &mut push);
+    scene_issues(p, &mut push);
     v
+}
+
+/// Scene geometry and the binding of module fields to electrical arrays.
+fn scene_issues(p: &Project, push: &mut impl FnMut(&'static str, Severity, String, String)) {
+    let Some(sc) = &p.scene else { return };
+    for i in solarcraft_scene::validate(sc) {
+        let sev = match i.severity.as_str() { "error" => Severity::Error, "warning" => Severity::Warning, _ => Severity::Info };
+        push(solarcraft_scene::static_code(&i.code), sev, format!("/scene/{}", i.subject), i.message);
+    }
+    let assigned = crate::derive::modules_by_array(&crate::derive::electrical(p));
+    for (k, f) in sc.fields.iter().enumerate() {
+        let Some(aid) = &f.array_id else { continue };
+        let ptr = format!("/scene/fields/{k}");
+        let Some(a) = p.arrays.iter().find(|a| &a.id == aid) else { push("SCENE_FIELD_ARRAY", Severity::Error, ptr, format!("Field {} feeds array {aid}, which does not exist.", f.id)); continue };
+        if f.modules.is_empty() { continue; }
+        let strung = assigned.get(aid).copied().unwrap_or(0) as usize;
+        if strung != f.modules.len() {
+            push("SCENE_FIELD_COUNT", Severity::Warning, ptr.clone(), format!("Field {} holds {} modules but array {} is strung for {strung}; the simulation uses the strung count and the field's shading.", f.id, f.modules.len(), a.name.value));
+        }
+        if let Some((t, az)) = sc.field_orientation(f) {
+            let daz = ((az - a.azimuth.value + 540.0) % 360.0 - 180.0).abs();
+            if (t - a.tilt.value).abs() > 1.0 || daz > 1.0 {
+                push("SCENE_FIELD_ORIENTATION", Severity::Warning, ptr.clone(), format!("Field {} faces tilt {t:.1}° / azimuth {az:.1}° but array {} uses {:.1}° / {:.1}°; bind the field again to copy its orientation.", f.id, a.name.value, a.tilt.value, a.azimuth.value));
+            }
+        }
+        if let Some(m) = p.library.module(&a.module_id.value) {
+            let (l, w) = (m.length_m.max(m.width_m), m.length_m.min(m.width_m));
+            if (l - f.module.length).abs() > 0.02 || (w - f.module.width).abs() > 0.02 {
+                push("SCENE_FIELD_MODULE_SIZE", Severity::Warning, ptr, format!("Field {} was laid out for {:.3} × {:.3} m modules; {} is {l:.3} × {w:.3} m. Place the modules again.", f.id, f.module.length, f.module.width, m.model));
+            }
+        }
+    }
 }
 
 type Push<'a> = dyn FnMut(&'static str, Severity, String, String) + 'a;

@@ -10,7 +10,7 @@ pub fn dot(a: V3, b: V3) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
 pub fn cross(a: V3, b: V3) -> V3 { [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]] }
 
 #[derive(Clone, Copy, Debug)]
-struct Tri { v0: V3, e1: V3, e2: V3, owner: u32 }
+struct Tri { v0: V3, e1: V3, e2: V3, owner: u32, opacity: f32 }
 
 #[derive(Clone, Copy)]
 struct Node { lo: V3, hi: V3, left: u32, count: u32 } // count>0: leaf over tris[left..left+count]
@@ -76,7 +76,8 @@ impl Bvh {
         Self::split(nodes, tris, l, start, mid);
         Self::split(nodes, tris, l + 1, mid, end);
     }
-    /// True if a ray from `o` along `d` hits any triangle not owned by `skip`.
+    /// True if a ray from `o` along `d` hits any opaque triangle not owned by `skip`
+    /// (partly transparent triangles are ignored here; see [`Bvh::transmittance`]).
     pub fn occluded(&self, o: V3, d: V3, skip: u32) -> bool {
         let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
         let mut stack = [0u32; 64];
@@ -92,7 +93,7 @@ impl Bvh {
             if t0 > t1 { continue; }
             if n.count > 0 {
                 for t in &self.tris[n.left as usize..(n.left + n.count) as usize] {
-                    if t.owner != skip && hit(t, o, d) { return true; }
+                    if t.owner != skip && t.opacity >= 1.0 && hit(t, o, d) { return true; }
                 }
             } else {
                 stack[sp] = n.left; stack[sp + 1] = n.left + 1; sp += 2;
@@ -118,13 +119,49 @@ fn hit(t: &Tri, o: V3, d: V3) -> bool {
 
 
 /// A triangle for scene construction; `owner` identifies the object so a
-/// surface does not shade itself.
+/// surface does not shade itself. `opacity` is the beam fraction the object
+/// blocks (1 = opaque; a tree crown with 30 % transparency has 0.7).
 #[derive(Clone, Copy, Debug)]
-pub struct Triangle { pub a: V3, pub b: V3, pub c: V3, pub owner: u32 }
+pub struct Triangle { pub a: V3, pub b: V3, pub c: V3, pub owner: u32, pub opacity: f32 }
+
+impl Triangle {
+    pub fn opaque(a: V3, b: V3, c: V3, owner: u32) -> Self { Triangle { a, b, c, owner, opacity: 1.0 } }
+}
 
 impl Bvh {
     pub fn from_triangles(t: &[Triangle]) -> Self {
-        Self::build(t.iter().map(|t| Tri { v0: t.a, e1: sub(t.b, t.a), e2: sub(t.c, t.a), owner: t.owner }).collect())
+        Self::build(t.iter().map(|t| Tri { v0: t.a, e1: sub(t.b, t.a), e2: sub(t.c, t.a), owner: t.owner, opacity: t.opacity.clamp(0.0, 1.0) }).collect())
+    }
+
+    /// Fraction of a ray from `o` along `d` that gets through: 0 when an
+    /// opaque triangle is hit, otherwise the product of (1 − opacity) over the
+    /// distinct partly transparent objects crossed (an object counts once,
+    /// however many of its faces the ray crosses).
+    pub fn transmittance(&self, o: V3, d: V3, skip: u32) -> f64 {
+        let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
+        let mut stack = [0u32; 64];
+        let mut sp = 1;
+        let mut seen: Vec<(u32, f32)> = vec![];
+        while sp > 0 {
+            sp -= 1;
+            let n = &self.nodes[stack[sp] as usize];
+            let (mut t0, mut t1) = (0.0f64, f64::INFINITY);
+            for k in 0..3 {
+                let (a, b) = ((n.lo[k] - o[k]) * inv[k], (n.hi[k] - o[k]) * inv[k]);
+                t0 = t0.max(a.min(b)); t1 = t1.min(a.max(b));
+            }
+            if t0 > t1 { continue; }
+            if n.count > 0 {
+                for t in &self.tris[n.left as usize..(n.left + n.count) as usize] {
+                    if t.owner == skip || t.opacity <= 0.0 || !hit(t, o, d) { continue; }
+                    if t.opacity >= 1.0 { return 0.0; }
+                    if !seen.iter().any(|s| s.0 == t.owner) { seen.push((t.owner, t.opacity)); }
+                }
+            } else {
+                stack[sp] = n.left; stack[sp + 1] = n.left + 1; sp += 2;
+            }
+        }
+        seen.iter().map(|s| 1.0 - s.1 as f64).product()
     }
     pub fn is_empty(&self) -> bool { self.tris.is_empty() }
 }
@@ -141,11 +178,22 @@ mod tests {
     #[test]
     fn wall_shadow_matches_geometry() {
         // 3 m wall along x at y=0; point 2 m north of it on the ground; sun due south.
-        let w = [Triangle { a: [-50.0, 0.0, 0.0], b: [50.0, 0.0, 0.0], c: [50.0, 0.0, 3.0], owner: 1 }, Triangle { a: [-50.0, 0.0, 0.0], b: [50.0, 0.0, 3.0], c: [-50.0, 0.0, 3.0], owner: 1 }];
+        let w = [Triangle::opaque([-50.0, 0.0, 0.0], [50.0, 0.0, 0.0], [50.0, 0.0, 3.0], 1), Triangle::opaque([-50.0, 0.0, 0.0], [50.0, 0.0, 3.0], [-50.0, 0.0, 3.0], 1)];
         let bvh = Bvh::from_triangles(&w);
         // Shadow length 3/tan(el): shaded at el=45° (3 m > 2 m), lit at el=60° (1.73 m < 2 m).
         assert!(bvh.occluded([0.0, 2.0, 0.0], sun_dir(45.0, 180.0), 0));
         assert!(!bvh.occluded([0.0, 2.0, 0.0], sun_dir(60.0, 180.0), 0));
         assert!(!bvh.occluded([0.0, 2.0, 0.0], sun_dir(45.0, 180.0), 1), "owner skip");
+        assert_eq!(bvh.transmittance([0.0, 2.0, 0.0], sun_dir(45.0, 180.0), 0), 0.0);
+    }
+    #[test]
+    fn transparent_screen_counts_once_per_object() {
+        // Two parallel screens of one object (a crown's front and back) and one of another.
+        let q = |y: f64, owner: u32, opacity: f32| [Triangle { a: [-5.0, y, 0.0], b: [5.0, y, 0.0], c: [5.0, y, 5.0], owner, opacity }, Triangle { a: [-5.0, y, 0.0], b: [5.0, y, 5.0], c: [-5.0, y, 5.0], owner, opacity }];
+        let mut t = vec![]; t.extend(q(-1.0, 1, 0.7)); t.extend(q(-2.0, 1, 0.7)); t.extend(q(-3.0, 2, 0.5));
+        let bvh = Bvh::from_triangles(&t);
+        let tr = bvh.transmittance([0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 0);
+        assert!((tr - 0.3 * 0.5).abs() < 1e-6, "{tr}");
+        assert!(!bvh.occluded([0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 0), "transparent objects never fully occlude");
     }
 }

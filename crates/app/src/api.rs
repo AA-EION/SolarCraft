@@ -20,6 +20,7 @@ fn path(p: &Value, k: &str) -> Result<PathBuf, AppError> { Ok(PathBuf::from(s(p,
 fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Value::Null) }
 
 pub const METHODS: &[&str] = &[
+    "scene_get", "scene_edit", "scene_bind", "scene_view", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
     "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
     "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
@@ -150,6 +151,21 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         }
         "catalog_coverage" => app::catalog_ops::coverage(&path(params, "tsv")?, params.get("catalog").and_then(Value::as_str).map(std::path::Path::new), params.get("output").and_then(Value::as_str).map(std::path::Path::new)),
         "report_preview" => Ok(v(&app::report_view(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"))?)),
+        "scene_get" => app::scene_ops::get(&path(params, "file")?),
+        "scene_edit" => app::scene_ops::edit(&path(params, "file")?, arg(params, "edits")?, params.get("preview").and_then(Value::as_bool).unwrap_or(false)),
+        "scene_bind" => app::scene_ops::bind(&path(params, "file")?, &s(params, "field")?, &s(params, "array_id")?),
+        "scene_view" => Ok(v(&app::scene_ops::render(&path(params, "file")?, params)?)),
+        "scene_pick" => app::scene_ops::pick(&path(params, "file")?, params),
+        "scene_svg" => {
+            let svg = app::scene_ops::svg(&path(params, "file")?, params)?;
+            match params.get("output").and_then(Value::as_str) {
+                Some(o) => { std::fs::write(o, &svg).map_err(|x| AppError { code: "EXPORT", message: x.to_string() })?; Ok(json!({"file": o, "bytes": svg.len()})) }
+                None => Ok(json!({"svg": svg})),
+            }
+        }
+        "scene_shading" => app::scene_ops::shading(&path(params, "file")?),
+        "scene_export" => app::scene_ops::export(&path(params, "file")?, &path(params, "output")?, params.get("format").and_then(Value::as_str)),
+        "scene_import" => app::scene_ops::import(&path(params, "file")?, &path(params, "source")?, params.get("options").unwrap_or(&Value::Null), params.get("preview").and_then(Value::as_bool).unwrap_or(false)),
         "undo" => Ok(json!({"undone": app::undo(&path(params, "file")?)?.is_some()})),
         "history" => Ok(json!({"changes": app::history(&path(params, "file")?, 50)?.into_iter().map(|(seq, op, at)| json!({"seq": seq, "op": op, "at_unix": at})).collect::<Vec<_>>()})),
         _ => Err(AppError { code: "UNKNOWN_METHOD", message: format!("unknown method '{method}'") }),

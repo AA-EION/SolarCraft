@@ -72,7 +72,13 @@ pub struct SimResult {
     pub monthly: Vec<Month>,
     pub hourly: Hourly,
     pub warnings: Vec<Note>,
+    /// Per module of each 3D field: annual beam loss and sky view (for the shading map).
+    #[serde(default)]
+    pub module_shading: Vec<FieldShade>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FieldShade { pub field: String, pub array_id: String, pub diffuse_factor: f64, pub beam_loss_pct: f64, pub beam_area_loss_pct: f64, pub traced_directions: usize, pub modules: Vec<solarcraft_scene::shade::ModuleShade> }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MpptResult { pub index: u32, pub strings: String, pub stc_kw: f64, pub dc_kwh: f64, pub limited_hours: u32, pub mismatch_kwh: f64, pub limit_loss_kwh: f64 }
@@ -85,8 +91,9 @@ pub struct SimError(pub String);
 impl std::fmt::Display for SimError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) } }
 impl std::error::Error for SimError {}
 
-const IRR_KEYS: [(&str, &str); 6] = [
+const IRR_KEYS: [(&str, &str); 7] = [
     ("ghi", "Global horizontal irradiation"), ("poa", "Global incident in plane (transposition)"), ("shading", "After near shading (obstacles)"),
+    ("bypass", "After partial-shading mismatch (bypass diodes)"),
     ("iam", "After incidence angle (reflection)"), ("soiling", "After soiling"), ("effective", "Effective irradiation on modules"),
 ];
 const E_KEYS: [(&str, &str); 16] = [
@@ -113,7 +120,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     let f = |x: f64| 1.0 - x / 100.0;
     let elec = solarcraft_model::derive::electrical(p);
     let assigned = solarcraft_model::derive::modules_by_array(&elec);
-    let mut irr_tot = [0.0f64; 6];
+    let mut irr_tot = [0.0f64; 7];
     let mut e_tot = [0.0f64; 16];
     let mut area_tot = 0.0;
     let mut monthly = vec![Month::default(); 12];
@@ -121,6 +128,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     let month_of: Vec<usize> = w.hours.iter().map(|h| solarcraft_pv::civil_from_days(h.unix_mid.div_euclid(86400)).1 as usize - 1).collect();
     let mut hourly = Hourly { unix_mid: w.hours.iter().map(|h| h.unix_mid).collect(), poa_w_m2: vec![0.0; n], t_cell_c: vec![0.0; n], dc_w: vec![0.0; n], ac_w: vec![0.0; n] };
     let mut warnings: Vec<Note> = vec![];
+    let mut module_shading: Vec<FieldShade> = vec![];
     if w.horizon_applied { warnings.push(Note { code: "HORIZON_IN_WEATHER".into(), subject: String::new(), value: 0.0, text: "Weather beam irradiance already includes far-horizon shading; no additional horizon applied.".into() }); }
     let sun: Vec<spa::SolarPosition> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, spa::delta_t_estimate(2025.0))).collect();
 
@@ -140,7 +148,10 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         let iam_beam = |aoi: f64| iam::physical(aoi, 1.526, 4.0, 0.002);
         let iam_sky = iam::diffuse_average(iam_beam, a.tilt.value, true);
         let iam_gnd = if a.tilt.value > 0.0 { iam::diffuse_average(iam_beam, a.tilt.value, false) } else { 0.0 };
-        let shade = near_shading(a, &sun);
+        let shade = match scene_shading(p, a, &sun, w) {
+            Some((sh, fs)) => { module_shading.push(fs); Some(sh) }
+            None => near_shading(a, &sun),
+        };
         let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n] };
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
@@ -151,12 +162,13 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             let comp = irr::Components { ghi, dni, dhi, dni_extra: irr::dni_extra(doy, 1366.1) };
             let poa = irr::poa(model, &geo, &comp, p.site.albedo.value);
             let aoi = irr::aoi_projection(geo.tilt, geo.surface_azimuth, geo.zenith, geo.sun_azimuth).clamp(-1.0, 1.0).acos().to_degrees();
-            let (beam_f, diff_f) = shade.as_ref().map_or((1.0, 1.0), |s| (1.0 - s.beam_shaded[k] as f64, s.diffuse_factor));
+            let (beam_f, beam_geo, diff_f) = shade.as_ref().map_or((1.0, 1.0, 1.0), |s| (1.0 - s.beam_shaded[k] as f64, 1.0 - s.beam_area_shaded[k] as f64, s.diffuse_factor));
             let (dir_s, sky_s) = (poa.direct * beam_f, poa.sky_diffuse * diff_f);
+            let after_geo = poa.direct * beam_geo + sky_s + poa.ground_diffuse;
             let after_shade = dir_s + sky_s + poa.ground_diffuse;
             let after_iam = dir_s * iam_beam(aoi) + sky_s * iam_sky + poa.ground_diffuse * iam_gnd;
             let e_eff = after_iam * f(l.soiling_pct.value);
-            for (s, v) in [ghi, poa.global, after_shade, after_iam, e_eff, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
+            for (s, v) in [ghi, poa.global, after_geo, after_shade, after_iam, e_eff, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
             let tc = temperature::faiman(poa.global, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             e_tot[0] += e_eff / 1000.0 * p_stc;
             if e_eff > 0.0 {
@@ -172,8 +184,12 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             hourly.t_cell_c[k] = tc as f32;
         }
         if let Some(sh) = &shade {
-            warnings.push(Note { code: "NEAR_SHADING".into(), subject: a.name.value.clone(), value: sh.obstacles as f64,
-                text: format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); bypass-diode effects of partial shading within a module are not yet modelled.", a.name.value, sh.obstacles, sh.diffuse_factor) });
+            let text = if sh.scene {
+                format!("{}: near shading from the 3D scene ({} occluding objects; beam traced per module with {} bypass-diode substrings, diffuse sky-view factor {:.3}).", a.name.value, sh.obstacles, sh.diodes, sh.diffuse_factor)
+            } else {
+                format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); bypass-diode effects of partial shading are modelled only for 3D-scene fields.", a.name.value, sh.obstacles, sh.diffuse_factor)
+            };
+            warnings.push(Note { code: if sh.scene { "SCENE_SHADING".into() } else { "NEAR_SHADING".into() }, subject: a.name.value.clone(), value: sh.obstacles as f64, text });
         }
         arr_hours.insert(a.id.clone(), ah);
     }
@@ -306,7 +322,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         manifest: RunManifest { inputs_hash, engine: ENGINE_VERSION.into(), weather_hash: weather_hash.into(), weather_provider: w.provenance.provider.clone(), transposition: format!("{:?}", p.simulation.transposition.value), hours: n, ledger_closure_error_kwh: closure },
         annual: Annual { dc_kwp, ac_kw, ghi_kwh_m2: irradiance_ledger[0].value, poa_kwh_m2: poa, ac_kwh, specific_yield_kwh_kwp: ac_kwh / dc_kwp, performance_ratio: ac_kwh / (poa * dc_kwp) },
         electrical: unit_results, flows: en.flows, balance: en.balance, finance: Some(fin), local_hour,
-        irradiance_ledger, energy_ledger, monthly, hourly, warnings,
+        irradiance_ledger, energy_ledger, monthly, hourly, warnings, module_shading,
     })
 }
 
@@ -322,8 +338,12 @@ pub fn inputs_hash(p: &Project, weather_hash: &str) -> String {
 
 /// Near shading of an array's modules by its roof obstacles.
 pub struct NearShading {
-    /// Shaded fraction of the beam on the modules, per hour.
+    /// Shaded fraction of the beam on the modules, per hour (electrical: with bypass diodes).
     pub beam_shaded: Vec<f32>,
+    /// Geometric shaded fraction (share of module area), per hour.
+    pub beam_area_shaded: Vec<f32>,
+    pub scene: bool,
+    pub diodes: u32,
     /// Fraction of isotropic sky diffuse still reaching the modules.
     pub diffuse_factor: f64,
     pub obstacles: usize,
@@ -337,7 +357,7 @@ pub fn near_shading(a: &solarcraft_model::Array, sun: &[spa::SolarPosition]) -> 
     let roof = a.roof.as_ref()?;
     if roof.face.obstacles.is_empty() || roof.modules.is_empty() { return None; }
     let frame = Frame::new(a.tilt.value, a.azimuth.value, 3.0);
-    let tris: Vec<Triangle> = obstacle_triangles(&roof.face, &frame).into_iter().map(|(t, i)| Triangle { a: t[0], b: t[1], c: t[2], owner: i as u32 + 1 }).collect();
+    let tris: Vec<Triangle> = obstacle_triangles(&roof.face, &frame).into_iter().map(|(t, i)| Triangle::opaque(t[0], t[1], t[2], i as u32 + 1)).collect();
     let bvh = Bvh::from_triangles(&tris);
     let mut samples = vec![];
     for m in &roof.modules {
@@ -347,7 +367,7 @@ pub fn near_shading(a: &solarcraft_model::Array, sun: &[spa::SolarPosition]) -> 
         } }
     }
     let n = frame.n;
-    let beam_shaded = sun.iter().map(|sp| {
+    let beam_shaded: Vec<f32> = sun.iter().map(|sp| {
         if sp.apparent_elevation <= 0.0 { return 0.0; }
         let d = sun_dir(sp.apparent_elevation, sp.azimuth);
         if d[0] * n[0] + d[1] * n[1] + d[2] * n[2] <= 0.0 { return 0.0; }
@@ -370,5 +390,21 @@ pub fn near_shading(a: &solarcraft_model::Array, sun: &[spa::SolarPosition]) -> 
         for &o in &probe { sky += 1; if !bvh.occluded(o, d, 0) { visible += 1; } }
     } }
     let diffuse_factor = if sky > 0 { visible as f64 / sky as f64 } else { 1.0 };
-    Some(NearShading { beam_shaded, diffuse_factor, obstacles: roof.face.obstacles.len() })
+    Some(NearShading { beam_area_shaded: beam_shaded.clone(), beam_shaded, diffuse_factor, obstacles: roof.face.obstacles.len(), scene: false, diodes: 0 })
+}
+
+/// Shading of an array from the 3D scene field bound to it (module samples per
+/// bypass-diode substring, every scene object and module as occluder).
+pub fn scene_shading(p: &Project, a: &solarcraft_model::Array, sun: &[spa::SolarPosition], w: &Weather) -> Option<(NearShading, FieldShade)> {
+    use solarcraft_scene::shade::{shade_field, ShadeOptions};
+    let sc = p.scene.as_ref()?;
+    let f = sc.fields.iter().find(|f| f.array_id.as_deref() == Some(a.id.as_str()) && !f.modules.is_empty())?;
+    let suns: Vec<(f64, f64)> = sun.iter().map(|s| (s.apparent_elevation, s.azimuth)).collect();
+    let weights: Vec<f64> = w.hours.iter().map(|h| h.dni.max(0.0)).collect();
+    let fs = shade_field(sc, &f.id, &suns, &weights, &ShadeOptions::default()).ok()?;
+    let wsum: f64 = weights.iter().sum::<f64>().max(1e-9);
+    let loss = |v: &[f32]| v.iter().zip(&weights).map(|(x, w)| (1.0 - *x as f64) * w).sum::<f64>() / wsum * 100.0;
+    let obstacles = sc.objects.iter().filter(|o| !o.hidden).count();
+    let field = FieldShade { field: f.id.clone(), array_id: a.id.clone(), diffuse_factor: fs.diffuse_factor, beam_loss_pct: loss(&fs.beam_bypass), beam_area_loss_pct: loss(&fs.beam_area), traced_directions: fs.traced_directions, modules: fs.modules.clone() };
+    Some((NearShading { beam_shaded: fs.beam_bypass.iter().map(|x| 1.0 - x).collect(), beam_area_shaded: fs.beam_area.iter().map(|x| 1.0 - x).collect(), diffuse_factor: fs.diffuse_factor, obstacles, scene: true, diodes: f.module.bypass_diodes }, field))
 }

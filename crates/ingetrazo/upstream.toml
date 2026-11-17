@@ -50,3 +50,10 @@ commit = "ffc7187bbaf8222ea5f5f19e33f6c4ed81ad4ad5"
 local = "src/core/triangulate.rs"
 upstream_sha256 = "1d4b83eb9f3b0c7ec8a7ad591f27182991fb54d9d33e5d0ba47f3233bd9c16ef"
 note = "Python → Rust (index arena instead of linked objects)"
+
+[[ported]]
+upstream = "core/orient.py"
+commit = "ffc7187bbaf8222ea5f5f19e33f6c4ed81ad4ad5"
+local = "src/core/orient.rs"
+upstream_sha256 = "2746a8afd4edb4d68d4584de09cf0cd0f549d44e21bb18839f8ca7395d89f094"
+note = "ray_parity_outside, is_closed, signed_volume, _incoherent_edges over indexed faces; crossings via vendored parity.rs"

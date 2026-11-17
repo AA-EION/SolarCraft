@@ -16,6 +16,7 @@ rusqlite.workspace = true
 calamine = "0.38"
 solarcraft-pv = { path = "../pv" }
 solarcraft-model = { path = "../model" }
+solarcraft-scene = { path = "../scene" }
 solarcraft-geometry = { path = "../geometry" }
 solarcraft-store = { path = "../store" }
 solarcraft-weather = { path = "../weather" }

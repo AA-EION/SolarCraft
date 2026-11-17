@@ -17,6 +17,7 @@ use std::path::Path;
 pub mod api;
 pub mod catalog_ops;
 pub mod plant_ops;
+pub mod scene_ops;
 pub mod ui_strings;
 pub mod userlib;
 pub mod workbook_import;

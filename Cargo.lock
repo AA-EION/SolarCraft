@@ -2808,6 +2808,7 @@ dependencies = [
  "solarcraft-model",
  "solarcraft-pv",
  "solarcraft-report",
+ "solarcraft-scene",
  "solarcraft-store",
  "solarcraft-weather",
 ]
@@ -2846,6 +2847,7 @@ dependencies = [
  "solarcraft-geometry",
  "solarcraft-model",
  "solarcraft-pv",
+ "solarcraft-scene",
  "solarcraft-shading",
  "solarcraft-weather",
 ]
@@ -2895,6 +2897,7 @@ dependencies = [
  "serde_json",
  "solarcraft-geometry",
  "solarcraft-pv",
+ "solarcraft-scene",
 ]
 
 [[package]]
@@ -2918,6 +2921,21 @@ dependencies = [
  "typst-assets",
  "typst-layout",
  "typst-pdf",
+]
+
+[[package]]
+name = "solarcraft-scene"
+version = "0.0.1"
+dependencies = [
+ "base64 0.22.1",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "solarcraft-geometry",
+ "solarcraft-ingetrazo",
+ "solarcraft-pv",
+ "solarcraft-shading",
 ]
 
 [[package]]

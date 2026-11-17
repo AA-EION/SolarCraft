@@ -23,6 +23,7 @@
 
 pub mod core {
     //! Rust ports of IngeTrazo `core/*.py`.
+    pub mod orient;
     pub mod triangulate;
 }
 

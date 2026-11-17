@@ -1,0 +1,19 @@
+[package]
+name = "solarcraft-scene"
+description = "SolarCraft canonical 3D scene: buildings, roofs, obstacles, terrain, module fields, strings, shading handoff and CAD/BIM exchange, built on IngeTrazo kernels"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rayon = "1.12.0"
+base64 = "0.22"
+solarcraft-ingetrazo = { path = "../ingetrazo" }
+solarcraft-geometry = { path = "../geometry" }
+solarcraft-shading = { path = "../shading" }
+
+[dev-dependencies]
+solarcraft-pv = { path = "../pv" }

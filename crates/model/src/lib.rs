@@ -188,6 +188,9 @@ pub struct Project {
     pub economics: plant::Economics,
     #[serde(default)]
     pub variants: Vec<plant::Variant>,
+    /// 3D scene: buildings, obstacles, terrain, module fields and strings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<solarcraft_scene::Scene>,
 }
 
 impl Project {
@@ -224,7 +227,7 @@ impl Project {
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None,
-            tariff: Default::default(), economics: Default::default(), variants: vec![],
+            tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None,
         };
         derive::derive(&mut p);
         p

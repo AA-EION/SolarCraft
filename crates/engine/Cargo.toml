@@ -14,6 +14,7 @@ solarcraft-model = { path = "../model" }
 solarcraft-weather = { path = "../weather" }
 solarcraft-geometry = { path = "../geometry" }
 solarcraft-shading = { path = "../shading" }
+solarcraft-scene = { path = "../scene" }
 
 [dev-dependencies]
 serde_json.workspace = true
