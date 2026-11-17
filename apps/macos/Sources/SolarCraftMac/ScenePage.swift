@@ -18,9 +18,21 @@ struct ScenePage: View {
     @State private var hit: JSONDict = [:]
     @State private var dragFrom: (Double, Double)?
     @State private var form = "building"
-    @State private var w = 14.0, d = 9.0, eave = 5.5, roofType = "gable", pitchDeg = 25.0, rot = 0.0, px = 0.0, py = 0.0
-    @State private var crown = 3.0, treeH = 9.0, transparency = 0.25
-    @State private var obsL = 0.8, obsW = 0.8, obsH = 1.5, obsZ = 5.0
+    @State private var w = 14.0
+    @State private var d = 9.0
+    @State private var eave = 5.5
+    @State private var roofType = "gable"
+    @State private var pitchDeg = 25.0
+    @State private var rot = 0.0
+    @State private var px = 0.0
+    @State private var py = 0.0
+    @State private var crown = 3.0
+    @State private var treeH = 9.0
+    @State private var transparency = 0.25
+    @State private var obsL = 0.8
+    @State private var obsW = 0.8
+    @State private var obsH = 1.5
+    @State private var obsZ = 5.0
     @State private var mps = 8
     @State private var exportFormat = "ifc"
     @State private var report = ""
