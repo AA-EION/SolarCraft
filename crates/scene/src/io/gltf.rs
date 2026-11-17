@@ -199,7 +199,7 @@ pub fn import(bytes: &[u8], name: &str, resource: &dyn Fn(&str) -> Option<Vec<u8
             }
             let Some((pos, 3)) = p["attributes"]["POSITION"].as_u64().and_then(|a| accessor(a as usize)) else { fid.lost("primitive without float POSITION"); continue };
             let idx: Vec<usize> = match p["indices"].as_u64() { Some(a) => accessor(a as usize).map(|(v, _)| v.into_iter().map(|x| x as usize).collect()).unwrap_or_default(), None => (0..pos.len() / 3).collect() };
-            for t in idx.chunks_exact(3) {
+            for t in idx.as_chunks::<3>().0 {
                 let v: Vec<V3> = t.iter().map(|&i| from_gl(apply(&m, [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]]))).collect();
                 if mesh::dot(cross(sub(v[1], v[0]), sub(v[2], v[0])), cross(sub(v[1], v[0]), sub(v[2], v[0]))) < 1e-18 { continue; }
                 let _ = norm(v[0]);

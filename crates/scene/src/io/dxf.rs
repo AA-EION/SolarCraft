@@ -152,7 +152,7 @@ pub fn import(bytes: &[u8], name: &str, options: &Value) -> Result<Imported, Str
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() < 2 { return Err("empty DXF".into()); }
     if text.starts_with("AutoCAD Binary DXF") { return Err("binary DXF is not supported; save as ASCII DXF".into()); }
-    let pairs: Vec<(i32, &str)> = lines.chunks_exact(2).map(|c| (c[0].trim().parse().unwrap_or(-1), c[1].trim())).collect();
+    let pairs: Vec<(i32, &str)> = lines.as_chunks::<2>().0.iter().map(|c| (c[0].trim().parse().unwrap_or(-1), c[1].trim())).collect();
     let mut fid = Fidelity::new(Format::Dxf, "import");
     fid.axes = "x, y, z as in the drawing (z up)".into();
     let default_h = options.get("default_height").and_then(Value::as_f64).unwrap_or(3.0);
