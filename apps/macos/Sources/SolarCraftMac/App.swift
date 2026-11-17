@@ -33,13 +33,14 @@ struct SolarCraftApp: App {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case project, site_climate, design, electrical, storage_loads, simulation, economics, plans_reports
+    case project, site_climate, design, scene3d, electrical, storage_loads, simulation, economics, plans_reports
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .project: return "doc.text"
         case .site_climate: return "sun.max"
         case .design: return "house"
+        case .scene3d: return "cube"
         case .electrical: return "bolt"
         case .storage_loads: return "battery.75percent"
         case .simulation: return "chart.bar"
@@ -87,6 +88,7 @@ struct PageView: View {
         case .project: ProjectPage()
         case .site_climate: SiteClimatePage()
         case .design: VStack(alignment: .leading, spacing: 18) { DesignPage(); RoofPage() }
+        case .scene3d: ScenePage()
         case .electrical: ElectricalPage()
         case .storage_loads: StorageLoadsPage()
         case .simulation: SimulationPage()

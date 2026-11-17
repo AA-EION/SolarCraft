@@ -30,7 +30,7 @@ pub struct Camera {
 fn one() -> f64 { 1.0 }
 
 impl Default for Camera {
-    fn default() -> Self { Camera { yaw_deg: 210.0, pitch_deg: 35.0, zoom: 1.0, pan: [0.0, 0.0], width: 960.0, height: 640.0, perspective: false } }
+    fn default() -> Self { Camera { yaw_deg: 25.0, pitch_deg: 35.0, zoom: 1.0, pan: [0.0, 0.0], width: 960.0, height: 640.0, perspective: false } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -98,7 +98,7 @@ impl Proj {
         Proj { r: [right, up, fwd], c, s, cam: cam.clone(), dist: radius * 3.0 }
     }
     /// Screen x, y (pixels, y down) and depth (larger = farther).
-    fn at(&self, p: V3) -> (f64, f64, f64) {
+    pub(crate) fn at(&self, p: V3) -> (f64, f64, f64) {
         let d = sub(p, self.c);
         let (x, y, z) = (dot(d, self.r[0]), dot(d, self.r[1]), dot(d, self.r[2]));
         let k = if self.cam.perspective { self.dist / (self.dist + z).max(self.dist * 0.05) } else { 1.0 };
@@ -189,4 +189,139 @@ pub fn svg(v: &View, title: &str) -> String {
         s += &format!("<rect x=\"10\" y=\"{:.0}\" width=\"12\" height=\"12\" fill=\"rgb({},{},{})\"/><text x=\"28\" y=\"{:.0}\" font-family=\"sans-serif\" font-size=\"11\">{}</text>", y, c[0], c[1], c[2], y + 10.0, esc(label));
     }
     s + "</svg>"
+}
+
+/// A rendered frame: sRGB pixels and, per pixel, the index of the face or
+/// module drawn there (for exact picking).
+#[derive(Debug, Clone)]
+pub struct Raster {
+    pub width: usize,
+    pub height: usize,
+    pub rgb: Vec<u8>,
+    pub ids: Vec<u32>,
+    /// `(id, owner)` for every index in `ids` (0 = background).
+    pub names: Vec<(String, String)>,
+    pub legend: Vec<(String, [u8; 3])>,
+    pub north: [f32; 2],
+}
+
+impl Raster {
+    pub fn pick(&self, x: f64, y: f64) -> Option<(String, String)> {
+        let (x, y) = (x.floor() as isize, y.floor() as isize);
+        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height { return None; }
+        let i = self.ids[y as usize * self.width + x as usize];
+        (i > 0).then(|| self.names[i as usize].clone())
+    }
+    /// PNG (8-bit RGB, zlib-compressed).
+    pub fn png(&self) -> Vec<u8> {
+        fn crc(data: &[u8]) -> u32 {
+            let mut c = 0xffff_ffffu32;
+            for &b in data { c ^= b as u32; for _ in 0..8 { c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 }; } }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, ty: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut c = ty.to_vec(); c.extend_from_slice(data);
+            out.extend_from_slice(&c);
+            out.extend_from_slice(&crc(&c).to_be_bytes());
+        }
+        let mut raw = Vec::with_capacity((self.width * 3 + 1) * self.height);
+        for y in 0..self.height { raw.push(0); raw.extend_from_slice(&self.rgb[y * self.width * 3..(y + 1) * self.width * 3]); }
+        let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 4);
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = vec![];
+        ihdr.extend_from_slice(&(self.width as u32).to_be_bytes());
+        ihdr.extend_from_slice(&(self.height as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+}
+
+/// Z-buffered rendering of the same view as [`render`], supersampled 2× for
+/// smooth edges. Exact visibility (no painter's-order artefacts) and exact picking.
+pub fn raster(scene: &Scene, cam: &Camera, color_by: ColorBy, shading: Option<&HashMap<String, f64>>, selected: Option<&str>) -> Raster {
+    const SS: usize = 2;
+    let v = render(scene, cam, color_by, shading, selected);
+    let (w, h) = (cam.width.max(1.0) as usize, cam.height.max(1.0) as usize);
+    let (sw, sh) = (w * SS, h * SS);
+    // Re-project with depth: `render` already culled and coloured; we need depth per vertex,
+    // so project again with the same camera.
+    let faces: Vec<_> = scene.objects.iter().filter(|o| !o.hidden && scene.layer_visible(&o.layer)).flat_map(mesh::faces).collect();
+    let mut lo = [f64::MAX; 3]; let mut hi = [f64::MIN; 3];
+    let mut grow = |p: &V3| for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); };
+    faces.iter().flat_map(|f| f.outer.iter()).for_each(&mut grow);
+    scene.fields.iter().flat_map(|f| f.modules.iter()).flat_map(|m| m.corners.iter()).for_each(&mut grow);
+    if lo[0] > hi[0] { lo = [-10.0, -10.0, 0.0]; hi = [10.0, 10.0, 5.0]; }
+    let pr = Proj::new(cam, lo, hi);
+    let mut rgb = vec![0u8; sw * sh * 3];
+    for px in rgb.chunks_mut(3) { px.copy_from_slice(&[244, 245, 247]); }
+    let mut zb = vec![f64::INFINITY; sw * sh];
+    let mut ids = vec![0u32; sw * sh];
+    let mut names: Vec<(String, String)> = vec![(String::new(), String::new())];
+    let colors: HashMap<&str, ([u8; 3], f32)> = v.polys.iter().map(|p| (p.id.as_str(), (p.fill, p.alpha))).collect();
+    let mut tri = |a: (f64, f64, f64), b: (f64, f64, f64), c: (f64, f64, f64), col: [u8; 3], alpha: f32, id: u32, bias: f64| {
+        let s = |p: (f64, f64, f64)| (p.0 * SS as f64, p.1 * SS as f64, p.2 - bias);
+        let (a, b, c) = (s(a), s(b), s(c));
+        let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        if area.abs() < 1e-12 { return; }
+        let x0 = a.0.min(b.0).min(c.0).floor().max(0.0) as usize;
+        let x1 = (a.0.max(b.0).max(c.0).ceil() as usize).min(sw.saturating_sub(1));
+        let y0 = a.1.min(b.1).min(c.1).floor().max(0.0) as usize;
+        let y1 = (a.1.max(b.1).max(c.1).ceil() as usize).min(sh.saturating_sub(1));
+        for y in y0..=y1 { for x in x0..=x1 {
+            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+            let w0 = ((b.0 - px) * (c.1 - py) - (b.1 - py) * (c.0 - px)) / area;
+            let w1 = ((c.0 - px) * (a.1 - py) - (c.1 - py) * (a.0 - px)) / area;
+            let w2 = 1.0 - w0 - w1;
+            if w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9 { continue; }
+            let z = w0 * a.2 + w1 * b.2 + w2 * c.2;
+            let i = y * sw + x;
+            if z >= zb[i] { continue; }
+            let k = i * 3;
+            if alpha >= 1.0 { zb[i] = z; ids[i] = id; rgb[k..k + 3].copy_from_slice(&col); }
+            else { ids[i] = id; zb[i] = z; for q in 0..3 { rgb[k + q] = (col[q] as f32 * alpha + rgb[k + q] as f32 * (1.0 - alpha)) as u8; } }
+        } }
+    };
+    for f in &faces {
+        let Some(&(col, alpha)) = colors.get(f.id.as_str()) else { continue };
+        names.push((f.id.clone(), f.object.clone()));
+        let id = (names.len() - 1) as u32;
+        for t in mesh::triangulate(f) { tri(pr.at(t[0]), pr.at(t[1]), pr.at(t[2]), col, alpha, id, 0.0); }
+    }
+    for fl in &scene.fields {
+        for m in &fl.modules {
+            let Some(&(col, _)) = colors.get(m.id.as_str()) else { continue };
+            names.push((m.id.clone(), fl.id.clone()));
+            let id = (names.len() - 1) as u32;
+            let c = m.corners.map(|p| pr.at(p));
+            // Modules sit 10 cm over the roof; a small depth bias keeps them in front at grazing views.
+            tri(c[0], c[1], c[2], col, 1.0, id, 0.02);
+            tri(c[0], c[2], c[3], col, 1.0, id, 0.02);
+        }
+    }
+    // Outlines where the id changes (object and module edges), drawn in the supersampled buffer.
+    let edge = |i: usize, j: usize, ids: &[u32]| ids[i] != ids[j] && (ids[i] != 0 || ids[j] != 0);
+    let mut out = rgb.clone();
+    for y in 0..sh.saturating_sub(1) { for x in 0..sw.saturating_sub(1) {
+        let i = y * sw + x;
+        if edge(i, i + 1, &ids) || edge(i, i + sw, &ids) {
+            let a = ids[i].max(ids[i + 1]);
+            let module = names.get(a as usize).is_some_and(|n| n.0.contains("/m"));
+            let c = if module { [214, 220, 230] } else { [70, 74, 82] };
+            for q in 0..3 { out[i * 3 + q] = ((out[i * 3 + q] as u16 + c[q] as u16 * 3) / 4) as u8; }
+        }
+    } }
+    // Downsample.
+    let mut rgb2 = vec![0u8; w * h * 3];
+    let mut ids2 = vec![0u32; w * h];
+    for y in 0..h { for x in 0..w {
+        let mut acc = [0u32; 3];
+        for dy in 0..SS { for dx in 0..SS { let k = ((y * SS + dy) * sw + x * SS + dx) * 3; for q in 0..3 { acc[q] += out[k + q] as u32; } } }
+        for q in 0..3 { rgb2[(y * w + x) * 3 + q] = (acc[q] / (SS * SS) as u32) as u8; }
+        ids2[y * w + x] = ids[(y * SS + SS / 2) * sw + x * SS + SS / 2];
+    } }
+    Raster { width: w, height: h, rgb: rgb2, ids: ids2, names, legend: v.legend, north: v.north }
 }

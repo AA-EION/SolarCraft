@@ -1,0 +1,16 @@
+[
+  {"op": "add_object", "name": "Casa", "layer": "building",
+   "kind": {"type": "building", "footprint": [[0, 0], [14, 0], [14, 9], [0, 9]], "eave_height": 5.5,
+            "roof": {"type": "gable", "pitch_deg": 25}, "openings": [[[1.0, 0.8], [2.2, 0.8], [2.2, 2.2], [1.0, 2.2]]]}},
+  {"op": "add_object", "name": "Chimenea", "layer": "obstacles",
+   "kind": {"type": "block", "center": [11.5, 2.5], "base_z": 5.0, "length": 0.7, "width": 0.7, "height": 2.6}},
+  {"op": "add_object", "name": "Garaje", "layer": "building",
+   "kind": {"type": "building", "footprint": [[16, -2], [22, -2], [22, 6], [16, 6]], "eave_height": 3.0,
+            "roof": {"type": "shed", "pitch_deg": 10, "facing_deg": 180}}},
+  {"op": "add_object", "name": "Urapán", "layer": "vegetation",
+   "kind": {"type": "tree", "center": [9.0, -8.0], "trunk_height": 3.0, "trunk_radius": 0.3, "crown_radius": 2.8, "crown_height": 6.0, "transparency": 0.25}},
+  {"op": "add_object", "name": "Terreno", "layer": "terrain",
+   "kind": {"type": "terrain", "origin": [-10, -16], "cell": 4.0, "nx": 11, "ny": 9,
+            "heights": [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0]}},
+  {"op": "add_field", "name": "Cubierta sur", "mount": {"type": "roof", "face": "bld-1/roof-0"}}
+]

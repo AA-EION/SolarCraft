@@ -21,6 +21,7 @@
         <NavigationViewItem x:Name="NavSite" Tag="site" Icon="World" />
         <NavigationViewItem x:Name="NavDesign" Tag="design" Icon="ViewAll" />
         <NavigationViewItem x:Name="NavRoof" Tag="roof" Icon="Home" />
+        <NavigationViewItem x:Name="NavScene" Tag="scene" Icon="Globe" />
         <NavigationViewItem x:Name="NavElectrical" Tag="electrical" Icon="Switch" />
         <NavigationViewItem x:Name="NavStorage" Tag="storage" Icon="Shuffle" />
         <NavigationViewItem x:Name="NavResults" Tag="results" Icon="Calculator" />
@@ -53,6 +54,7 @@
             <StackPanel x:Name="GridPanel" Spacing="8" Margin="0,16,0,0" />
           </StackPanel>
 
+          <StackPanel x:Name="ScenePage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="ElectricalPage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="StoragePage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="EconomicsPage" Spacing="10" Visibility="Collapsed" />

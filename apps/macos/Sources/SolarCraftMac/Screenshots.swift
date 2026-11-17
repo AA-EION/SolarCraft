@@ -27,6 +27,13 @@ enum DemoProject {
             "export": ["kind": "fixed", "price": 300.0], "fixed_per_month": 12000.0, "demand_charge_per_kw_month": 0.0, "import_escalation_pct": 4.0, "export_escalation_pct": 2.0] as [String: Any]])
         _ = try Core.invokeRaw("set_section", ["file": file, "section": "economics", "value": ["horizon_years": 20, "discount_rate_pct": 9.0, "cost_fixed": 3_000_000.0, "cost_per_kwp": 3_500_000.0, "cost_per_battery_kwh": 1_800_000.0,
             "om_pct_of_investment": 1.0, "om_escalation_pct": 4.0, "inverter_replacement_year": 13, "inverter_replacement_cost": 4_000_000.0, "battery_replacement_year": 12, "battery_replacement_cost": 0.0, "degradation_pct_per_year": 0.4, "subsidy": 0.0, "loan": NSNull()] as [String: Any]])
+        // 3D scene: house with a roof window, chimney and tree; a field on the south face fitted to array-1.
+        _ = try Core.invokeRaw("scene_edit", ["file": file, "edits": [
+            ["op": "add_object", "name": "Casa", "layer": "building", "kind": ["type": "building", "footprint": [[0.0, 0.0], [16.0, 0.0], [16.0, 10.0], [0.0, 10.0]], "eave_height": 5.5, "roof": ["type": "gable", "pitch_deg": 20.0], "openings": [[[1.0, 0.8], [2.2, 0.8], [2.2, 2.2], [1.0, 2.2]]]] as [String: Any]],
+            ["op": "add_object", "name": "Chimenea", "layer": "obstacles", "kind": ["type": "block", "center": [13.5, 3.0], "base_z": 5.0, "length": 0.7, "width": 0.7, "height": 2.4] as [String: Any]],
+            ["op": "add_object", "name": "Urapán", "layer": "vegetation", "kind": ["type": "tree", "center": [6.0, -9.0], "trunk_height": 3.0, "trunk_radius": 0.3, "crown_radius": 2.8, "crown_height": 6.0, "transparency": 0.25] as [String: Any]],
+            ["op": "add_field", "name": "Cubierta sur", "mount": ["type": "roof", "face": "bld-1/roof-0"]]] as [[String: Any]]])
+        _ = try Core.invokeRaw("scene_bind", ["file": file, "field": "fld-4", "array_id": "array-1", "match_array": true])
         _ = try Core.invokeRaw("simulate", ["file": file])
         _ = try Core.invokeRaw("create_variant", ["file": file, "name": "Reserve 30 %"])
         return file

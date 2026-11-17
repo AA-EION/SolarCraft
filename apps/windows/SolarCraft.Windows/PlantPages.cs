@@ -114,6 +114,7 @@ public sealed partial class MainWindow
         BuildSimulationPanels();
         BuildEconomics();
         BuildPreview();
+        BuildScene();
     }
 
     private void BuildGridPanel()
@@ -557,7 +558,7 @@ public sealed partial class MainWindow
             _compareRows = Arr(Api.Invoke("compare_variants", new { file })?["variants"]);
             _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en" })?["sections"]);
             BuildPlantPages();
-            var items = new[] { NavProject, NavSite, NavDesign, NavRoof, NavElectrical, NavStorage, NavResults, NavEconomics, NavReport };
+            var items = new[] { NavProject, NavSite, NavDesign, NavRoof, NavScene, NavElectrical, NavStorage, NavResults, NavEconomics, NavReport };
             for (int i = 0; i < items.Length; i++)
             {
                 Nav.SelectedItem = items[i];

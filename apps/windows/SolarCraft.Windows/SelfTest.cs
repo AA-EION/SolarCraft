@@ -77,6 +77,13 @@ public static unsafe class SelfTest
             Check(Api.Invoke("compare_variants", new { file = f })!["variants"]!.AsArray().Count == 2, "variant comparison");
             var sections = Api.Invoke("report_preview", new { file = f, lang = "es" })!["sections"]!.AsArray().Count;
             Check(sections >= 4, $"report plant sections ({sections})");
+            var mods = Api.Invoke("scene_shading", new { file = f })!["fields"]![0]!["modules"]!.AsArray().Count;
+            Check(mods == 15, $"3D scene: per-module shading of the bound field ({mods} modules)");
+            var img = Api.Invoke("scene_image", new { file = f, camera = new { yaw_deg = 25.0, pitch_deg = 35.0, width = 400.0, height = 300.0 } })!["png_base64"]!.GetValue<string>();
+            Check(img.StartsWith("iVBORw0KGgo"), "3D viewport frame (PNG)");
+            var ifc = Path.Combine(dir, "scene.ifc");
+            var ex = Api.Invoke("scene_export", new { file = f, output = ifc })!;
+            Check(File.Exists(ifc) && ex["fidelity"]!["solarcraft_metadata"]!.GetValue<bool>(), "IFC export with SolarCraft metadata");
         }
         catch (Exception ex) { Check(false, "plant workflow: " + ex.Message); }
         finally { try { Directory.Delete(dir, true); } catch { } }
@@ -103,6 +110,12 @@ public static unsafe class SelfTest
         Call("set_section", "{\"section\":\"storage\",\"value\":{\"battery_id\":\"" + ids[1] + "\",\"units\":1,\"coupling\":{\"kind\":\"dc_hybrid\",\"unit_id\":\"" + unit + "\"},\"model\":\"detailed\",\"soc_min_pct\":5,\"soc_max_pct\":100,\"initial_soc_pct\":50,\"backup_reserve_pct\":30,\"grid_services_pct\":0,\"charge_priority\":[\"backup\",\"self_consumption\",\"grid_services\"],\"grid_charge_backup\":false,\"grid_service\":{\"kind\":\"none\"},\"outages\":[{\"start_hour\":4107,\"hours\":5}]}}");
         Call("set_section", "{\"section\":\"tariff\",\"value\":{\"name\":\"TOU\",\"currency\":\"COP\",\"import_price\":800,\"tou\":[{\"name\":\"Peak\",\"price\":1100,\"start_hour\":18,\"end_hour\":22,\"weekdays\":true,\"weekends\":true,\"months\":[]}],\"export\":{\"kind\":\"fixed\",\"price\":300},\"fixed_per_month\":12000,\"demand_charge_per_kw_month\":0,\"import_escalation_pct\":4,\"export_escalation_pct\":2}}");
         Call("set_section", "{\"section\":\"economics\",\"value\":{\"horizon_years\":20,\"discount_rate_pct\":9,\"cost_fixed\":3000000,\"cost_per_kwp\":3500000,\"cost_per_battery_kwh\":1800000,\"om_pct_of_investment\":1,\"om_escalation_pct\":4,\"inverter_replacement_year\":13,\"inverter_replacement_cost\":4000000,\"battery_replacement_year\":12,\"battery_replacement_cost\":0,\"degradation_pct_per_year\":0.4,\"subsidy\":0,\"loan\":null}}");
+        // 3D scene: house with a roof window, chimney and tree; a field on the south face fitted to array-1.
+        Call("scene_edit", "{\"edits\":[{\"op\":\"add_object\",\"name\":\"Casa\",\"layer\":\"building\",\"kind\":{\"type\":\"building\",\"footprint\":[[0,0],[16,0],[16,10],[0,10]],\"eave_height\":5.5,\"roof\":{\"type\":\"gable\",\"pitch_deg\":20},\"openings\":[[[1,0.8],[2.2,0.8],[2.2,2.2],[1,2.2]]]}},"
+            + "{\"op\":\"add_object\",\"name\":\"Chimenea\",\"layer\":\"obstacles\",\"kind\":{\"type\":\"block\",\"center\":[13.5,3],\"base_z\":5,\"length\":0.7,\"width\":0.7,\"height\":2.4}},"
+            + "{\"op\":\"add_object\",\"name\":\"Urapán\",\"layer\":\"vegetation\",\"kind\":{\"type\":\"tree\",\"center\":[6,-9],\"trunk_height\":3,\"trunk_radius\":0.3,\"crown_radius\":2.8,\"crown_height\":6,\"transparency\":0.25}},"
+            + "{\"op\":\"add_field\",\"name\":\"Cubierta sur\",\"mount\":{\"type\":\"roof\",\"face\":\"bld-1/roof-0\"}}]}");
+        Call("scene_bind", "{\"field\":\"fld-4\",\"array_id\":\"array-1\",\"match_array\":true}");
         Call("simulate", "{}");
         Call("create_variant", "{\"name\":\"Reserve 30 %\"}");
         return file;

@@ -50,7 +50,12 @@ pub fn edit(path: &Path, edits: &Value, preview: bool) -> Result<Value> {
 /// Bind a field to an array: the field takes the array's module size (when
 /// not yet placed), and the array takes the field's orientation and, once
 /// strings are routed, its string layout.
-pub fn bind(path: &Path, field: &str, array_id: &str) -> Result<Value> {
+///
+/// With `match_array`, the field is first fitted to the array's current
+/// design: modules are (re)placed with the array's module size, the last
+/// ones beyond modules-per-string × strings are removed, and strings are
+/// routed with the array's modules per string.
+pub fn bind(path: &Path, field: &str, array_id: &str, match_array: bool) -> Result<Value> {
     let (mut st, mut p) = open(path)?;
     let mut s = scene_of(&p);
     let ai = p.arrays.iter().position(|a| a.id == array_id).ok_or_else(|| e("NOT_FOUND", format!("no array {array_id}")))?;
@@ -58,7 +63,21 @@ pub fn bind(path: &Path, field: &str, array_id: &str) -> Result<Value> {
     if let Some(m) = p.library.module(&p.arrays[ai].module_id.value) {
         let f = &mut s.fields[fi];
         let (l, w) = (m.length_m.max(m.width_m), m.length_m.min(m.width_m));
-        if f.modules.is_empty() { f.module.length = l; f.module.width = w; }
+        if f.modules.is_empty() || (match_array && ((f.module.length - l).abs() > 1e-6 || (f.module.width - w).abs() > 1e-6)) { f.module.length = l; f.module.width = w; f.modules.clear(); f.strings.clear(); }
+    }
+    if match_array {
+        let (mps, n) = (p.arrays[ai].modules_per_string.value.max(1), p.arrays[ai].strings.value.max(1));
+        let mut edits = vec![];
+        if s.fields[fi].modules.is_empty() { edits.push(Edit::PlaceModules { field: field.into() }); }
+        let (s1, _) = apply(&s, &edits).map_err(|x| e("SCENE_EDIT", x))?;
+        let have = s1.fields[fi].modules.len();
+        let need = (mps * n) as usize;
+        if have < need { return Err(e("SCENE_FIT", format!("{field} holds {have} modules; array {array_id} needs {need} ({mps} × {n}). Reduce the strings or use a larger roof face."))); }
+        let extra: Vec<String> = s1.fields[fi].modules[need..].iter().map(|m| m.id.clone()).collect();
+        let mut more = vec![];
+        if !extra.is_empty() { more.push(Edit::RemoveModules { field: field.into(), modules: extra }); }
+        more.push(Edit::RouteStrings { field: field.into(), modules_per_string: mps, inverter_at: s1.fields[fi].inverter_at });
+        s = apply(&s1, &more).map_err(|x| e("SCENE_EDIT", x))?.0;
     }
     for other in s.fields.iter_mut() { if other.array_id.as_deref() == Some(array_id) && other.id != field { other.array_id = None; } }
     s.fields[fi].array_id = Some(array_id.into());
@@ -98,12 +117,22 @@ pub fn render(path: &Path, params: &Value) -> Result<view::View> {
     Ok(view::render(&scene_of(&p), &camera(params)?, color_by(params), Some(&map), params.get("selected").and_then(Value::as_str)))
 }
 
+/// Z-buffered frame for the viewport, as a PNG (base64) with legend and north arrow.
+pub fn image(path: &Path, params: &Value) -> Result<Value> {
+    use base64::Engine;
+    let (_, p) = open(path)?;
+    let map = shading_map(path)?;
+    let r = view::raster(&scene_of(&p), &camera(params)?, color_by(params), Some(&map), params.get("selected").and_then(Value::as_str));
+    Ok(json!({"width": r.width, "height": r.height, "png_base64": base64::engine::general_purpose::STANDARD.encode(r.png()), "legend": r.legend, "north": r.north}))
+}
+
+/// The face, module, object or field under a viewport pixel (exact: from the frame's id buffer).
 pub fn pick(path: &Path, params: &Value) -> Result<Value> {
-    let v = render(path, params)?;
-    let (x, y) = (params.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32, params.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32);
+    let (x, y) = (params.get("x").and_then(Value::as_f64).unwrap_or(0.0), params.get("y").and_then(Value::as_f64).unwrap_or(0.0));
     let (_, p) = open(path)?;
     let s = scene_of(&p);
-    Ok(match view::pick(&v, x, y) {
+    let r = view::raster(&s, &camera(params)?, ColorBy::Material, None, None);
+    Ok(match r.pick(x, y) {
         None => json!({"hit": null}),
         Some((id, owner)) => {
             let object = s.object(&owner).map(|o| serde_json::to_value(o).unwrap_or_default());

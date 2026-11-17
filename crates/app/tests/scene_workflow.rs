@@ -96,7 +96,10 @@ fn scene_workflow() {
     let pts = module["points"].as_array().unwrap();
     let (cx, cy) = pts.iter().fold((0.0, 0.0), |a, q| (a.0 + q[0].as_f64().unwrap() / 4.0, a.1 + q[1].as_f64().unwrap() / 4.0));
     let hit = ok("scene_pick", json!({"file": fs, "camera": cam, "x": cx, "y": cy}));
-    assert_eq!(hit["hit"], module["id"]);
+    assert_eq!(hit["hit"], module["id"], "z-buffer pick at the module centre");
+    let img = ok("scene_image", json!({"file": fs, "camera": cam, "color_by": "shading"}));
+    assert_eq!((img["width"].as_u64(), img["height"].as_u64()), (Some(800), Some(600)));
+    assert!(img["png_base64"].as_str().unwrap().starts_with("iVBORw0KGgo"), "PNG signature");
     assert_eq!(hit["field"]["array_id"], json!("array-1"));
     let svg = ok("scene_svg", json!({"file": fs, "camera": cam, "color_by": "string", "output": dir.join("view.svg").to_str().unwrap()}));
     assert!(svg["bytes"].as_u64().unwrap() > 1000);

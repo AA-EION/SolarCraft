@@ -44,7 +44,7 @@ public sealed partial class MainWindow : Window
         NewButton.Label = T("new_project"); OpenButton.Label = T("open_project"); UndoButton.Label = T("undo");
         SimulateButton.Label = T("simulate"); CancelButton.Label = T("cancel");
         NavProject.Content = T("project"); NavSite.Content = T("site_weather"); NavDesign.Content = T("design"); NavRoof.Content = T("roof"); NavResults.Content = T("simulation"); NavReport.Content = T("plans_reports");
-        NavSite.Content = T("site_climate"); NavElectrical.Content = T("electrical"); NavStorage.Content = T("storage_loads"); NavEconomics.Content = T("economics");
+        NavSite.Content = T("site_climate"); NavElectrical.Content = T("electrical"); NavScene.Content = T("scene3d"); NavStorage.Content = T("storage_loads"); NavEconomics.Content = T("economics");
         EmptyText.Text = T("no_project");
         NameBox.Header = T("name"); CustomerBox.Header = T("customer"); AddressBox.Header = T("address");
         LatBox.Header = T("latitude"); LonBox.Header = T("longitude"); ElevBox.Header = T("elevation"); AlbedoBox.Header = T("albedo");
@@ -348,6 +348,7 @@ public sealed partial class MainWindow : Window
         RoofPage.Visibility = tag == "roof" ? Visibility.Visible : Visibility.Collapsed;
         ResultsPage.Visibility = tag == "results" ? Visibility.Visible : Visibility.Collapsed;
         ElectricalPage.Visibility = tag == "electrical" ? Visibility.Visible : Visibility.Collapsed;
+        ScenePage.Visibility = tag == "scene" ? Visibility.Visible : Visibility.Collapsed;
         StoragePage.Visibility = tag == "storage" ? Visibility.Visible : Visibility.Collapsed;
         EconomicsPage.Visibility = tag == "economics" ? Visibility.Visible : Visibility.Collapsed;
         ReportPage.Visibility = tag == "report" ? Visibility.Visible : Visibility.Collapsed;

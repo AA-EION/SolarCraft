@@ -65,6 +65,13 @@ enum SelfTest {
             check(cmp.count == 2, "variant comparison")
             let prev = try Core.invokeJSON("report_preview", ["file": f, "lang": "es"])["sections"] as? [JSONDict] ?? []
             check(prev.count >= 4, "report plant sections (\(prev.count))")
+            let shade = (try Core.invokeJSON("scene_shading", ["file": f])["fields"] as? [JSONDict])?.first ?? [:]
+            check(dicts(shade["modules"]).count == 15, "3D scene: per-module shading of the bound field (\(dicts(shade["modules"]).count) modules)")
+            let img = try Core.invokeJSON("scene_image", ["file": f, "camera": ["yaw_deg": 25.0, "pitch_deg": 35.0, "width": 400.0, "height": 300.0]])
+            check((img["png_base64"] as? String)?.hasPrefix("iVBORw0KGgo") == true, "3D viewport frame (PNG)")
+            let ifc = dir.appendingPathComponent("scene.ifc").path
+            let ex = try Core.invokeJSON("scene_export", ["file": f, "output": ifc])
+            check(FileManager.default.fileExists(atPath: ifc) && ((ex["fidelity"] as? JSONDict)?["solarcraft_metadata"] as? Bool) == true, "IFC export with SolarCraft metadata")
             let bad = try Core.invokeJSON("set_section", ["file": f, "section": "storage", "value": ["battery_id": "x", "units": 1, "coupling": ["kind": "dc_hybrid", "unit_id": "nope"], "model": "simple", "soc_min_pct": 5.0, "soc_max_pct": 100.0, "initial_soc_pct": 50.0,
                 "backup_reserve_pct": 70.0, "grid_services_pct": 40.0, "charge_priority": ["backup", "self_consumption", "grid_services"], "grid_charge_backup": false, "grid_service": ["kind": "none"], "outages": [Any]()] as [String: Any]])
             let codes = (bad["issues"] as? [JSONDict] ?? []).compactMap { $0["code"] as? String }

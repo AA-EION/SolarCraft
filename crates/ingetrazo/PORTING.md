@@ -30,3 +30,19 @@ cargo test -p solarcraft-ingetrazo -p solarcraft-geometry
 - **Port Python modules function by function, keeping upstream names.** Record the upstream path in the file header.
 - **Keep attribution.** Each file keeps its upstream copyright line, and `NOTICE` names IngeTrazo.
 - **Add new kernels in two places.** Declare each new kernel module in `src/lib.rs` under its upstream name, so its `crate::` paths resolve unchanged. Add it to `upstream.toml` as a `[[vendored]]` entry; the sync tool lists unmapped kernels.
+
+## Where SolarCraft uses the code
+
+`crates/scene` builds the 3D scene on these kernels; `docs/scene.md` has the details.
+
+| Upstream | In SolarCraft | Used by |
+|---|---|---|
+| `facegeom.rs` (`face_geometry`) | vendored | triangulating every scene face with holes |
+| `weld.rs` | vendored | welding solid vertices before closure checks |
+| `parity.rs` (`Tris::crossings`) | vendored | point-in-solid and orientation votes |
+| `hlr.rs` (`Occluders::visible_spans_all`) | vendored | hidden-line roof plan in the DXF export |
+| `core/orient.py` | ported to `src/core/orient.rs` | closure, coherent winding, signed volume, `ray_parity_outside` |
+| `core/triangulate.py` | ported to `src/core/triangulate.rs` | roof-plane keep-outs (`crates/geometry`) |
+| `formats/igz.py` (format 1 JSON) | read and written by `crates/scene/src/io/igz.rs` | the `.igz` bridge; checked against IngeTrazo's own reader with `tools/validate_exchange.py --ingetrazo` |
+
+`gltape.rs`, `instances.rs`, `boxes.rs` and `occlusion.rs` are vendored and compiled but not called yet.

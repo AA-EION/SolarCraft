@@ -2797,6 +2797,7 @@ dependencies = [
 name = "solarcraft-app"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "rusqlite",
  "schemars",
@@ -2880,6 +2881,7 @@ dependencies = [
 name = "solarcraft-mcp"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "rmcp",
  "schemars",
  "serde",
@@ -2928,6 +2930,7 @@ name = "solarcraft-scene"
 version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
+ "miniz_oxide 0.8.9",
  "rayon",
  "serde",
  "serde_json",

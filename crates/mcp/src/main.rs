@@ -234,6 +234,75 @@ struct ResultsArgs {
     page: usize,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct SceneEditArgs {
+    file: String,
+    /// One transaction (all or nothing; one undo step). Each edit is an object with "op":
+    /// add_object {name, layer?, id?, kind: {type: building|block|cylinder|tree|terrain|mesh, ...}, properties?},
+    /// update_object {id, name?, layer?, kind?, hidden?, properties?}, move {id, dx, dy, dz?}, remove_object {id},
+    /// set_georef {georef: {latitude, longitude, elevation, true_north_deg}}, set_layer {name, visible?, locked?},
+    /// add_field {name, array_id?, mount: {type: roof, face: "bld-1/roof-0"} | {type: ground, origin, azimuth_deg, tilt_deg, rows, tables_per_row, modules_across, modules_up, row_pitch, terrain?}, module?, layout?},
+    /// update_field, remove_field {id}, place_modules {field}, remove_modules {field, modules}, route_strings {field, modules_per_string, inverter_at?}.
+    /// Building kinds: {type: building, footprint: [[x,y],...] metres (x east, y north), eave_height, base_z?, roof: {type: flat | shed{pitch_deg, facing_deg} | gable{pitch_deg} | hip{pitch_deg}}, openings?: [[[x,y],...]]}.
+    /// Tree: {type: tree, center, trunk_height, trunk_radius, crown_radius, crown_height, transparency (0–1)}.
+    edits: Vec<Value>,
+    /// Return the resulting scene and issues without saving.
+    #[serde(default)]
+    preview: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SceneBindArgs {
+    file: String,
+    /// Module field id (fld-…).
+    field: String,
+    /// Electrical array id (array-1, …): takes the field's tilt/azimuth and routed strings.
+    array_id: String,
+    /// Fit the field to the array first: place modules with the array's module size, keep
+    /// modules-per-string × strings of them and route the strings.
+    #[serde(default)]
+    match_array: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SceneRenderArgs {
+    file: String,
+    /// Output file in the workspace ending in .png or .svg.
+    output: String,
+    /// material | string | shading (per-module beam loss of the last run).
+    #[serde(default)]
+    color_by: Option<String>,
+    /// Orbit angles in degrees (default yaw 25 = looking north-north-east, pitch 35).
+    #[serde(default)]
+    yaw_deg: Option<f64>,
+    #[serde(default)]
+    pitch_deg: Option<f64>,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SceneExportArgs {
+    file: String,
+    /// Output file in the workspace: .glb, .gltf, .obj, .dxf, .ifc, .igz (IngeTrazo) or .json.
+    output: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SceneImportArgs {
+    file: String,
+    /// Source file in the workspace (.glb, .gltf, .obj, .dxf, .ifc, .igz, .json).
+    source: String,
+    /// relink (bool): update objects imported earlier from the same file; geometry_only (bool, .igz);
+    /// up ("y"|"z", OBJ); unit_scale (number); default_height (DXF footprints, m).
+    #[serde(default)]
+    options: Option<Value>,
+    #[serde(default)]
+    preview: bool,
+}
+
 fn ok(v: Value) -> Result<CallToolResult, ErrorData> { Ok(CallToolResult::structured(v)) }
 fn app_err(e: app::AppError) -> Result<CallToolResult, ErrorData> { Ok(CallToolResult::structured_error(json!({"code": e.code, "message": e.message}))) }
 fn to_value<T: serde::Serialize>(v: &T) -> Value { serde_json::to_value(v).unwrap_or(Value::Null) }
@@ -489,6 +558,62 @@ impl SolarCraftMcp {
     async fn catalog_apply_tariff(&self, Parameters(a): Parameters<CatalogTariffArgs>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;
         self.api("catalog_apply_tariff", json!({"catalog": self.catalog(), "file": f, "import": a.import, "export": a.export}))
+    }
+
+    #[tool(description = "Get the 3D scene: objects (buildings, blocks, cylinders, trees, terrain, imported meshes), roof faces with tilt/azimuth/area, module fields with modules and strings, counts and geometry issues. Coordinates: metres, x east, y north, z up.")]
+    async fn scene_get(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("scene_get", json!({"file": f}))
+    }
+
+    #[tool(description = "Edit the 3D scene in one transaction (all edits or none; one undo step). Stable ids: bld-N, blk-N, cyl-N, tree-N, ter-N, mesh-N, fld-N; faces bld-N/roof-K; modules fld-N/mNNNN; strings fld-N/sK. Use preview=true to check first. Returns the scene, touched ids and issues.")]
+    async fn scene_edit(&self, Parameters(a): Parameters<SceneEditArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("scene_edit", json!({"file": f, "edits": a.edits, "preview": a.preview}))
+    }
+
+    #[tool(description = "Bind a module field to an electrical array: the field takes the array module's size (if not yet placed); the array takes the field's tilt, azimuth and, once routed, its modules per string and string count. The simulation then shades that array per module from the scene.")]
+    async fn scene_bind(&self, Parameters(a): Parameters<SceneBindArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("scene_bind", json!({"file": f, "field": a.field, "array_id": a.array_id, "match_array": a.match_array}))
+    }
+
+    #[tool(description = "Per-module shading of the latest run: beam loss with bypass diodes and geometric, sky view factor, string, per field.")]
+    async fn scene_shading(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        self.api("scene_shading", json!({"file": f}))
+    }
+
+    #[tool(description = "Render the 3D scene to a PNG (z-buffered) or SVG file in the workspace, coloured by material, string or shading loss. Side effect: creates a file.")]
+    async fn scene_render(&self, Parameters(a): Parameters<SceneRenderArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let out = self.path(&a.output, false, false)?;
+        if out.exists() && !a.overwrite { return Err(ErrorData::invalid_params("output exists; pass overwrite=true".to_string(), None)); }
+        let cam = json!({"yaw_deg": a.yaw_deg.unwrap_or(25.0), "pitch_deg": a.pitch_deg.unwrap_or(35.0), "width": 1200, "height": 800});
+        let params = json!({"file": f, "camera": cam, "color_by": a.color_by.unwrap_or_else(|| "material".into())});
+        let png = out.extension().and_then(|e| e.to_str()) == Some("png");
+        if !png && out.extension().and_then(|e| e.to_str()) != Some("svg") { return Err(ErrorData::invalid_params("output must end in .png or .svg".to_string(), None)); }
+        let r = if png { app::scene_ops::image(&f, &params).and_then(|v| {
+            use base64::Engine;
+            let b = base64::engine::general_purpose::STANDARD.decode(v["png_base64"].as_str().unwrap_or("")).unwrap_or_default();
+            std::fs::write(&out, &b).map(|_| json!({"file": a.output, "bytes": b.len()})).map_err(|e| app::AppError { code: "EXPORT", message: e.to_string() })
+        }) } else { app::scene_ops::svg(&f, &params).and_then(|s| std::fs::write(&out, &s).map(|_| json!({"file": a.output, "bytes": s.len()})).map_err(|e| app::AppError { code: "EXPORT", message: e.to_string() })) };
+        match r { Ok(v) => ok(v), Err(e) => app_err(e) }
+    }
+
+    #[tool(description = "Export the 3D scene to CAD/BIM/mesh: glTF/GLB, OBJ, DXF (3D faces + hidden-line roof plan + strings), IFC4 (IfcRoof/IfcWall/IfcSolarDevice with Pset_SolarCraft), IngeTrazo .igz, or scene JSON. Returns a fidelity report (units, axes, georeference, coordinate error, what the format cannot carry). Side effect: creates a file.")]
+    async fn scene_export(&self, Parameters(a): Parameters<SceneExportArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let out = self.path(&a.output, false, false)?;
+        if out.exists() && !a.overwrite { return Err(ErrorData::invalid_params("output exists; pass overwrite=true".to_string(), None)); }
+        self.api("scene_export", json!({"file": f, "output": out}))
+    }
+
+    #[tool(description = "Import a CAD/BIM/mesh file from the workspace into the 3D scene as one undoable transaction (preview=true to inspect first). SolarCraft exports come back exactly; other files become mesh objects that shade and carry their source identity. relink=true updates objects previously imported from the same file and keeps SolarCraft edits. SketchUp, Revit and DWG are reported with the export path to use instead.")]
+    async fn scene_import(&self, Parameters(a): Parameters<SceneImportArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let src = self.path(&a.source, false, true)?;
+        self.api("scene_import", json!({"file": f, "source": src, "options": a.options.unwrap_or(json!({})), "preview": a.preview}))
     }
 
     #[tool(description = "Undo the last saved change to the project.")]

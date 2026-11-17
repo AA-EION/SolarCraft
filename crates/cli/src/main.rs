@@ -2,7 +2,7 @@
 //! `solarcraft` command-line interface: a thin layer over solarcraft-app.
 //! Exit codes: 0 success, 1 error, 2 project has validation errors.
 use clap::{Parser, Subcommand, ValueEnum};
-use serde_json::Value;
+use serde_json::{json, Value};
 use solarcraft_app as app;
 use solarcraft_model::validate::Severity;
 use std::path::PathBuf;
@@ -71,6 +71,8 @@ enum Cmd {
     Variant { file: PathBuf, name: String },
     /// Simulate the current design and all variants side by side.
     Compare { file: PathBuf },
+    /// 3D scene: show, edit (JSON transaction), bind a field to an array, view (SVG), shading, export, import.
+    Scene { #[command(subcommand)] cmd: SceneCmd },
     /// Call any API method with JSON parameters (the same contract as the shells and MCP).
     Call { method: String, #[arg(default_value = "{}")] params: String },
 }
@@ -219,6 +221,7 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
                 }
             });
         }
+        Cmd::Scene { cmd } => scene(j, cmd)?,
         Cmd::Call { method, params } => {
             let p: Value = serde_json::from_str(&params).map_err(|x| app::AppError { code: "INVALID_ARGUMENT", message: format!("params: {x}") })?;
             let r = api(&method, p)?;
@@ -226,6 +229,74 @@ fn run(cli: Cli) -> Result<ExitCode, app::AppError> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Subcommand)]
+enum SceneCmd {
+    /// Objects, faces, fields, modules, strings and geometry issues.
+    Show { file: PathBuf },
+    /// Apply a list of edits (JSON file or inline JSON) as one undoable transaction.
+    Edit { file: PathBuf, edits: String, #[arg(long)] preview: bool },
+    /// Bind a module field to an electrical array (copies orientation and strings).
+    Bind { file: PathBuf, field: String, array: String, #[arg(long)] match_array: bool },
+    /// Render the scene to SVG (--color-by material|string|shading).
+    View { file: PathBuf, #[arg(short, long)] out: PathBuf, #[arg(long, default_value = "material")] color_by: String, #[arg(long, default_value_t = 25.0)] yaw: f64, #[arg(long, default_value_t = 35.0)] pitch: f64 },
+    /// Per-module shading of the latest run.
+    Shading { file: PathBuf },
+    /// Export: glb, gltf, obj, dxf, ifc, igz or json (from the extension or --format).
+    Export { file: PathBuf, out: PathBuf, #[arg(long)] format: Option<String> },
+    /// Import a CAD/BIM/mesh file (--relink updates objects from the same file).
+    Import { file: PathBuf, source: PathBuf, #[arg(long)] relink: bool, #[arg(long)] preview: bool, #[arg(long, default_value = "{}")] options: String },
+}
+
+fn scene(j: bool, cmd: SceneCmd) -> Result<(), app::AppError> {
+    let bad = |x: serde_json::Error| app::AppError { code: "INVALID_ARGUMENT", message: x.to_string() };
+    let f = |p: &PathBuf| p.to_string_lossy().to_string();
+    let show = |r: &Value| {
+        let c = &r["counts"];
+        println!("{} objects, {} faces, {} fields, {} modules, {} strings", c["objects"], c["faces"], c["fields"], c["modules"], c["strings"]);
+        for o in r["scene"]["objects"].as_array().into_iter().flatten() { println!("  {:<10} {:<12} {:<10} {}", o["id"].as_str().unwrap_or(""), o["kind"]["type"].as_str().unwrap_or(""), o["layer"].as_str().unwrap_or(""), o["name"].as_str().unwrap_or("")); }
+        for rf in r["roof_faces"].as_array().into_iter().flatten() { println!("  roof face {:<16} tilt {:>5.1}° azimuth {:>5.1}° area {:>6.1} m²", rf["id"].as_str().unwrap_or(""), rf["tilt_deg"].as_f64().unwrap_or(0.0), rf["azimuth_deg"].as_f64().unwrap_or(0.0), rf["area_m2"].as_f64().unwrap_or(0.0)); }
+        for fl in r["scene"]["fields"].as_array().into_iter().flatten() { println!("  field {:<8} {:<20} array {:<10} {} modules, {} strings", fl["id"].as_str().unwrap_or(""), fl["name"].as_str().unwrap_or(""), fl["array_id"].as_str().unwrap_or("-"), fl["modules"].as_array().map_or(0, |m| m.len()), fl["strings"].as_array().map_or(0, |m| m.len())); }
+        issues(&r["issues"]);
+    };
+    let fidelity = |r: &Value| {
+        let fi = &r["fidelity"];
+        println!("{} {}: {} objects, {} fields, {} modules, {} triangles; axes: {}; georeference: {}; max coordinate error {:.2e} m",
+            fi["format"].as_str().unwrap_or(""), fi["direction"].as_str().unwrap_or(""), fi["objects"], fi["fields"], fi["modules"], fi["triangles"], fi["axes"].as_str().unwrap_or(""), fi["georeference"].as_str().unwrap_or(""), fi["max_coordinate_error_m"].as_f64().unwrap_or(0.0));
+        for c in fi["conversions"].as_array().into_iter().flatten() { println!("  converted: {}", c.as_str().unwrap_or("")); }
+        for c in fi["unsupported"].as_array().into_iter().flatten() { println!("  not carried: {}", c.as_str().unwrap_or("")); }
+        for c in r["notes"].as_array().into_iter().flatten() { println!("  note: {}", c.as_str().unwrap_or("")); }
+    };
+    let out = match cmd {
+        SceneCmd::Show { file } => api("scene_get", json!({"file": f(&file)}))?,
+        SceneCmd::Edit { file, edits, preview } => {
+            let text = std::fs::read_to_string(&edits).unwrap_or(edits);
+            api("scene_edit", json!({"file": f(&file), "edits": serde_json::from_str::<Value>(&text).map_err(bad)?, "preview": preview}))?
+        }
+        SceneCmd::Bind { file, field, array, match_array } => { let r = api("scene_bind", json!({"file": f(&file), "field": field, "array_id": array, "match_array": match_array}))?; print(j, &r, || println!("{}", serde_json::to_string_pretty(&r).unwrap())); return Ok(()); }
+        SceneCmd::View { file, out, color_by, yaw, pitch } => { let r = api("scene_svg", json!({"file": f(&file), "output": f(&out), "color_by": color_by, "camera": {"yaw_deg": yaw, "pitch_deg": pitch, "width": 1200, "height": 800}}))?; print(j, &r, || println!("wrote {} ({} bytes)", out.display(), r["bytes"])); return Ok(()); }
+        SceneCmd::Shading { file } => {
+            let r = api("scene_shading", json!({"file": f(&file)}))?;
+            print(j, &r, || for fl in r["fields"].as_array().into_iter().flatten() {
+                println!("field {} (array {}): beam loss {:.2} % with bypass diodes ({:.2} % geometric), sky view {:.3}, {} sun directions traced", fl["field"].as_str().unwrap_or(""), fl["array_id"].as_str().unwrap_or(""), fl["beam_loss_pct"].as_f64().unwrap_or(0.0), fl["beam_area_loss_pct"].as_f64().unwrap_or(0.0), fl["diffuse_factor"].as_f64().unwrap_or(0.0), fl["traced_directions"]);
+                let mut m: Vec<&Value> = fl["modules"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
+                m.sort_by(|a, b| b["beam_loss_pct"].as_f64().unwrap_or(0.0).total_cmp(&a["beam_loss_pct"].as_f64().unwrap_or(0.0)));
+                for x in m.iter().take(10) { println!("  {:<14} string {:<4} beam loss {:>6.2} %  geometric {:>6.2} %  sky view {:.3}", x["id"].as_str().unwrap_or(""), x["string"].as_u64().map_or("-".into(), |s| s.to_string()), x["beam_loss_pct"].as_f64().unwrap_or(0.0), x["beam_area_loss_pct"].as_f64().unwrap_or(0.0), x["sky_view"].as_f64().unwrap_or(0.0)); }
+            });
+            return Ok(());
+        }
+        SceneCmd::Export { file, out, format } => { let r = api("scene_export", json!({"file": f(&file), "output": f(&out), "format": format}))?; print(j, &r, || { println!("wrote {} ({} bytes)", out.display(), r["bytes"]); fidelity(&r); }); return Ok(()); }
+        SceneCmd::Import { file, source, relink, preview, options } => {
+            let mut o: Value = serde_json::from_str(&options).map_err(bad)?;
+            o["relink"] = Value::from(relink);
+            let r = api("scene_import", json!({"file": f(&file), "source": f(&source), "options": o, "preview": preview}))?;
+            print(j, &r, || { fidelity(&r); show(&r); });
+            return Ok(());
+        }
+    };
+    print(j, &out, || show(&out));
+    Ok(())
 }
 
 fn api(method: &str, params: Value) -> Result<Value, app::AppError> { app::api::dispatch(method, &params, &mut |_| true) }

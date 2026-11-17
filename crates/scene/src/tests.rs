@@ -279,3 +279,24 @@ fn utility_scale_place_and_shade() {
         s.fields[0].modules.len(), s.fields[0].strings.len(), v.polys.len(), fs.traced_directions, fs.rays, fs.occluder_triangles, fs.diffuse_factor);
     assert!(place_s < 30.0 && view_s < 10.0 && shade_s < 600.0);
 }
+
+#[test]
+fn raster_is_a_valid_png_and_picks_exactly() {
+    let s = scene_with(&[building(Roof::Gable { pitch_deg: 30.0 }), roof_field("bld-1/roof-0"), Edit::PlaceModules { field: "fld-2".into() }]);
+    // Camera 20° above the horizon: below the 30° roof pitch, so the north face is hidden by the ridge.
+    let cam = view::Camera { yaw_deg: 20.0, pitch_deg: 20.0, width: 400.0, height: 300.0, ..Default::default() };
+    let r = view::raster(&s, &cam, view::ColorBy::Material, None, None);
+    let png = r.png();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    // Every module is visible from the south and picks as itself at its projected centre.
+    let v = view::render(&s, &cam, view::ColorBy::Material, None, None);
+    let mut hits = 0;
+    for p in v.polys.iter().filter(|p| p.kind == "module") {
+        let (cx, cy) = p.points.iter().fold((0.0, 0.0), |a, q| (a.0 + q[0] as f64 / 4.0, a.1 + q[1] as f64 / 4.0));
+        if r.pick(cx, cy).map(|x| x.0) == Some(p.id.clone()) { hits += 1; }
+    }
+    assert_eq!(hits, s.fields[0].modules.len());
+    // The north roof is hidden behind the ridge from this side: no pixel of it.
+    assert!(!r.ids.iter().any(|&i| i > 0 && r.names[i as usize].0 == "bld-1/roof-1"));
+    assert_eq!(r.pick(1.0, 1.0), None, "background");
+}
