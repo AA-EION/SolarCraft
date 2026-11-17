@@ -374,3 +374,77 @@ fn real_backup() {
     let _ = err;
     std::fs::remove_dir_all(&fx.dir).ok();
 }
+
+
+#[test]
+fn imports_accumulate_and_reimport_is_idempotent() {
+    let fixture = Fixture::new("accumulate");
+    let mut second_module = module(1, 41.4, 49.6, 1760.0, 0.0);
+    second_module["id"] = json!("m2");
+    let mut conflicting_module = module(1, 41.4, 49.6, 1760.0, 0.0);
+    conflicting_module["name"] = json!("Alternative description");
+    let a = backup(&fixture.dir, "a.sqlite", &[("Online pvmodules", module(1, 41.4, 49.6, 1760.0, 0.0))]);
+    let b = backup(&fixture.dir, "b.sqlite", &[("Online pvmodules", second_module), ("Online pvmodules", conflicting_module)]);
+    let catalog = fixture.s("merged.sqlite");
+    for source in [&a, &b, &a] {
+        ok("catalog_import", json!({"source": source, "catalog": catalog}));
+    }
+    let hits = ok("catalog_search", json!({"catalog": catalog, "family": "module"}));
+    assert_eq!(hits["hits"].as_array().unwrap().len(), 2);
+    let first = ok("catalog_details", json!({"catalog": catalog, "family": "module", "id": "m1"}));
+    assert_eq!(first["raw"]["name"], "FS-450 rev1");
+    let db = Connection::open(catalog).unwrap();
+    let count = |table: &str| db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("source"), 2);
+    assert_eq!(count("api_response"), 2);
+    assert_eq!(count("backup_record"), 3);
+}
+
+#[test]
+fn switching_to_flat_tariff_clears_schedule_and_charges() {
+    let fixture = Fixture::new("flat-rate");
+    let mut records = base_recs();
+    let mut flat = tariff("Online demandtariffs", "flat", 500.0, 0.0, 0.0);
+    flat["htNtJson"] = Value::Null;
+    flat["tariffConcepts"].as_array_mut().unwrap().remove(0);
+    records.push(("Online demandtariffs", flat));
+    let catalog = fixture.catalog("rates", &records);
+    let project = fixture.project("rates", &catalog, 7);
+    ok("catalog_apply_tariff", json!({"catalog": catalog, "file": project, "import": {"family": "demandtariff", "id": "t1"}}));
+    let result = ok("catalog_apply_tariff", json!({"catalog": catalog, "file": project, "import": {"family": "demandtariff", "id": "flat"}}));
+    assert!(result["tariff"]["zones"].is_null());
+    assert_eq!(num(&result, "/tariff/fixed_per_month"), 0.0);
+    let tariff = serde_json::from_value(result["tariff"].clone()).unwrap();
+    assert_eq!(solarcraft_engine::finance::import_price(&tariff, 18), 500.0);
+}
+
+#[test]
+fn pinned_tariff_tiers_follow_load_and_installed_stringing() {
+    let fixture = Fixture::new("tariff-run-tier");
+    let mut records = base_recs();
+    records[7].1["htNtJson"] = Value::Null;
+    records[7].1["tariffConcepts"][1]["tariffRangeValues"] = json!([
+        {"key": 0, "value": 800}, {"key": 4500, "value": 600}
+    ]);
+    records[8].1["tariffConcepts"][0]["tariffRangeValues"][1]["key"] = json!(7);
+    let catalog = fixture.catalog("tiers", &records);
+    let file = fixture.project("tiers", &catalog, 7);
+    ok("catalog_apply_tariff", json!({"catalog": catalog, "file": file,
+        "import": {"family": "demandtariff", "id": "t1"}, "export": {"family": "feedintariff", "id": "f1"}}));
+    let rate = |result: &Value, bill: &str, money: &str, volume: &str| {
+        num(result, &format!("/finance/{bill}/{money}")) / num(result, &format!("/finance/{bill}/{volume}"))
+    };
+    let before = ok("simulate", json!({"file": file}));
+    assert!((rate(&before, "bill_without", "energy", "import_kwh") - 800.0).abs() < 1e-6);
+    assert!((rate(&before, "bill_with", "export_credit", "export_kwh") - 300.0).abs() < 1e-6);
+
+    ok("set_fields", json!({"file": file, "edits": [{"pointer": "/loads/annual_kwh", "value": 5000}]}));
+    let mut assignments = ok("get_project", json!({"file": file}))["electrical"]["inverters"].clone();
+    assignments[0]["mppts"][0][0]["modules_per_string"] = json!(9);
+    assignments[0]["mppts"][1][0]["modules_per_string"] = json!(9);
+    ok("set_stringing", json!({"file": file, "inverters": assignments}));
+    let after = ok("simulate", json!({"file": file}));
+    assert!((rate(&after, "bill_without", "energy", "import_kwh") - 600.0).abs() < 1e-6);
+    assert!((rate(&after, "bill_with", "export_credit", "export_kwh") - 150.0).abs() < 1e-6);
+    let _ = std::fs::remove_dir_all(&fixture.dir);
+}

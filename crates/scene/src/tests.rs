@@ -96,7 +96,7 @@ fn transactions_are_all_or_nothing_and_ids_are_stable() {
 }
 
 fn roof_field(face: &str) -> Edit {
-    Edit::AddField { id: None, name: "South roof".into(), array_id: Some("array-1".into()), mount: Mount::Roof { face: face.into(), standoff: 0.1 }, module: ModuleDims::default(), layout: FieldLayout::default() }
+    Edit::AddField { id: None, name: "South roof".into(), array_id: Some("array-1".into()), mount: Mount::Roof { face: face.into(), standoff: 0.1 }, module: ModuleDims::default(), layout: FieldLayout::default(), source: None }
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn modules_fill_a_roof_face_around_openings_and_chimneys_and_route_into_strings(
 }
 
 fn ground(rows: u32, tables: u32, across: u32, up: u32, pitch: f64, tilt: f64) -> Edit {
-    Edit::AddField { id: None, name: "Rows".into(), array_id: None, mount: Mount::Ground { origin: [0.0, 0.0], azimuth_deg: 180.0, tilt_deg: tilt, rows, tables_per_row: tables, modules_across: across, modules_up: up, row_pitch: pitch, table_gap: 0.5, clearance: 0.5, terrain: None }, module: ModuleDims { length: 2.0, width: 1.0, bypass_diodes: 3 }, layout: FieldLayout { orientation: Orientation::Portrait, gap_x: 0.0, gap_y: 0.0, setback: 0.0, obstacle_clearance: 0.0 } }
+    Edit::AddField { id: None, name: "Rows".into(), array_id: None, mount: Mount::Ground { origin: [0.0, 0.0], azimuth_deg: 180.0, tilt_deg: tilt, rows, tables_per_row: tables, modules_across: across, modules_up: up, row_pitch: pitch, table_gap: 0.5, clearance: 0.5, terrain: None }, module: ModuleDims { length: 2.0, width: 1.0, bypass_diodes: 3 }, layout: FieldLayout { orientation: Orientation::Portrait, gap_x: 0.0, gap_y: 0.0, setback: 0.0, obstacle_clearance: 0.0 }, source: None }
 }
 
 fn wall(y: f64, h: f64) -> Edit {
@@ -261,7 +261,7 @@ fn utility_scale_place_and_shade() {
     let t0 = std::time::Instant::now();
     let s = scene_with(&[
         Edit::AddObject { id: Some("ground".into()), name: "Terrain".into(), layer: None, kind: Kind::Terrain { origin: [-20.0, -20.0], cell: 5.0, nx: n, ny: n, heights }, properties: Default::default(), source: None },
-        Edit::AddField { id: Some("plant".into()), name: "Plant".into(), array_id: None, mount: Mount::Ground { origin: [0.0, 0.0], azimuth_deg: 180.0, tilt_deg: 20.0, rows: 40, tables_per_row: 10, modules_across: 24, modules_up: 2, row_pitch: 8.0, table_gap: 1.0, clearance: 0.8, terrain: Some("ground".into()) }, module: ModuleDims { length: 2.278, width: 1.134, bypass_diodes: 3 }, layout: FieldLayout { orientation: Orientation::Portrait, ..Default::default() } },
+        Edit::AddField { id: Some("plant".into()), name: "Plant".into(), array_id: None, mount: Mount::Ground { origin: [0.0, 0.0], azimuth_deg: 180.0, tilt_deg: 20.0, rows: 40, tables_per_row: 10, modules_across: 24, modules_up: 2, row_pitch: 8.0, table_gap: 1.0, clearance: 0.8, terrain: Some("ground".into()) }, module: ModuleDims { length: 2.278, width: 1.134, bypass_diodes: 3 }, layout: FieldLayout { orientation: Orientation::Portrait, ..Default::default() }, source: None },
         Edit::PlaceModules { field: "plant".into() },
         Edit::RouteStrings { field: "plant".into(), modules_per_string: 28, inverter_at: None },
     ]);

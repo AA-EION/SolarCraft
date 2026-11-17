@@ -238,6 +238,63 @@ pub struct Tariff {
     pub zones: Option<ZoneSchedule>,
     #[serde(default)]
     pub catalog_ref: Option<CatalogRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_catalog_ref: Option<CatalogRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_import_rate: Option<CatalogTierRate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_base_charge: Option<CatalogTierRate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_export_rate: Option<CatalogTierRate>,
+}
+
+/// A pinned rate table and the value originally written to the editable tariff.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogTierRate {
+    pub tiers: Vec<[f64; 3]>,
+    pub zoning: bool,
+    pub applied_rate: f64,
+    pub unit_scale: f64,
+}
+
+impl CatalogTierRate {
+    pub fn rate(tiers: &[[f64; 3]], quantity: f64, zoning: bool) -> Option<f64> {
+        let mut sorted = tiers.to_vec();
+        sorted.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        let first = sorted.first()?;
+        if sorted.len() == 1 || quantity <= first[0] || quantity <= 0.0 { return Some(first[2]); }
+        if !zoning {
+            return sorted.iter().rev().find(|band| quantity >= band[0]).map(|band| band[2]);
+        }
+        let mut cost = first[0] * first[2];
+        for (i, band) in sorted.iter().enumerate() {
+            let end = sorted.get(i + 1).map_or(quantity, |next| next[0].min(quantity));
+            cost += (end - band[0]).max(0.0) * band[2];
+        }
+        Some(cost / quantity)
+    }
+
+    fn resolve(&self, current_rate: f64, quantity: f64) -> f64 {
+        if current_rate != self.applied_rate { return current_rate; }
+        Self::rate(&self.tiers, quantity, self.zoning)
+            .map_or(current_rate, |rate| rate * self.unit_scale)
+    }
+}
+
+impl Tariff {
+    pub fn for_run(&self, annual_load_kwh: f64, installed_kwp: f64) -> Self {
+        let mut tariff = self.clone();
+        if let Some(rule) = &self.catalog_import_rate {
+            tariff.import_price = rule.resolve(self.import_price, annual_load_kwh);
+        }
+        if let Some(rule) = &self.catalog_base_charge {
+            tariff.fixed_per_month = rule.resolve(self.fixed_per_month, annual_load_kwh);
+        }
+        if let (Some(rule), ExportCompensation::Fixed { price }) = (&self.catalog_export_rate, &mut tariff.export) {
+            *price = rule.resolve(*price, installed_kwp);
+        }
+        tariff
+    }
 }
 
 /// Rate zones per hour: rows of 12 months × 24 hours (288 slots, zero-based month × 24 + hour),
@@ -275,7 +332,7 @@ impl ZoneSchedule {
 impl Default for Tariff {
     fn default() -> Self {
         Tariff { name: "Flat tariff".into(), currency: "EUR".into(), import_price: 0.30, tou: vec![], export: ExportCompensation::Fixed { price: 0.08 },
-                 fixed_per_month: 0.0, demand_charge_per_kw_month: 0.0, import_escalation_pct: 2.0, export_escalation_pct: 0.0, zones: None, catalog_ref: None }
+                 fixed_per_month: 0.0, demand_charge_per_kw_month: 0.0, import_escalation_pct: 2.0, export_escalation_pct: 0.0, zones: None, catalog_ref: None, export_catalog_ref: None, catalog_import_rate: None, catalog_base_charge: None, catalog_export_rate: None }
     }
 }
 

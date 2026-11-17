@@ -117,8 +117,16 @@ fn scene_workflow() {
     assert_eq!(imp["fidelity"]["solarcraft_metadata"], json!(true));
     let a = ok("scene_get", json!({"file": fs}));
     let c = ok("scene_get", json!({"file": g.to_str().unwrap()}));
-    assert_eq!(a["scene"]["objects"], c["scene"]["objects"]);
+    let geometry = |scene: &Value| scene["scene"]["objects"].as_array().unwrap().iter().map(|object| {
+        (object["id"].clone(), object["kind"].clone())
+    }).collect::<Vec<_>>();
+    assert_eq!(geometry(&a), geometry(&c));
     assert_eq!(a["counts"]["modules"], c["counts"]["modules"]);
+    let relinked = ok("scene_import", json!({"file": g.to_str().unwrap(),
+        "source": dir.join("casa3d.ifc").to_str().unwrap(), "options": {"relink": true}}));
+    assert_eq!(relinked["counts"]["objects"], c["counts"]["objects"]);
+    assert_eq!(relinked["counts"]["fields"], c["counts"]["fields"]);
+    assert_eq!(relinked["counts"]["modules"], c["counts"]["modules"]);
     let unsupported = call("scene_import", json!({"file": g.to_str().unwrap(), "source": dir.join("model.skp").to_str().unwrap()}));
     assert_eq!(unsupported["error"]["code"], json!("FORMAT_NOT_SUPPORTED"));
 
@@ -126,5 +134,24 @@ fn scene_workflow() {
     let h1 = ok("results_summary", json!({"file": fs}))["manifest"]["inputs_hash"].clone();
     ok("simulate", json!({"file": fs}));
     assert_eq!(ok("results_summary", json!({"file": fs}))["manifest"]["inputs_hash"], h1);
+    // The native roof placement command keeps both roof faces electrically bound.
+    let multi = dir.join("multi.solarcraft");
+    ok("create_project", json!({"file": multi, "name": "Multi-roof", "latitude": 4.711, "longitude": -74.072}));
+    ok("use_demo_weather", json!({"file": multi}));
+    ok("scene_edit", json!({"file": multi, "edits": [{"op": "add_object", "name": "House",
+        "kind": {"type": "building", "footprint": [[0,0],[15,0],[15,10],[0,10]],
+        "eave_height": 5, "roof": {"type": "gable", "pitch_deg": 25}}}]}));
+    let south = ok("scene_place_roof", json!({"file": multi, "face": "bld-1/roof-0"}));
+    let north = ok("scene_place_roof", json!({"file": multi, "face": "bld-1/roof-1"}));
+    assert_ne!(south["array"], north["array"]);
+    let expected = [south["array"].clone(), north["array"].clone()];
+    let scene = ok("scene_get", json!({"file": multi}));
+    for (field, array) in scene["scene"]["fields"].as_array().unwrap().iter().zip(expected) {
+        assert_eq!(field["array_id"], array);
+    }
+    let result = ok("simulate", json!({"file": multi}));
+    assert_eq!(result["electrical"].as_array().unwrap().len(), 2);
+    let shaded = ok("scene_shading", json!({"file": multi}));
+    assert_eq!(shaded["fields"].as_array().unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }

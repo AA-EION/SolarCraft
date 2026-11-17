@@ -71,7 +71,9 @@ pub fn list_limited(lib: &Path, kind: Option<&str>, query: Option<&str>, limit: 
 
 pub fn count(lib: &Path) -> Result<Vec<(String, i64)>> {
     let c = conn(lib)?;
-    let mut st = c.prepare("SELECT kind, COUNT(DISTINCT id) FROM item WHERE deleted=0 GROUP BY kind ORDER BY kind").map_err(|x| e("LIBRARY", x))?;
+    let mut st = c.prepare("SELECT i.kind, COUNT(*) FROM item i
+        WHERE i.deleted=0 AND i.rev=(SELECT MAX(r.rev) FROM item r WHERE r.kind=i.kind AND r.id=i.id)
+        GROUP BY i.kind ORDER BY i.kind").map_err(|x| e("LIBRARY", x))?;
     let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|x| e("LIBRARY", x))?.filter_map(|x| x.ok()).collect();
     Ok(v)
 }
@@ -98,7 +100,8 @@ pub fn put_many(lib: &Path, items: &[(String, Value)], source: &str) -> Result<u
 
 pub fn get(lib: &Path, kind: &str, id: &str) -> Result<Item> {
     let c = conn(lib)?;
-    c.query_row("SELECT kind,id,rev,body,source,updated_unix FROM item WHERE kind=?1 AND id=?2 AND deleted=0 ORDER BY rev DESC LIMIT 1", params![kind, id], row)
+    c.query_row("SELECT kind,id,rev,body,source,updated_unix FROM item WHERE kind=?1 AND id=?2 AND deleted=0
+        AND rev=(SELECT MAX(rev) FROM item WHERE kind=?1 AND id=?2)", params![kind, id], row)
         .optional().map_err(|x| e("LIBRARY", x))?.ok_or_else(|| e("NOT_FOUND", format!("{kind} '{id}' is not in the library")))
 }
 

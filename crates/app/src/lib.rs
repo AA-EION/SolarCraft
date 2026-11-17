@@ -114,17 +114,25 @@ pub fn simulate(path: &Path, progress: impl FnMut(f64) -> bool) -> Result<SimRes
     let series = plant_ops::load_series(&s, &p)?;
     let r = solarcraft_engine::simulate(&p, &w, &hash, series.as_deref(), progress).map_err(|x| if x.0 == "cancelled" { e("CANCELLED", x) } else { e("SIMULATION", x) })?;
     let bytes = serde_json::to_vec(&r).map_err(|x| e("RESULT_ENCODE", x))?;
-    s.put_blob("results", "application/vnd.solarcraft.results+json", &bytes).map_err(|x| e("PROJECT_SAVE", x))?;
+    let kind = format!("results:{}", r.manifest.inputs_hash);
+    s.put_blob(&kind, "application/vnd.solarcraft.results+json", &bytes).map_err(|x| e("PROJECT_SAVE", x))?;
     Ok(r)
 }
 
 /// Latest stored results, if any.
 pub fn latest_results(path: &Path) -> Result<Option<SimResult>> {
-    let (s, _) = open(path)?;
-    match s.latest_blob("results").map_err(|x| e("PROJECT_LOAD", x))? {
-        Some((_, b)) => Ok(Some(serde_json::from_slice(&b).map_err(|x| e("RESULT_DECODE", x))?)),
-        None => Ok(None),
-    }
+    let (s, p) = open(path)?;
+    current_results(&s, &p)
+}
+
+fn current_results(s: &Store, p: &Project) -> Result<Option<SimResult>> {
+    let Some(weather) = &p.weather else { return Ok(None) };
+    let current_hash = solarcraft_engine::inputs_hash(p, &weather.hash);
+    let Some((_, bytes)) = s.latest_blob(&format!("results:{current_hash}")).map_err(|x| e("PROJECT_LOAD", x))? else {
+        return Ok(None);
+    };
+    let result: SimResult = serde_json::from_slice(&bytes).map_err(|x| e("RESULT_DECODE", x))?;
+    Ok((result.manifest.inputs_hash == current_hash).then_some(result))
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -188,7 +196,7 @@ fn today_utc() -> (i32, u8, u8) {
 pub fn report_view(path: &Path, lang: &str) -> Result<solarcraft_report::View> {
     let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}'")))?;
     let (s, p) = open(path)?;
-    let r = latest_results(path)?.ok_or_else(|| e("NO_RESULTS", "No results yet. Run the simulation first."))?;
+    let r = current_results(&s, &p)?.ok_or_else(|| e("NO_RESULTS", "Run the simulation for the current design first."))?;
     let (w, _) = load_weather(&s, &p)?;
     let input = solarcraft_report::ReportInput { project: &p, result: &r, lang: l, date: today_utc(), designer: String::new(),
         weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied } };
@@ -200,7 +208,7 @@ pub fn report_view(path: &Path, lang: &str) -> Result<solarcraft_report::View> {
 pub fn generate_report(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str) -> Result<ReportOutput> {
     let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}' (use en, es, de, pt-BR)")))?;
     let (s, p) = open(path)?;
-    let r = latest_results(path)?.ok_or_else(|| e("NO_RESULTS", "No results yet. Run the simulation first."))?;
+    let r = current_results(&s, &p)?.ok_or_else(|| e("NO_RESULTS", "Run the simulation for the current design first."))?;
     let (w, _) = load_weather(&s, &p)?;
     let input = solarcraft_report::ReportInput {
         project: &p, result: &r, lang: l, date: today_utc(), designer: designer.to_string(),

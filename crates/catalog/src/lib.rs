@@ -123,7 +123,9 @@ CREATE INDEX IF NOT EXISTS entity_search ON entity(family, search);
 CREATE TABLE IF NOT EXISTS changelog(event_id INTEGER, family_code INTEGER, guid TEXT, version INTEGER, entry_tag INTEGER, publish_date TEXT, name TEXT, company_name TEXT, raw_json TEXT, PRIMARY KEY(event_id));
 CREATE INDEX IF NOT EXISTS changelog_guid ON changelog(guid);
 CREATE TABLE IF NOT EXISTS release(kind TEXT, version TEXT, major INTEGER, minor INTEGER, at TEXT, comment TEXT, raw_json TEXT);
-CREATE TABLE IF NOT EXISTS api_response(id INTEGER PRIMARY KEY, source_id INTEGER, route TEXT, body_bytes INTEGER, sha256 TEXT, body BLOB, sha_ok INTEGER);
+CREATE TABLE IF NOT EXISTS api_response(id INTEGER, source_id INTEGER, route TEXT, body_bytes INTEGER, sha256 TEXT, body BLOB, sha_ok INTEGER, PRIMARY KEY(source_id, id));
+CREATE TABLE IF NOT EXISTS backup_record(source_id INTEGER NOT NULL, dataset TEXT NOT NULL, row_number INTEGER NOT NULL, raw_json TEXT NOT NULL, PRIMARY KEY(source_id, dataset, row_number));
+CREATE TABLE IF NOT EXISTS source_presence(source_id INTEGER NOT NULL, dataset TEXT NOT NULL, path TEXT NOT NULL, class TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY(source_id, dataset, path, class));
 CREATE TABLE IF NOT EXISTS export_log(source_id INTEGER, src TEXT, route_or_table TEXT, dataset_name TEXT, exported INTEGER, catalog_count INTEGER, status TEXT);
 CREATE TABLE IF NOT EXISTS presence(dataset TEXT, path TEXT, class TEXT, n INTEGER, PRIMARY KEY(dataset, path, class));
 CREATE TABLE IF NOT EXISTS join_check(family TEXT, id TEXT, version INTEGER, link TEXT, status TEXT, detail TEXT);";
@@ -144,8 +146,29 @@ pub struct ImportReport {
     pub paths_observed: usize,
 }
 
-/// Import a backup into the catalog database at `catalog` (created if missing). Re-importing the
-/// same source replaces its rows.
+fn migrate_archive(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let id_primary_key: i64 = tx.query_row(
+        "SELECT pk FROM pragma_table_info('api_response') WHERE name='id'", [], |r| r.get(0),
+    ).map_err(err)?;
+    if id_primary_key == 1 {
+        tx.execute_batch(
+            "CREATE TABLE api_response_v2(id INTEGER, source_id INTEGER, route TEXT, body_bytes INTEGER,
+                 sha256 TEXT, body BLOB, sha_ok INTEGER, PRIMARY KEY(source_id, id));
+             INSERT INTO api_response_v2 SELECT * FROM api_response;
+             DROP TABLE api_response;
+             ALTER TABLE api_response_v2 RENAME TO api_response;
+             INSERT INTO backup_record SELECT source_id, dataset, row_number, raw_json FROM entity;
+             INSERT INTO source_presence
+                 SELECT recent.id, p.dataset, p.path, p.class, p.n
+                 FROM presence p CROSS JOIN (SELECT MAX(id) AS id FROM source) recent
+                 WHERE recent.id IS NOT NULL;",
+        ).map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Accumulate backups by source hash. Preserve every raw row and retain the first
+/// canonical record when two archives contain the same family, ID and revision.
 pub fn import(backup: &Path, catalog: &Path) -> Result<ImportReport> {
     let src = open_ro(backup)?;
     let bytes = std::fs::read(backup).map_err(err)?;
@@ -154,13 +177,27 @@ pub fn import(backup: &Path, catalog: &Path) -> Result<ImportReport> {
     let mut rep = ImportReport { source_sha256: sha.clone(), audit: audit(backup)?, ..Default::default() };
     let mut db = Connection::open(catalog).map_err(err)?;
     db.execute_batch(SCHEMA).map_err(err)?;
-    let tx = db.transaction().map_err(err)?;
-    let info = json!({"backup_info": rep.audit.backup_info, "file": backup.file_name().map(|f| f.to_string_lossy().to_string())});
-    tx.execute("DELETE FROM source WHERE sha256=?1", params![sha]).map_err(err)?;
-    tx.execute("INSERT INTO source(kind, file_name, sha256, info_json, imported_unix) VALUES('backup-sqlite', ?1, ?2, ?3, strftime('%s','now'))",
-        params![backup.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), sha, info.to_string()]).map_err(err)?;
-    let source_id = tx.last_insert_rowid();
-    for t in ["entity", "changelog", "release", "api_response", "export_log", "presence", "join_check"] { tx.execute(&format!("DELETE FROM {t}"), []).map_err(err)?; }
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(err)?;
+    migrate_archive(&tx)?;
+    let existing_source = tx.query_row(
+        "SELECT id FROM source WHERE sha256=?1", [&sha], |r| r.get(0),
+    ).optional().map_err(err)?;
+    let source_id = match existing_source {
+        Some(id) => id,
+        None => {
+            let file = backup.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+            let info = json!({"backup_info": rep.audit.backup_info, "file": file});
+            tx.execute(
+                "INSERT INTO source(kind, file_name, sha256, info_json, imported_unix)
+                 VALUES('backup-sqlite', ?1, ?2, ?3, strftime('%s','now'))",
+                params![file.as_ref(), sha, info.to_string()],
+            ).map_err(err)?;
+            tx.last_insert_rowid()
+        }
+    };
+    for table in ["backup_record", "source_presence", "api_response", "export_log"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE source_id=?1"), [source_id]).map_err(err)?;
+    }
 
     // 1. Raw records: join records.dataset_id to datasets.id; record_json is authoritative.
     let mut rows: Vec<(String, i64, String)> = vec![];
@@ -196,10 +233,12 @@ pub fn import(backup: &Path, catalog: &Path) -> Result<ImportReport> {
     };
     let mut joins: Vec<(String, String, i64, String, String, String)> = vec![];
     {
-        let mut ins = tx.prepare("INSERT OR REPLACE INTO entity(family,id,version,name,company_id,country_id,is_available,published_at,dataset,row_number,source_id,raw_json,normalized_json,issues_json,search) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)").map_err(err)?;
-        let mut ins_cl = tx.prepare("INSERT OR REPLACE INTO changelog VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)").map_err(err)?;
-        let mut ins_rel = tx.prepare("INSERT INTO release VALUES(?1,?2,?3,?4,?5,?6,?7)").map_err(err)?;
+        let mut ins_raw = tx.prepare("INSERT INTO backup_record VALUES(?1,?2,?3,?4)").map_err(err)?;
+        let mut ins = tx.prepare("INSERT OR IGNORE INTO entity(family,id,version,name,company_id,country_id,is_available,published_at,dataset,row_number,source_id,raw_json,normalized_json,issues_json,search) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)").map_err(err)?;
+        let mut ins_cl = tx.prepare("INSERT OR IGNORE INTO changelog VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)").map_err(err)?;
+        let mut ins_rel = tx.prepare("INSERT INTO release SELECT ?1,?2,?3,?4,?5,?6,?7 WHERE NOT EXISTS (SELECT 1 FROM release WHERE kind=?1 AND raw_json=?7)").map_err(err)?;
         for (ds, rn, v, raw) in &parsed {
+            ins_raw.execute(params![source_id, ds, rn, raw]).map_err(err)?;
             let f = family(ds);
             match f {
                 "changelog" => { ins_cl.execute(params![v["id"].as_i64(), v["dbEntryTypeEnum"].as_i64(), v["guid"].as_str(), v["version"].as_i64(), v["entryTag"].as_i64(), v["publishDate"].as_str(), v["dbEntryName"].as_str(), v["companyName"].as_str(), raw]).map_err(err)?; rep.changelog_events += 1; continue; }
@@ -263,14 +302,24 @@ pub fn import(backup: &Path, catalog: &Path) -> Result<ImportReport> {
             ins.execute(params![f, id, ver, v["name"].as_str(), v["companyId"].as_str(), v["countryId"].as_str(), v["isAvailable"].as_bool(), v["publishedAt"].as_str(), ds, rn, source_id, raw,
                 n.record.as_ref().map(|r| json!({"record": r, "units": n.units}).to_string()), serde_json::to_string(&n.issues).ok(), search]).map_err(err)?;
         }
-        let mut ins_j = tx.prepare("INSERT INTO join_check VALUES(?1,?2,?3,?4,?5,?6)").map_err(err)?;
+        tx.execute(
+            "DELETE FROM join_check WHERE EXISTS (
+                SELECT 1 FROM entity e WHERE e.source_id=?1 AND e.family=join_check.family
+                AND e.id=join_check.id AND e.version=join_check.version
+            )", [source_id],
+        ).map_err(err)?;
+        let mut ins_j = tx.prepare(
+            "INSERT INTO join_check SELECT ?1,?2,?3,?4,?5,?6 WHERE EXISTS (
+                SELECT 1 FROM entity WHERE family=?1 AND id=?2 AND version=?3 AND source_id=?7
+            )",
+        ).map_err(err)?;
         for (f, id, ver, link, status, detail) in &joins {
-            ins_j.execute(params![f, id, ver, link, status, detail]).map_err(err)?;
+            ins_j.execute(params![f, id, ver, link, status, detail, source_id]).map_err(err)?;
             *rep.joins.entry(format!("{f}.{link}")).or_default().entry(status.clone()).or_default() += 1;
         }
-        let mut ins_p = tx.prepare("INSERT OR REPLACE INTO presence VALUES(?1,?2,?3,?4)").map_err(err)?;
+        let mut ins_p = tx.prepare("INSERT INTO source_presence VALUES(?1,?2,?3,?4,?5)").map_err(err)?;
         for (ds, paths) in &presence {
-            for (p, cls) in paths { rep.paths_observed += 1; for (k, n) in cls { ins_p.execute(params![ds, p, serde_json::to_value(k).ok().and_then(|x| x.as_str().map(String::from)), *n as i64]).map_err(err)?; } }
+            for (p, cls) in paths { rep.paths_observed += 1; for (k, n) in cls { ins_p.execute(params![source_id, ds, p, serde_json::to_value(k).ok().and_then(|x| x.as_str().map(String::from)), *n as i64]).map_err(err)?; } }
         }
     }
     // 2. Archived API responses (verbatim, checksum verified) and the export log.
@@ -291,9 +340,21 @@ pub fn import(backup: &Path, catalog: &Path) -> Result<ImportReport> {
             ins.execute(params![source_id, a, b, c2, d, e2, f2]).map_err(err)?;
         }
     }
+    tx.execute_batch(
+        "DELETE FROM presence;
+         INSERT INTO presence SELECT dataset, path, class, SUM(n) FROM source_presence
+             GROUP BY dataset, path, class;",
+    ).map_err(err)?;
     tx.commit().map_err(err)?;
-    let c = &db;
-    rep.distinct_ids_by_family = c.prepare("SELECT family, COUNT(DISTINCT id) FROM entity GROUP BY family").map_err(err)?.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?.filter_map(|x| x.ok()).collect();
+    let mut unique_ids: BTreeMap<String, std::collections::HashSet<String>> = BTreeMap::new();
+    for (dataset, row, value, _) in &parsed {
+        let family = family(dataset);
+        if matches!(family, "changelog" | "release" | "publish") { continue; }
+        let id = value["id"].as_str().map_or_else(|| format!("row-{row}"), str::to_owned);
+        unique_ids.entry(family.to_owned()).or_default().insert(id);
+    }
+    rep.distinct_ids_by_family = unique_ids.into_iter()
+        .map(|(family, ids)| (family, ids.len() as i64)).collect();
     Ok(rep)
 }
 

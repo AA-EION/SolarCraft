@@ -12,12 +12,16 @@ const CUM: [u32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 
 /// Hour of the reference year in local standard time (0..8759) for a weather hour midpoint.
 pub fn local_hour_of_year(unix_mid: i64, utc_offset_h: f64) -> u32 {
-    let start = unix_mid - 1800;
-    let (_, m, d) = civil_from_days(start.div_euclid(86400));
-    let d = d.min(if m == 2 { 28 } else { 31 });
-    let h = start.rem_euclid(86400) / 3600;
-    let utc_hoy = (CUM[m as usize - 1] + d - 1) as i64 * 24 + h;
-    (utc_hoy + utc_offset_h.round() as i64).rem_euclid(8760) as u32
+    local_interval_hour(unix_mid - 1800, utc_offset_h)
+}
+
+pub fn local_interval_hour(unix_start: i64, utc_offset_h: f64) -> u32 {
+    let (_, month, day) = civil_from_days(unix_start.div_euclid(86400));
+    let day = day.min(if month == 2 { 28 } else { 31 });
+    let day_index = i64::from(CUM[month as usize - 1] + day - 1);
+    let local_seconds = day_index * 86400 + unix_start.rem_euclid(86400)
+        + (utc_offset_h * 3600.0).round() as i64;
+    local_seconds.div_euclid(3600).rem_euclid(8760) as u32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +44,8 @@ mod tests {
         let t = 1735689600 + 1800;
         assert_eq!(local_hour_of_year(t, 0.0), 0);
         assert_eq!(local_hour_of_year(t, -5.0), 8755);
+        assert_eq!(local_interval_hour(t - 1800, 0.0), 0);
+        assert_eq!(local_interval_hour(t - 1800, 5.5), 5);
         // A March hour taken from a leap year maps to the same day of the reference year.
         let mar1_2020 = 1583020800 + 1800; // 2020-03-01 00:30 UTC
         assert_eq!(local_hour_of_year(mar1_2020, 0.0), 59 * 24);

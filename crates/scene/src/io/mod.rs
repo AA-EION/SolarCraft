@@ -132,7 +132,7 @@ pub(crate) fn sanitize(s: &str) -> String {
 }
 
 pub(crate) fn mesh_object(id: String, name: String, file: &str, format: Format, external: String, faces: Vec<crate::MeshFace>, opacity: f64, layer: &str) -> Object {
-    Object { id, name, layer: layer.into(), kind: Kind::Mesh { faces, opacity }, hidden: false, properties: Default::default(), source: Some(Source { format: format.name().into(), file: file.into(), external_id: external }) }
+    Object { id, name, layer: layer.into(), kind: Kind::Mesh { faces, opacity }, hidden: false, properties: Default::default(), source: Some(Source { format: format.name().into(), file: file.into(), external_id: external, local_geometry: false }) }
 }
 
 /// Write the scene in a format. Returns the file bytes and the fidelity report.
@@ -197,9 +197,15 @@ impl Object {
 /// Turn an import into scene edits. New identities avoid collisions with the
 /// scene. With `relink`, objects that came from the same file and external
 /// identifier as an existing object update that object's geometry in place
-/// (keeping its id, layer, properties and the fields placed on it); existing
+/// (keeping its id, layer, properties and the fields placed on it), except when
+/// its geometry was edited locally. Existing
 /// objects from that file that are no longer in it are reported, not deleted.
 pub fn plan(scene: &Scene, imp: &Imported, relink: bool) -> (Vec<Edit>, Vec<IdMap>, Vec<String>) {
+    plan_with_source(scene, imp, relink, None)
+}
+
+/// Plan exchange edits with the local source document identity, when available.
+pub fn plan_with_source(scene: &Scene, imp: &Imported, relink: bool, source_key: Option<&str>) -> (Vec<Edit>, Vec<IdMap>, Vec<String>) {
     let mut edits = vec![];
     let mut map = vec![];
     let mut notes = vec![];
@@ -212,40 +218,78 @@ pub fn plan(scene: &Scene, imp: &Imported, relink: bool) -> (Vec<Edit>, Vec<IdMa
         taken.insert(id.clone());
         id
     };
+    let source_for = |object: &Object| source_key.map(|key| Source {
+        format: imp.fidelity.format.clone(),
+        file: key.to_owned(),
+        external_id: object.source.as_ref().map_or_else(|| object.id.clone(), |origin| origin.external_id.clone()),
+        local_geometry: false,
+    }).or_else(|| object.source.clone());
     let mut seen = std::collections::HashSet::new();
+    let mut host_ids = std::collections::HashMap::new();
     for o in &imp.objects {
-        let ext = o.source.as_ref().map(|s| (s.file.clone(), s.external_id.clone()));
+        let origin = source_for(o);
         if relink {
-            if let Some(old) = scene.objects.iter().find(|x| x.source.as_ref().map(|s| (s.file.clone(), s.external_id.clone())) == ext && ext.is_some()) {
+            let find = |source: &Source| scene.objects.iter().find(|x| {
+                x.source.as_ref().is_some_and(|s| s.file == source.file && s.external_id == source.external_id)
+            });
+            if let Some((source, old)) = origin.as_ref().and_then(|source| {
+                find(source).or_else(|| o.source.as_ref().and_then(find)).map(|old| (source, old))
+            }) {
                 seen.insert(old.id.clone());
-                if old.kind != o.kind { edits.push(Edit::UpdateObject { id: old.id.clone(), name: None, layer: None, kind: Some(o.kind.clone()), hidden: None, properties: None }); notes.push(format!("{} updated from {}", old.id, ext.as_ref().unwrap().1)); }
-                map.push(IdMap { scene_id: old.id.clone(), external_id: ext.unwrap().1 });
+                host_ids.insert(o.id.clone(), old.id.clone());
+                if old.kind != o.kind {
+                    if old.source.as_ref().is_some_and(|source| source.local_geometry) {
+                        notes.push(format!("{} differs from the source; retained locally edited geometry.", old.id));
+                    } else {
+                        edits.push(Edit::RelinkObject { id: old.id.clone(), kind: o.kind.clone(), source: source.clone() });
+                        notes.push(format!("{} updated from {}", old.id, source.external_id));
+                    }
+                }
+                map.push(IdMap { scene_id: old.id.clone(), external_id: source.external_id.clone() });
                 continue;
             }
         }
         let id = fresh(&o.id, &mut taken);
-        map.push(IdMap { scene_id: id.clone(), external_id: o.source.as_ref().map_or(o.id.clone(), |s| s.external_id.clone()) });
-        edits.push(Edit::AddObject { id: Some(id), name: o.name.clone(), layer: Some(if o.layer.is_empty() { "imported".into() } else { o.layer.clone() }), kind: o.kind.clone(), properties: o.properties.clone(), source: o.source.clone() });
+        host_ids.insert(o.id.clone(), id.clone());
+        map.push(IdMap { scene_id: id.clone(), external_id: o.id.clone() });
+        edits.push(Edit::AddObject { id: Some(id), name: o.name.clone(), layer: Some(if o.layer.is_empty() { "imported".into() } else { o.layer.clone() }), kind: o.kind.clone(), properties: o.properties.clone(), source: origin });
     }
     if relink {
-        let files: std::collections::HashSet<String> = imp.objects.iter().filter_map(|o| o.source.as_ref().map(|s| s.file.clone())).collect();
+        let files: std::collections::HashSet<String> = imp.objects.iter().filter_map(|o| source_for(o).map(|s| s.file)).collect();
         for o in &scene.objects {
             if o.source.as_ref().is_some_and(|s| files.contains(&s.file)) && !seen.contains(&o.id) { notes.push(format!("{} is no longer in the source file; kept unchanged", o.id)); }
         }
     }
+    let mut bound_arrays: std::collections::HashSet<_> = scene.fields.iter().filter_map(|field| field.array_id.clone()).collect();
     for f in &imp.fields {
+        let source = source_key.map(|key| Source {
+            format: imp.fidelity.format.clone(), file: key.to_owned(), external_id: f.id.clone(), local_geometry: false,
+        }).or_else(|| f.source.clone());
+        if relink {
+            if let Some(existing) = scene.fields.iter().find(|field| {
+                source.is_some() && field.source == source
+            }) {
+                map.push(IdMap { scene_id: existing.id.clone(), external_id: f.id.clone() });
+                notes.push(format!("Retained existing module field {} and its SolarCraft placement.", existing.id));
+                continue;
+            }
+        }
         let id = fresh(&f.id, &mut taken);
         map.push(IdMap { scene_id: id.clone(), external_id: f.id.clone() });
         let mount = match &f.mount {
             crate::place::Mount::Roof { face, standoff } => {
                 // Follow the renamed carrier object.
                 let (obj, rest) = face.split_once('/').unwrap_or((face, ""));
-                let new_obj = map.iter().find(|m| m.external_id == obj || m.scene_id == obj).map_or(obj.to_string(), |m| m.scene_id.clone());
+                let new_obj = host_ids.get(obj).map_or(obj, String::as_str);
                 crate::place::Mount::Roof { face: format!("{new_obj}/{rest}"), standoff: *standoff }
             }
             m => m.clone(),
         };
-        edits.push(Edit::AddField { id: Some(id.clone()), name: f.name.clone(), array_id: f.array_id.clone(), mount, module: f.module.clone(), layout: f.layout.clone() });
+        let array_id = f.array_id.clone().filter(|array_id| bound_arrays.insert(array_id.clone()));
+        if array_id.is_none() && f.array_id.is_some() {
+            notes.push(format!("Field {id} arrived unbound because its array already has a field."));
+        }
+        edits.push(Edit::AddField { id: Some(id.clone()), name: f.name.clone(), array_id, mount, module: f.module.clone(), layout: f.layout.clone(), source });
         if !f.modules.is_empty() { edits.push(Edit::RestorePlacement { field: id, modules: f.modules.clone(), strings: f.strings.clone(), inverter_at: f.inverter_at }); }
     }
     (edits, map, notes)

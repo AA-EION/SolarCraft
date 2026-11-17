@@ -12,7 +12,7 @@ pub(crate) fn sample() -> Scene {
         add(Kind::Block { center: [9.0, 2.0], base_z: 5.0, length: 0.8, width: 0.8, height: 3.5, rotation_deg: 0.0 }, "Chimenea", "obstacles"),
         add(Kind::Tree { center: [18.0, -6.0], base_z: 0.0, trunk_height: 2.5, trunk_radius: 0.3, crown_radius: 3.0, crown_height: 5.0, transparency: 0.3, segments: 12 }, "Urapán", "vegetation"),
         add(Kind::Terrain { origin: [-10.0, -15.0], cell: 5.0, nx: 9, ny: 7, heights: (0..63).map(|k| -0.05 * (k % 9) as f64).collect() }, "Terreno", "terrain"),
-        Edit::AddField { id: None, name: "Cubierta sur".into(), array_id: Some("array-1".into()), mount: Mount::Roof { face: "bld-1/roof-0".into(), standoff: 0.1 }, module: ModuleDims::default(), layout: FieldLayout::default() },
+        Edit::AddField { id: None, name: "Cubierta sur".into(), array_id: Some("array-1".into()), mount: Mount::Roof { face: "bld-1/roof-0".into(), standoff: 0.1 }, module: ModuleDims::default(), layout: FieldLayout::default(), source: None },
         Edit::PlaceModules { field: "fld-5".into() },
         Edit::RouteStrings { field: "fld-5".into(), modules_per_string: 5, inverter_at: Some([0.0, -1.0, 1.0]) },
         Edit::SetGeoref { georef: g },
@@ -180,6 +180,11 @@ fn relink_updates_geometry_and_keeps_solarcraft_edits() {
     assert_eq!(s2.objects.len(), s1.objects.len(), "nothing added, nothing deleted");
     assert!(notes.iter().any(|x| x.contains("no longer in the source")), "{notes:?}");
     assert_eq!(s2.fields, s1.fields, "module fields are untouched");
+    let moved = apply(&s1, &[Edit::Move { id: neighbour.clone(), dx: 2.0, dy: 0.0, dz: 0.0 }]).unwrap().0;
+    let (edits, _, notes) = plan(&moved, &imp2, true);
+    assert!(notes.iter().any(|note| note.contains("retained locally edited geometry")));
+    let retained = apply(&moved, &edits).unwrap().0;
+    assert_eq!(retained.object(&neighbour).unwrap().kind, moved.object(&neighbour).unwrap().kind);
 }
 
 /// Writes the sample scene in every format for external validators

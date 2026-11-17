@@ -20,7 +20,7 @@ fn path(p: &Value, k: &str) -> Result<PathBuf, AppError> { Ok(PathBuf::from(s(p,
 fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Value::Null) }
 
 pub const METHODS: &[&str] = &[
-    "scene_get", "scene_edit", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
+    "scene_get", "scene_edit", "scene_place_roof", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
     "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
     "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
@@ -153,6 +153,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "report_preview" => Ok(v(&app::report_view(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"))?)),
         "scene_get" => app::scene_ops::get(&path(params, "file")?),
         "scene_edit" => app::scene_ops::edit(&path(params, "file")?, arg(params, "edits")?, params.get("preview").and_then(Value::as_bool).unwrap_or(false)),
+        "scene_place_roof" => app::scene_ops::place_roof(&path(params, "file")?, &s(params, "face")?),
         "scene_bind" => app::scene_ops::bind(&path(params, "file")?, &s(params, "field")?, &s(params, "array_id")?, params.get("match_array").and_then(Value::as_bool).unwrap_or(false)),
         "scene_view" => Ok(v(&app::scene_ops::render(&path(params, "file")?, params)?)),
         "scene_pick" => app::scene_ops::pick(&path(params, "file")?, params),

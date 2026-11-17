@@ -110,6 +110,8 @@ pub struct ModuleField {
     pub strings: Vec<StringRoute>,
     #[serde(default)]
     pub inverter_at: Option<V3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::Source>,
 }
 
 impl ModuleField {

@@ -78,7 +78,18 @@ impl Store {
 
     pub fn load(&self) -> Result<Project> {
         let body: String = self.conn.query_row("SELECT body FROM project WHERE id=1", [], |r| r.get(0))?;
-        Ok(serde_json::from_str(&body)?)
+        Self::decode(&body)
+    }
+
+    fn decode(body: &str) -> Result<Project> {
+        let project: Project = serde_json::from_str(body)?;
+        if project.schema_version > solarcraft_model::SCHEMA_VERSION {
+            return Err(StoreError::NotAProject(format!(
+                "project schema {} requires a newer SolarCraft version (this version supports {})",
+                project.schema_version, solarcraft_model::SCHEMA_VERSION,
+            )));
+        }
+        Ok(project)
     }
 
     /// Save the project as one transaction, recording `op` and the prior state for undo.
@@ -97,12 +108,15 @@ impl Store {
     /// Undo the most recent change; returns the restored project.
     pub fn undo(&mut self) -> Result<Option<Project>> {
         let tx = self.conn.transaction()?;
+        let current: String = tx.query_row("SELECT body FROM project WHERE id=1", [], |r| r.get(0))?;
+        Self::decode(&current)?;
         let last: Option<(i64, Option<String>)> = tx.query_row("SELECT seq, before FROM changes ORDER BY seq DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
         let Some((seq, Some(before))) = last else { return Ok(None) };
+        let restored = Self::decode(&before)?;
         tx.execute("UPDATE project SET body=?1, rev=rev+1 WHERE id=1", [&before])?;
         tx.execute("DELETE FROM changes WHERE seq=?1", [seq])?;
         tx.commit()?;
-        Ok(Some(serde_json::from_str(&before)?))
+        Ok(Some(restored))
     }
 
     pub fn history(&self, limit: usize) -> Result<Vec<Change>> {
@@ -114,9 +128,11 @@ impl Store {
     /// Store a content-addressed blob; returns its SHA-256.
     pub fn put_blob(&mut self, kind: &str, media_type: &str, data: &[u8]) -> Result<String> {
         let hash = sha256_hex(data);
-        self.conn.execute("INSERT OR IGNORE INTO blobs(hash, kind, media_type, data, created_unix) VALUES(?1, ?2, ?3, ?4, ?5)", params![hash, kind, media_type, data, now()])?;
+        let tx = self.conn.transaction()?;
+        tx.execute("INSERT OR IGNORE INTO blobs(hash, kind, media_type, data, created_unix) VALUES(?1, ?2, ?3, ?4, ?5)", params![hash, kind, media_type, data, now()])?;
         // Identical content is stored once; the pointer records which blob of a kind was written last.
-        self.conn.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("latest:{kind}"), hash])?;
+        tx.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("latest:{kind}"), hash])?;
+        tx.commit()?;
         Ok(hash)
     }
 
@@ -168,5 +184,24 @@ mod tests {
         s.export_copy(&copy).unwrap();
         assert_eq!(Store::open(&copy).unwrap().load().unwrap().arrays[0].tilt.value, 5.0);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newer_project_schema_is_preserved_when_opening_or_undoing() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE project(id INTEGER PRIMARY KEY, body TEXT NOT NULL, rev INTEGER NOT NULL);
+            CREATE TABLE changes(seq INTEGER PRIMARY KEY, before TEXT);").unwrap();
+        let current = Project::new("future", "Future", 4.711, -74.072);
+        let mut future = serde_json::to_value(&current).unwrap();
+        future["schema_version"] = serde_json::json!(solarcraft_model::SCHEMA_VERSION + 1);
+        future["future_data"] = serde_json::json!({"keep": true});
+        let body = future.to_string();
+        conn.execute("INSERT INTO project VALUES(1, ?1, 2)", [&body]).unwrap();
+        conn.execute("INSERT INTO changes VALUES(2, ?1)", [serde_json::to_string(&current).unwrap()]).unwrap();
+        let mut store = Store { conn };
+        assert!(matches!(store.load(), Err(StoreError::NotAProject(_))));
+        assert!(matches!(store.undo(), Err(StoreError::NotAProject(_))));
+        let saved: String = store.conn.query_row("SELECT body FROM project", [], |row| row.get(0)).unwrap();
+        assert_eq!(saved, body);
     }
 }

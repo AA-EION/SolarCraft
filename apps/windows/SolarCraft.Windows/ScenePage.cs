@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 using Windows.Storage.Pickers;
 using Windows.Storage.Streams;
 
@@ -29,7 +30,7 @@ public sealed partial class MainWindow
     private TextBlock? _sceneCounts, _sceneReport;
     private Windows.Foundation.Point? _pressAt;
     private (double yaw, double pitch) _pressCam;
-    private bool _dragging, _rendering;
+    private bool _dragging, _rendering, _renderPending;
 
     private object SceneCamera() => new { yaw_deg = _yaw, pitch_deg = _pitch, zoom = _zoom, width = SceneW, height = SceneH };
     private string? SceneSelected() => _hit?["owner"]?.GetValue<string>();
@@ -71,25 +72,36 @@ public sealed partial class MainWindow
 
     private async void RenderScene()
     {
-        if (_file is null || _sceneImage is null || _rendering) return;
+        if (_file is not { } file || _sceneImage is not { } target) return;
+        if (_rendering)
+        {
+            _renderPending = true;
+            return;
+        }
         _rendering = true;
         try
         {
-            var sc = Api.Invoke("scene_get", new { file = _file });
-            var c = sc?["counts"];
-            if (_sceneCounts is not null && c is not null) _sceneCounts.Text = $"{c["objects"]} objects · {c["faces"]} faces · {c["fields"]} fields · {c["modules"]} modules · {c["strings"]} strings";
-            var r = Api.Invoke("scene_image", new { file = _file, camera = SceneCamera(), color_by = _colorBy, selected = SceneSelected() });
-            var bytes = Convert.FromBase64String(r!["png_base64"]!.GetValue<string>());
+            var request = new { file, camera = SceneCamera(), color_by = _colorBy, selected = SceneSelected() };
+            var (counts, frame, bytes) = await Task.Run(() =>
+            {
+                var scene = Api.Invoke("scene_get", new { file });
+                var rendered = Api.Invoke("scene_image", request)!;
+                return (scene?["counts"], rendered, Convert.FromBase64String(rendered["png_base64"]!.GetValue<string>()));
+            });
+            if (file != _file || target != _sceneImage) return;
+            if (_sceneCounts is not null && counts is not null)
+                _sceneCounts.Text = $"{counts["objects"]} objects · {counts["faces"]} faces · {counts["fields"]} fields · {counts["modules"]} modules · {counts["strings"]} strings";
             using var ms = new InMemoryRandomAccessStream();
             await ms.WriteAsync(bytes.AsBuffer());
             ms.Seek(0);
             var bmp = new BitmapImage();
             await bmp.SetSourceAsync(ms);
-            _sceneImage.Source = bmp;
+            if (file != _file || target != _sceneImage) return;
+            target.Source = bmp;
             if (_sceneLegend is not null)
             {
                 _sceneLegend.Children.Clear();
-                foreach (var e in Arr(r["legend"]))
+                foreach (var e in Arr(frame["legend"]))
                 {
                     var rgb = Arr(e?[1]).Select(x => (byte)x!.GetValue<int>()).ToArray();
                     if (rgb.Length != 3) continue;
@@ -98,7 +110,15 @@ public sealed partial class MainWindow
             }
         }
         catch (Exception ex) { ShowError(ex.Message); }
-        finally { _rendering = false; }
+        finally
+        {
+            _rendering = false;
+            if (_renderPending)
+            {
+                _renderPending = false;
+                RenderScene();
+            }
+        }
     }
 
     private void OnScenePressed(object sender, PointerRoutedEventArgs e)
@@ -169,14 +189,7 @@ public sealed partial class MainWindow
             {
                 p.Children.Add(Btn(T("place_modules"), () =>
                 {
-                    Try(() =>
-                    {
-                        var r = Api.Invoke("scene_edit", new { file = _file, edits = new object[] { new { op = "add_field", name = hit, mount = new { type = "roof", face = hit } } } })!;
-                        var fid = Arr(r["touched"]).First()!.GetValue<string>();
-                        Api.Invoke("scene_bind", new { file = _file, field = fid, array_id = FirstArray(), match_array = false });
-                        Api.Invoke("scene_edit", new { file = _file, edits = new object[] { new { op = "place_modules", field = fid } } });
-                    });
-                    Reload();
+                    if (Try(() => Api.Invoke("scene_place_roof", new { file = _file, face = hit }))) Reload();
                 }, true));
             }
         }
@@ -187,7 +200,7 @@ public sealed partial class MainWindow
             var mps = Num(T("modules_per_string"), 8, 200);
             p.Children.Add(Row(mps,
                 Btn(T("route_strings"), () => SceneEdit(new object[] { new { op = "route_strings", field = fid, modules_per_string = (int)mps.Value } })),
-                Btn(T("fit_to_array"), () => { Try(() => Api.Invoke("scene_bind", new { file = _file, field = fid, array_id = FirstArray(), match_array = true })); Reload(); })));
+                Btn(T("fit_to_array"), () => { Try(() => Api.Invoke("scene_bind", new { file = _file, field = fid, array_id = string.IsNullOrEmpty(S(f, "array_id")) ? FirstArray() : S(f, "array_id"), match_array = true })); Reload(); })));
             if (hit.Contains("/m")) p.Children.Add(Btn("Remove " + hit.Split('/').Last(), () => SceneEdit(new object[] { new { op = "remove_modules", field = fid, modules = new[] { hit } } })));
             p.Children.Add(Btn(T("delete_selected"), () => { _hit = null; SceneEdit(new object[] { new { op = "remove_field", id = fid } }); }));
         }

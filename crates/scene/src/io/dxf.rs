@@ -225,7 +225,7 @@ pub fn import(bytes: &[u8], name: &str, options: &Value) -> Result<Imported, Str
         if thick <= 0.0 { fid.note(format!("closed polylines without thickness became flat-roofed buildings {default_h} m high; adjust heights and roofs")); }
         let mut id = format!("dxf-fp-{}", k + 1);
         while !used.insert(id.clone()) { id.push('_'); }
-        imp.objects.push(Object { id: id.clone(), name: format!("{layer} footprint {}", k + 1), layer: "imported".into(), kind: Kind::Building { footprint: pts, base_z: z, eave_height: h, roof: Roof::Flat, openings: vec![] }, hidden: false, properties: Default::default(), source: Some(Source { format: "dxf".into(), file: name.into(), external_id: format!("{layer}#{}", k + 1) }) });
+        imp.objects.push(Object { id: id.clone(), name: format!("{layer} footprint {}", k + 1), layer: "imported".into(), kind: Kind::Building { footprint: pts, base_z: z, eave_height: h, roof: Roof::Flat, openings: vec![] }, hidden: false, properties: Default::default(), source: Some(Source { format: "dxf".into(), file: name.into(), external_id: format!("{layer}#{}", k + 1), local_geometry: false }) });
     }
     for (k, n) in other { fid.lost(format!("{n} × {k}")); }
     fid.georeference = "none (DXF has no georeference); the scene keeps its own".into();

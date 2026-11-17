@@ -15,6 +15,9 @@ fn f64_or_nan<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
 pub struct Hour {
     /// UTC Unix seconds at which irradiance is representative (interval midpoint).
     pub unix_mid: i64,
+    /// Start of the hourly energy interval in UTC, when known separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_start: Option<i64>,
     #[serde(deserialize_with = "f64_or_nan")]
     pub ghi: f64,
     #[serde(deserialize_with = "f64_or_nan")]
@@ -54,6 +57,18 @@ pub struct Weather {
     pub hours: Vec<Hour>,
 }
 
+impl Weather {
+    pub fn interval_start(&self, hour: &Hour) -> i64 {
+        if let Some(start) = hour.unix_start { return start; }
+        // Older PVGIS imports stored the representative time and the offset in provenance.
+        let offset = self.provenance.notes.iter().find_map(|note| {
+            note.strip_prefix("Irradiance time offset ")?
+                .strip_suffix(" h applied")?.parse::<f64>().ok()
+        }).unwrap_or(0.5);
+        hour.unix_mid - (offset * 3600.0).round() as i64
+    }
+}
+
 #[derive(Debug)]
 pub struct WeatherError(pub String);
 impl std::fmt::Display for WeatherError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) } }
@@ -82,7 +97,7 @@ pub fn parse_pvgis_tmy(json: &str, url: &str) -> Result<Weather, WeatherError> {
         let (y, mo, d, hh, mm) = (p(0, 4)?, p(4, 6)? as u32, p(6, 8)? as u32, p(9, 11)?, p(11, 13)?);
         let start = days_from_civil(y, mo, d) * 86400 + hh * 3600 + mm * 60;
         let f = |k: &str| r[k].as_f64().unwrap_or(f64::NAN);
-        hours.push(Hour { unix_mid: start + (offset_h * 3600.0).round() as i64, ghi: f("G(h)"), dni: f("Gb(n)"), dhi: f("Gd(h)"), temp_air: f("T2m"), wind: f("WS10m"), pressure: f("SP") });
+        hours.push(Hour { unix_mid: start + (offset_h * 3600.0).round() as i64, unix_start: Some(start), ghi: f("G(h)"), dni: f("Gb(n)"), dhi: f("Gd(h)"), temp_air: f("T2m"), wind: f("WS10m"), pressure: f("SP") });
     }
     let mut notes = vec![format!("PVGIS TMY, radiation database {}, years {}–{}", meteo["radiation_db"].as_str().unwrap_or("?"), meteo["year_min"], meteo["year_max"])];
     let horizon = meteo["use_horizon"].as_bool().unwrap_or(false);
@@ -141,6 +156,7 @@ pub fn parse_epw(text: &str, source_name: &str) -> Result<Weather, WeatherError>
         let local_mid = days_from_civil(year, mo, d) * 86400 + hr * 3600 - 1800;
         hours.push(Hour {
             unix_mid: local_mid - (tz * 3600.0).round() as i64,
+            unix_start: None,
             temp_air: f(6, 99.9), pressure: f(9, 999_999.0), ghi: f(13, 9999.0), dni: f(14, 9999.0), dhi: f(15, 9999.0), wind: f(21, 999.0),
         });
     }
@@ -204,6 +220,8 @@ mod tests {
         assert_eq!(w.hours[0].unix_mid, expected);
         assert_eq!((w.hours[0].ghi, w.hours[0].dni, w.hours[0].dhi, w.hours[0].wind), (800.0, 500.0, 300.0, 2.5));
     }
+    fn expected_pvgis_start() -> i64 { days_from_civil(2008, 1, 1) * 86400 + 17 * 3600 }
+
     #[test]
     fn pvgis_offset_and_error() {
         let j = r#"{"inputs":{"location":{"latitude":4.7,"longitude":-74.1,"elevation":2555,"irradiance_time_offset":0.5},"meteo_data":{"radiation_db":"PVGIS-ERA5","year_min":2005,"year_max":2023,"use_horizon":true,"horizon_db":"DEM-calculated"}},
@@ -211,6 +229,10 @@ mod tests {
         let w = parse_pvgis_tmy(j, "u").unwrap();
         assert_eq!(w.hours[0].unix_mid, days_from_civil(2008, 1, 1) * 86400 + 17 * 3600 + 1800);
         assert!(w.horizon_applied);
+        assert_eq!(w.interval_start(&w.hours[0]), expected_pvgis_start());
+        let mut legacy = w;
+        legacy.hours[0].unix_start = None;
+        assert_eq!(legacy.interval_start(&legacy.hours[0]), expected_pvgis_start());
         assert!(parse_pvgis_tmy(r#"{"message":"Location over the sea"}"#, "u").unwrap_err().0.contains("sea"));
     }
 }
@@ -228,7 +250,7 @@ pub fn synthetic_clear_sky(lat: f64, lon: f64, year: i64) -> Weather {
         let sp = spa::solar_position(t as f64, &obs, spa::delta_t_estimate(year as f64));
         let ghi = irr::clearsky_haurwitz(sp.apparent_zenith);
         let (dni, dhi) = irr::erbs(ghi, sp.apparent_zenith, irr::dni_extra(solarcraft_pv::day_of_year_utc(t as f64) as f64, 1366.1));
-        Hour { unix_mid: t, ghi, dni, dhi, temp_air: 20.0, wind: 2.0, pressure: f64::NAN }
+        Hour { unix_mid: t, unix_start: None, ghi, dni, dhi, temp_air: 20.0, wind: 2.0, pressure: f64::NAN }
     }).collect();
     Weather {
         latitude: lat, longitude: lon, elevation: f64::NAN, horizon_applied: false,

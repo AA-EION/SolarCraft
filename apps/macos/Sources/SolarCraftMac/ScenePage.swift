@@ -17,6 +17,8 @@ struct ScenePage: View {
     @State private var scene: JSONDict = [:]
     @State private var hit: JSONDict = [:]
     @State private var dragFrom: (Double, Double)?
+    @State private var rendering = false
+    @State private var renderPending = false
     @State private var form = "building"
     @State private var w = 14.0
     @State private var d = 9.0
@@ -50,14 +52,49 @@ struct ScenePage: View {
 
     func refresh() {
         guard !file.isEmpty else { return }
-        if let s = call("scene_get", ["file": file]) { scene = s }
-        var p: [String: Any] = ["file": file, "camera": camera, "color_by": colorBy]
-        if let s = selected { p["selected"] = s }
-        guard let r = call("scene_image", p), let b64 = r["png_base64"] as? String, let data = Data(base64Encoded: b64) else { return }
-        image = NSImage(data: data)
-        legend = (r["legend"] as? [[Any]] ?? []).compactMap { e in
-            guard e.count == 2, let label = e[0] as? String, let c = e[1] as? [NSNumber], c.count == 3 else { return nil }
-            return (label, Color(red: c[0].doubleValue / 255, green: c[1].doubleValue / 255, blue: c[2].doubleValue / 255))
+        if rendering {
+            renderPending = true
+            return
+        }
+        rendering = true
+        let path = file
+        let angles = (yaw, pitch, zoom)
+        let dimensions = (Double(size.width), Double(size.height))
+        let color = colorBy
+        let selection = selected
+        Task { @MainActor in
+            defer {
+                rendering = false
+                if renderPending {
+                    renderPending = false
+                    refresh()
+                }
+            }
+            do {
+                let (sceneData, frameData) = try await Task.detached(priority: .userInitiated) {
+                    let camera = ["yaw_deg": angles.0, "pitch_deg": angles.1, "zoom": angles.2,
+                                  "width": dimensions.0, "height": dimensions.1]
+                    var params: JSONDict = ["file": path, "camera": camera, "color_by": color]
+                    if let selection { params["selected"] = selection }
+                    return (try Core.invokeRaw("scene_get", ["file": path]),
+                            try Core.invokeRaw("scene_image", params))
+                }.value
+                guard path == file else { return }
+                scene = (try JSONSerialization.jsonObject(with: sceneData) as? JSONDict) ?? [:]
+                guard let frame = try JSONSerialization.jsonObject(with: frameData) as? JSONDict,
+                      let encoded = frame["png_base64"] as? String,
+                      let data = Data(base64Encoded: encoded) else { return }
+                image = NSImage(data: data)
+                legend = (frame["legend"] as? [[Any]] ?? []).compactMap { entry in
+                    guard entry.count == 2, let label = entry[0] as? String,
+                          let rgb = entry[1] as? [NSNumber], rgb.count == 3 else { return nil }
+                    return (label, Color(red: rgb[0].doubleValue / 255,
+                                         green: rgb[1].doubleValue / 255, blue: rgb[2].doubleValue / 255))
+                }
+                m.error = nil
+            } catch {
+                if path == file { m.error = error.localizedDescription }
+            }
         }
     }
 
@@ -149,10 +186,10 @@ struct ScenePage: View {
                     }
                     if hitId.contains("/roof-") {
                         Button(m.t("place_modules")) {
-                            guard let r = call("scene_edit", ["file": file, "edits": [["op": "add_field", "name": hitId, "mount": ["type": "roof", "face": hitId]]]]),
-                                  let id = (r["touched"] as? [String])?.first else { return }
-                            _ = call("scene_bind", ["file": file, "field": id, "array_id": str(arrays.first ?? [:], "id"), "match_array": false])
-                            edit([["op": "place_modules", "field": id]])
+                            if call("scene_place_roof", ["file": file, "face": hitId]) != nil {
+                                m.reload()
+                                refresh()
+                            }
                         }
                     }
                 }
@@ -162,7 +199,9 @@ struct ScenePage: View {
                     HStack {
                         Button(m.t("route_strings")) { edit([["op": "route_strings", "field": str(f, "id"), "modules_per_string": mps]]) }
                         Button(m.t("fit_to_array")) {
-                            _ = call("scene_bind", ["file": file, "field": str(f, "id"), "array_id": str(arrays.first ?? [:], "id"), "match_array": true])
+                            let boundArray = str(f, "array_id")
+                            let arrayId = boundArray.isEmpty ? str(arrays.first ?? [:], "id") : boundArray
+                            _ = call("scene_bind", ["file": file, "field": str(f, "id"), "array_id": arrayId, "match_array": true])
                             m.reload(); refresh()
                         }
                         Button(role: .destructive) { edit([["op": "remove_field", "id": str(f, "id")]]); hit = [:] } label: { Image(systemName: "trash") }

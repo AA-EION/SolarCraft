@@ -63,6 +63,10 @@ fn designer_workflow() {
     assert_eq!(items["items"].as_array().unwrap().len(), 3);
     let fitted = ok("library_get", json!({"library": libs, "kind": "module", "id": "user-450"}));
     assert!(fitted["record"]["model_params"]["fit_acceptable"].as_bool().unwrap(), "module fit: {fitted}");
+    ok("library_delete", json!({"library": libs, "kind": "module", "id": "user-450"}));
+    let removed = call("library_get", json!({"library": libs, "kind": "module", "id": "user-450"}));
+    assert_eq!(removed["error"]["code"], json!("NOT_FOUND"));
+    assert!(ok("library_list", json!({"library": libs, "kind": "module"}))["items"].as_array().unwrap().is_empty());
 
     // 3. Roof with a chimney, module and inverter selection.
     ok("set_fields", json!({"file": fs, "edits": [{"pointer": "/arrays/0/module_id", "value": "user-450"}, {"pointer": "/arrays/0/tilt", "value": 15}, {"pointer": "/arrays/0/azimuth", "value": 180},
@@ -178,11 +182,19 @@ fn designer_workflow() {
     let mut t = p["tariff"].clone();
     t["import_price"] = json!(1000);
     ok("set_section", json!({"file": fs, "section": "tariff", "value": t}));
+    for method in ["results_summary", "report_preview", "cash_flow"] {
+        assert_eq!(call(method, json!({"file": fs}))["error"]["code"], "NO_RESULTS",
+            "{method} must refuse results for the previous tariff");
+    }
     let cf2 = ok("simulate", json!({"file": fs}));
     eprintln!("NPV {npv1:.0} → {:.0} with a higher import price", num(&cf2, "/finance/npv"));
     assert!(num(&cf2, "/finance/npv") > npv1 + 1e5);
     let years = ok("cash_flow", json!({"file": fs}));
     assert_eq!(years["years"].as_array().unwrap().len(), 21);
+    ok("undo", json!({"file": fs}));
+    let restored = ok("results_summary", json!({"file": fs}));
+    assert_eq!(restored["manifest"]["inputs_hash"], cf1["manifest"]["inputs_hash"]);
+    ok("set_section", json!({"file": fs, "section": "tariff", "value": t}));
 
     // 10. Compare variants.
     let cmp = ok("compare_variants", json!({"file": fs}));

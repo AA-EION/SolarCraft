@@ -10,7 +10,7 @@
 use base64::Engine;
 use serde::Serialize;
 use serde_json::{json, Value};
-use solarcraft_model::plant::{CatalogRef, ExportCompensation, Tariff, ZoneSchedule};
+use solarcraft_model::plant::{CatalogRef, CatalogTierRate, ExportCompensation, Tariff, ZoneSchedule};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodeError { Base64(String), Utf16(String), Json(String), Shape(String) }
@@ -80,18 +80,7 @@ pub fn concepts(rec: &Value) -> Vec<Concept> {
 /// Rate from tiers keyed by a breakpoint: the reached band, or (zoning) the quantity-weighted mix of bands.
 /// Tiers are sorted by key (lower bound, inclusive).
 pub fn tier_rate(tiers: &[[f64; 3]], quantity: f64, zoning: bool) -> Option<f64> {
-    let mut t: Vec<[f64; 3]> = tiers.to_vec();
-    t.sort_by(|a, b| a[0].total_cmp(&b[0]));
-    let first = t.first()?;
-    if t.len() == 1 || quantity <= first[0] { return Some(first[2]); }
-    if !zoning { return t.iter().rev().find(|x| quantity >= x[0]).map(|x| x[2]); }
-    let mut cost = 0.0;
-    for (i, x) in t.iter().enumerate() {
-        let hi = t.get(i + 1).map_or(quantity, |n| n[0].min(quantity));
-        if hi > x[0] { cost += (hi - x[0]) * x[2]; }
-    }
-    let base = first[0].min(quantity);
-    Some(if quantity - base > 0.0 { (cost + base * first[2]) / quantity } else { first[2] })
+    CatalogTierRate::rate(tiers, quantity, zoning)
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -102,17 +91,39 @@ pub struct Conversion { pub notes: Vec<String>, pub unsupported: Vec<String> }
 pub fn apply(t: &mut Tariff, family: TariffFamily, rec: &Value, ctx: TariffContext, cref: CatalogRef) -> Conversion {
     let mut cv = Conversion::default();
     let zoning = rec["zoning"].as_bool().unwrap_or(false);
+    if family != TariffFamily::FeedIn {
+        let defaults = Tariff::default();
+        t.import_price = defaults.import_price;
+        t.fixed_per_month = defaults.fixed_per_month;
+        t.demand_charge_per_kw_month = defaults.demand_charge_per_kw_month;
+        t.tou.clear();
+        t.zones = None;
+        t.catalog_import_rate = None;
+        t.catalog_base_charge = None;
+        if t.export_catalog_ref.is_none() && matches!(t.export, ExportCompensation::NetMetering { .. }) {
+            t.export = defaults.export;
+        }
+    }
     let unit_scale = |u: &str| -> Option<f64> { match u.to_ascii_lowercase().as_str() { "month" => Some(1.0), "year" | "jahr" => Some(1.0 / 12.0), _ => None } };
     for c in concepts(rec) {
         let u = c.unit.to_ascii_lowercase();
         match (family, c.concept) {
             (TariffFamily::FeedIn, 0) => match tier_rate(&c.tiers, ctx.installed_kwp, zoning) {
-                Some(r) if u.starts_with("kwh") => { t.export = ExportCompensation::Fixed { price: r }; cv.notes.push(format!("feed-in {r} per kWh (tier by installed {} kWp, zoning {zoning})", ctx.installed_kwp)); }
+                Some(r) if u.starts_with("kwh") => {
+                    t.export = ExportCompensation::Fixed { price: r };
+                    t.export_catalog_ref = Some(cref.clone());
+                    t.catalog_export_rate = Some(CatalogTierRate { tiers: c.tiers, zoning, applied_rate: r, unit_scale: 1.0 });
+                    cv.notes.push(format!("feed-in {r} per kWh (tier by installed {} kWp, zoning {zoning})", ctx.installed_kwp));
+                }
                 _ => cv.unsupported.push(format!("feed-in concept with unit '{}'", c.unit)),
             },
             (TariffFamily::FeedIn, k) => cv.unsupported.push(format!("production concept {k} ({}) — {} rows preserved", if k == 1 { "Consumption" } else { "Generation" }, c.tiers.len())),
             (_, 0) => match (unit_scale(&u), tier_rate(&c.tiers, ctx.annual_consumption_kwh, zoning)) {
-                (Some(s), Some(r)) => { t.fixed_per_month = r * s; cv.notes.push(format!("base charge {r} per {}", c.unit)); }
+                (Some(s), Some(r)) => {
+                    t.fixed_per_month = r * s;
+                    t.catalog_base_charge = Some(CatalogTierRate { tiers: c.tiers, zoning, applied_rate: t.fixed_per_month, unit_scale: s });
+                    cv.notes.push(format!("base charge {r} per {}", c.unit));
+                }
                 _ => cv.unsupported.push(format!("base concept with unit '{}'", c.unit)),
             },
             (_, 1) => match tier_rate(&c.tiers, 0.0, false) {
@@ -120,7 +131,11 @@ pub fn apply(t: &mut Tariff, family: TariffFamily, rec: &Value, ctx: TariffConte
                 _ => cv.unsupported.push(format!("demand concept with unit '{}'", c.unit)),
             },
             (_, 2) => match tier_rate(&c.tiers, ctx.annual_consumption_kwh, zoning) {
-                Some(r) if u.starts_with("kwh") => { t.import_price = r; cv.notes.push(format!("energy {r} per kWh (tier by {} kWh/yr, zoning {zoning})", ctx.annual_consumption_kwh)); }
+                Some(r) if u.starts_with("kwh") => {
+                    t.import_price = r;
+                    t.catalog_import_rate = Some(CatalogTierRate { tiers: c.tiers, zoning, applied_rate: r, unit_scale: 1.0 });
+                    cv.notes.push(format!("energy {r} per kWh (tier by {} kWh/yr, zoning {zoning})", ctx.annual_consumption_kwh));
+                }
                 _ => cv.unsupported.push(format!("energy concept with unit '{}'", c.unit)),
             },
             (_, k) => cv.unsupported.push(format!("concept {k} with unit '{}'", c.unit)),
@@ -133,7 +148,7 @@ pub fn apply(t: &mut Tariff, family: TariffFamily, rec: &Value, ctx: TariffConte
                 Err(e) => cv.unsupported.push(format!("schedule not decoded: {e}")),
             }
         }
-        if family == TariffFamily::NetMetering { t.export = ExportCompensation::NetMetering { surplus_price: 0.0 }; cv.notes.push("net metering: monthly offset at import price; surplus price 0 (source has no surplus rate)".into()); }
+        if family == TariffFamily::NetMetering && t.export_catalog_ref.is_none() { t.export = ExportCompensation::NetMetering { surplus_price: 0.0 }; cv.notes.push("net metering: monthly offset at import price; surplus price 0 (source has no surplus rate)".into()); }
         t.name = rec["name"].as_str().unwrap_or("").to_string();
         t.catalog_ref = Some(cref);
     }

@@ -13,7 +13,7 @@ fn synthetic(lat: f64, lon: f64) -> Weather {
         let sp = spa::solar_position(t as f64, &obs, 69.0);
         let ghi = irr::clearsky_haurwitz(sp.apparent_zenith) * if h % 7 == 0 { 0.3 } else { 1.0 };
         let (dni, dhi) = irr::erbs(ghi, sp.apparent_zenith, irr::dni_extra(solarcraft_pv::day_of_year_utc(t as f64) as f64, 1366.1));
-        Hour { unix_mid: t, ghi, dni, dhi, temp_air: 15.0 + 10.0 * ((h as f64 / 24.0 - 15.0) * std::f64::consts::TAU / 24.0).sin(), wind: 2.0, pressure: 101325.0 }
+        Hour { unix_mid: t, unix_start: None, ghi, dni, dhi, temp_air: 15.0 + 10.0 * ((h as f64 / 24.0 - 15.0) * std::f64::consts::TAU / 24.0).sin(), wind: 2.0, pressure: 101325.0 }
     }).collect();
     Weather { latitude: lat, longitude: lon, elevation: 0.0, horizon_applied: false, provenance: Provenance { provider: "synthetic".into(), dataset: "Haurwitz".into(), url: String::new(), retrieved_unix: 0, licence: "test".into(), notes: vec![] }, hours }
 }
@@ -102,4 +102,66 @@ fn chimney_shading_is_counted_and_grows_with_height() {
     let sun: Vec<_> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, 69.0)).collect();
     let s = solarcraft_engine::near_shading(a, &sun).unwrap();
     assert!(s.beam_shaded.iter().all(|f| (0.0..=1.0).contains(f)) && s.diffuse_factor > 0.5 && s.diffuse_factor <= 1.0, "svf {}", s.diffuse_factor);
+}
+
+
+fn dispatch_fixture(coupling: solarcraft_model::plant::Coupling) -> Project {
+    use solarcraft_model::equipment::{BatteryInverterSpec, BatterySpec, Converter};
+    use solarcraft_model::plant::{BatteryModel, EnergyUse, GridService, Storage};
+
+    let mut project = Project::new("dispatch", "Dispatch", 4.7, -74.0);
+    let mut battery = BatterySpec::generic_lfp(20.0);
+    battery.roundtrip_efficiency = 1.0;
+    battery.self_discharge_pct_per_month = 0.0;
+    battery.converter = Some(Converter {
+        p_rated_w: 5000.0,
+        p_charge_max_w: 2000.0,
+        p_discharge_max_w: 5000.0,
+        efficiency_curve: vec![[0.0, 1.0], [1.0, 1.0]],
+        standby_w: 0.0,
+    });
+    let battery_id = battery.id.clone();
+    project.library.batteries.push(battery);
+    let mut inverter = BatteryInverterSpec::generic(5.0);
+    inverter.id = "ac".into();
+    inverter.standby_w = 0.0;
+    inverter.efficiency_curve = vec![[0.0, 1.0], [1.0, 1.0]];
+    project.library.battery_inverters.push(inverter);
+    project.storage = Some(Storage {
+        battery_id, units: 1, coupling, model: BatteryModel::Simple,
+        soc_min_pct: 5.0, soc_max_pct: 100.0, initial_soc_pct: 100.0,
+        backup_reserve_pct: 0.0, grid_services_pct: 50.0,
+        charge_priority: vec![EnergyUse::Backup, EnergyUse::SelfConsumption, EnergyUse::GridServices],
+        grid_charge_backup: false,
+        grid_service: GridService::ExportWindow { start_hour: 0, end_hour: 24, power_kw: 4.0 },
+        outages: vec![], generator_id: None,
+    });
+    project
+}
+
+#[test]
+fn overlapping_discharge_shares_one_converter_limit() {
+    use solarcraft_engine::energy::dispatch;
+    use solarcraft_model::plant::Coupling;
+    let project = dispatch_fixture(Coupling::AcCoupled { battery_inverter_id: "ac".into() });
+    let result = dispatch(&project, &[], &[4000.0], &[1], 1.0).unwrap();
+    assert_eq!(result.flows.batt_discharge[0], 5000.0);
+    assert_eq!(result.flows.export[0], 1000.0);
+    assert!(result.balance.max_abs_residual_wh < 1e-6);
+}
+
+#[test]
+fn integrated_converter_keeps_its_charge_rating() {
+    use solarcraft_engine::energy::{dispatch, UnitInput};
+    use solarcraft_model::equipment::InverterSpec;
+    use solarcraft_model::plant::Coupling;
+    let mut project = dispatch_fixture(Coupling::Integrated);
+    project.storage.as_mut().unwrap().initial_soc_pct = 5.0;
+    let mut inverter = InverterSpec::generic(5.0);
+    inverter.efficiency_curve = vec![[0.0, 1.0], [1.0, 1.0]];
+    let unit = UnitInput { id: "pv", spec: &inverter, dc_w: vec![5000.0], v_dc: vec![350.0] };
+    let result = dispatch(&project, &[unit], &[0.0], &[1], 1.0).unwrap();
+    assert_eq!(result.flows.batt_charge[0], 2000.0);
+    assert_eq!(result.flows.export[0], 3000.0);
+    assert!(result.balance.max_abs_residual_wh < 1e-6);
 }

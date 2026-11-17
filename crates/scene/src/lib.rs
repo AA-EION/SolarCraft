@@ -58,6 +58,7 @@ pub struct Layer {
 
 fn yes() -> bool { true }
 fn one() -> u32 { SCENE_VERSION }
+fn is_false(value: &bool) -> bool { !value }
 
 /// Where an object came from, when it was imported.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +67,8 @@ pub struct Source {
     pub file: String,
     /// Identifier of the object in the source file (name, GUID, handle).
     pub external_id: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_geometry: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -194,11 +197,12 @@ pub enum Edit {
     /// `id` may be given (imports keep identities); otherwise one is minted.
     AddObject { #[serde(default)] id: Option<String>, name: String, #[serde(default)] layer: Option<String>, kind: Kind, #[serde(default)] properties: BTreeMap<String, String>, #[serde(default)] source: Option<Source> },
     UpdateObject { id: String, #[serde(default)] name: Option<String>, #[serde(default)] layer: Option<String>, #[serde(default)] kind: Option<Kind>, #[serde(default)] hidden: Option<bool>, #[serde(default)] properties: Option<BTreeMap<String, String>> },
+    RelinkObject { id: String, kind: Kind, source: Source },
     Move { id: String, dx: f64, dy: f64, #[serde(default)] dz: f64 },
     RemoveObject { id: String },
     SetGeoref { georef: Georef },
     SetLayer { name: String, #[serde(default)] visible: Option<bool>, #[serde(default)] locked: Option<bool> },
-    AddField { #[serde(default)] id: Option<String>, name: String, #[serde(default)] array_id: Option<String>, mount: place::Mount, #[serde(default)] module: place::ModuleDims, #[serde(default)] layout: place::FieldLayout },
+    AddField { #[serde(default)] id: Option<String>, name: String, #[serde(default)] array_id: Option<String>, mount: place::Mount, #[serde(default)] module: place::ModuleDims, #[serde(default)] layout: place::FieldLayout, #[serde(default)] source: Option<Source> },
     UpdateField { id: String, #[serde(default)] name: Option<String>, #[serde(default)] array_id: Option<Option<String>>, #[serde(default)] mount: Option<place::Mount>, #[serde(default)] module: Option<place::ModuleDims>, #[serde(default)] layout: Option<place::FieldLayout> },
     RemoveField { id: String },
     /// Fill the field's mount with modules (replaces previous placement and strings).
@@ -261,16 +265,29 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
                 if let Some(x) = layer { o.layer = x.clone(); }
                 if let Some(x) = kind {
                     if std::mem::discriminant(x) != std::mem::discriminant(&o.kind) { return Err(err("KIND_CHANGE", format!("{id}: the object type cannot change; remove and add instead"), i)); }
+                    if *x != o.kind { if let Some(source) = &mut o.source { source.local_geometry = true; } }
                     o.kind = x.clone();
                 }
                 if let Some(x) = hidden { o.hidden = *x; }
                 if let Some(x) = properties { o.properties = x.clone(); }
                 touched.push(id.clone());
             }
+            Edit::RelinkObject { id, kind, source } => {
+                if locked(&s, id) { return Err(err("LAYER_LOCKED", format!("{id} is on a locked layer"), i)); }
+                let o = s.objects.iter_mut().find(|o| &o.id == id).ok_or_else(|| err("NOT_FOUND", format!("no object {id}"), i))?;
+                if o.source.as_ref().is_some_and(|s| s.local_geometry) {
+                    return Err(err("RELINK_CONFLICT", format!("{id} contains local geometry edits"), i));
+                }
+                if std::mem::discriminant(kind) != std::mem::discriminant(&o.kind) { return Err(err("KIND_CHANGE", format!("{id}: the object type cannot change during relink"), i)); }
+                o.kind = kind.clone();
+                o.source = Some(source.clone());
+                touched.push(id.clone());
+            }
             Edit::Move { id, dx, dy, dz } => {
                 if locked(&s, id) { return Err(err("LAYER_LOCKED", format!("{id} is on a locked layer"), i)); }
                 let o = s.objects.iter_mut().find(|o| &o.id == id).ok_or_else(|| err("NOT_FOUND", format!("no object {id}"), i))?;
                 shift(&mut o.kind, [*dx, *dy, *dz]);
+                if let Some(source) = &mut o.source { source.local_geometry |= *dx != 0.0 || *dy != 0.0 || *dz != 0.0; }
                 touched.push(id.clone());
             }
             Edit::RemoveObject { id } => {
@@ -293,7 +310,7 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
                 if let Some(v) = visible { l.visible = *v; }
                 if let Some(v) = locked { l.locked = *v; }
             }
-            Edit::AddField { id, name, array_id, mount, module, layout } => {
+            Edit::AddField { id, name, array_id, mount, module, layout, source } => {
                 let id = match id {
                     Some(x) if s.object(x).is_some() || s.field(x).is_some() => return Err(err("DUPLICATE_ID", format!("{x} already exists"), i)),
                     Some(x) if x.is_empty() || x.contains('/') => return Err(err("INVALID_ID", format!("'{x}': identifiers are non-empty and contain no '/'"), i)),
@@ -301,7 +318,7 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
                     None => s.mint("fld"),
                 };
                 touched.push(id.clone());
-                s.fields.push(place::ModuleField { id, name: name.clone(), array_id: array_id.clone(), mount: mount.clone(), module: module.clone(), layout: layout.clone(), modules: vec![], strings: vec![], inverter_at: None });
+                s.fields.push(place::ModuleField { id, name: name.clone(), array_id: array_id.clone(), mount: mount.clone(), module: module.clone(), layout: layout.clone(), modules: vec![], strings: vec![], inverter_at: None, source: source.clone() });
             }
             Edit::UpdateField { id, name, array_id, mount, module, layout } => {
                 let f = s.fields.iter_mut().find(|f| &f.id == id).ok_or_else(|| err("NOT_FOUND", format!("no field {id}"), i))?;

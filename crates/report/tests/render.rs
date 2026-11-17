@@ -13,7 +13,7 @@ fn fixture() -> (Project, solarcraft_engine::SimResult) {
         let sp = spa::solar_position(t as f64, &obs, 69.0);
         let ghi = irr::clearsky_haurwitz(sp.apparent_zenith) * 0.7;
         let (dni, dhi) = irr::erbs(ghi, sp.apparent_zenith, irr::dni_extra(solarcraft_pv::day_of_year_utc(t as f64) as f64, 1366.1));
-        Hour { unix_mid: t, ghi, dni, dhi, temp_air: 14.0, wind: 2.0, pressure: 75000.0 }
+        Hour { unix_mid: t, unix_start: None, ghi, dni, dhi, temp_air: 14.0, wind: 2.0, pressure: 75000.0 }
     }).collect();
     let w = Weather { latitude: lat, longitude: lon, elevation: 2600.0, horizon_applied: true, provenance: Provenance { provider: "test".into(), dataset: "synthetic".into(), url: String::new(), retrieved_unix: 0, licence: "Weather data: test".into(), notes: vec![] }, hours };
     let mut p = Project::new("t", "Casa de prueba", lat, lon);

@@ -49,7 +49,12 @@ fn tariff_family(f: &str) -> Option<cat::tariff::TariffFamily> {
 /// consumption and installed kWp.
 pub fn apply_tariff(catalog: &Path, project: &Path, import: Option<(&str, &str, Option<i64>)>, export: Option<(&str, &str, Option<i64>)>) -> Result<Value> {
     let (mut s, mut p) = open(project)?;
-    let kwp: f64 = p.arrays.iter().map(|a| a.target_kwp.value).sum();
+    let electrical = solarcraft_model::derive::electrical(&p);
+    let assigned = solarcraft_model::derive::modules_by_array(&electrical);
+    let kwp: f64 = p.arrays.iter().filter_map(|array| {
+        let module = p.library.module(&array.module_id.value)?;
+        Some(f64::from(*assigned.get(&array.id)?) * module.pmp_stc() / 1000.0)
+    }).sum();
     let ctx = cat::tariff::TariffContext { annual_consumption_kwh: p.loads.annual_kwh, installed_kwp: kwp };
     let mut t = p.tariff.clone();
     let mut out = vec![];
