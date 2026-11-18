@@ -16,6 +16,9 @@ rusqlite.workspace = true
 calamine = "0.38"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+roxmltree = "0.21"
+zip = { version = "9.6", default-features = false, features = ["deflate"] }
+flate2 = "1"
 solarcraft-pv = { path = "../pv" }
 solarcraft-model = { path = "../model" }
 solarcraft-scene = { path = "../scene" }

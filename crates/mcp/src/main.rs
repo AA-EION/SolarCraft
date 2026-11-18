@@ -31,6 +31,14 @@ struct FileArg {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct PvsolImportArgs {
+    /// Saved .pvprj archive within the workspace.
+    source: String,
+    /// A new .solarcraft destination within the workspace. Omit to preview.
+    file: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct NetworkFaultArgs {
     /// Project file within the MCP workspace.
     file: String,
@@ -385,6 +393,21 @@ impl SolarCraftMcp {
     async fn get_project(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
         let f = self.path(&a.file, true, true)?;
         match app::get_project(&f) { Ok(p) => ok(to_value(&p)), Err(e) => app_err(e) }
+    }
+
+    #[tool(description = "Inspect or import a local PV*SOL v23/v24 on-grid project into a new SolarCraft copy with saved reference results.")]
+    async fn import_pvsol(&self, Parameters(a): Parameters<PvsolImportArgs>) -> Result<CallToolResult, ErrorData> {
+        let source = self.path(&a.source, false, true)?;
+        let mut request = json!({"source": source});
+        if let Some(file) = a.file {
+            request["file"] = json!(self.path(&file, true, false)?);
+        }
+        self.api("import_pvsol", request)
+    }
+
+    #[tool(description = "Compare a SolarCraft simulation with the PV DC and inverter AC results saved in its imported PV*SOL project.")]
+    async fn compare_pvsol(&self, Parameters(a): Parameters<FileArg>) -> Result<CallToolResult, ErrorData> {
+        self.api("compare_pvsol", json!({"file": self.path(&a.file, true, true)?}))
     }
 
     #[tool(description = "Set fields by JSON pointer in one transaction (marks them user-owned and re-derives the rest). Use dry_run to preview. Undo with `undo`.")]

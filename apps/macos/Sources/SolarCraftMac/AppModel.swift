@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
     /// Raw project and result documents for the plant pages (JSON objects from the core).
     @Published var raw: JSONDict = [:]
     @Published var summary: JSONDict?
+    @Published var pvsolComparison: JSONDict?
     @Published var designSchedule: JSONDict?
     @Published var workflow: JSONDict = [:]
     @Published private(set) var completedRuns = 0
@@ -51,6 +52,7 @@ final class AppModel: ObservableObject {
             raw = (try? Core.invokeJSON("get_project", ["file": file])) ?? [:]
             workflow = (try? Core.invokeJSON("workflow_get", ["file": file])) ?? [:]
             summary = try? Core.invokeJSON("results_summary", ["file": file])
+            pvsolComparison = try? Core.invokeJSON("compare_pvsol", ["file": file])
             stringingDoc = try? Core.invokeJSON("stringing", ["file": file])
             designSchedule = try? Core.invokeJSON("design_schedule", ["file": file])
             cash = try? Core.invokeJSON("cash_flow", ["file": file])
@@ -211,8 +213,21 @@ final class AppModel: ObservableObject {
 
     func openProject() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [Self.projectType]
+        panel.allowedContentTypes = [Self.projectType, UTType(filenameExtension: "pvprj") ?? .data]
         guard panel.runModal() == .OK, let u = panel.url else { return }
+        if u.pathExtension.lowercased() == "pvprj" {
+            let savePanel = NSSavePanel()
+            savePanel.allowedContentTypes = [Self.projectType]
+            savePanel.nameFieldStringValue = u.deletingPathExtension().lastPathComponent + ".solarcraft"
+            guard savePanel.runModal() == .OK, let target = savePanel.url else { return }
+            do {
+                _ = try Core.invokeJSON("import_pvsol", ["source": u.path, "file": target.path])
+                url = target
+                reload()
+                notice = t("pvsol_imported")
+            } catch { self.error = error.localizedDescription }
+            return
+        }
         url = u
         reload()
     }

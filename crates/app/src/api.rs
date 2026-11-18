@@ -35,7 +35,7 @@ fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Va
 
 pub const METHODS: &[&str] = &[
     "scene_get", "scene_edit", "scene_place_roof", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
-    "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
+    "version", "ui_strings", "create_project", "get_project", "import_pvsol", "compare_pvsol", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
     "use_demo_weather", "set_roof", "photo_source", "photo_saved", "photo_layout", "add_module", "simulate", "explain", "export_report", "undo", "history",
     "workflow_get", "workflow_set", "add_array", "cable_plan", "network_faults", "design_schedule", "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
@@ -60,6 +60,12 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "ui_strings" => Ok(v(&crate::ui_strings::strings(params.get("lang").and_then(Value::as_str).unwrap_or("en")))),
         "create_project" => Ok(v(&app::create_project(&path(params, "file")?, &s(params, "name")?, f(params, "latitude")?, f(params, "longitude")?, params.get("target_kwp").and_then(Value::as_f64))?)),
         "get_project" => Ok(v(&app::get_project(&path(params, "file")?)?)),
+        "import_pvsol" => {
+            let source = path(params, "source")?;
+            let destination = if params.get("file").is_some() { Some(path(params, "file")?) } else { None };
+            app::pvsol_import::import(&source, destination.as_deref())
+        }
+        "compare_pvsol" => app::pvsol_import::compare(&path(params, "file")?),
         "set_fields" => {
             let file = path(params, "file")?;
             let edits: Vec<(String, Value)> = arg(params, "edits")?.as_array().ok_or_else(|| AppError { code: "INVALID_ARGUMENT", message: "'edits' must be an array".into() })?

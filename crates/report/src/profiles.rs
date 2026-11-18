@@ -402,6 +402,13 @@ fn network_fault_section(input: &ReportInput) -> ContentSection {
             tr(l, "Required", "Requerida", "Erforderlich", "Exigida"), outcome.clone()],
             result.faults.iter().flat_map(|f| f.coordination.iter().map(|p|
                 [f.bus.clone(), format!("{} → {}", p.backup_link, p.primary_link), fmt(p.time_ratio), n(p.minimum_time_ratio, 3), status(p.status)])));
+        section.table(vec![bus.clone(), tr(l, "Opened links", "Enlaces abiertos", "Geöffnete Zweige", "Ramos abertos"),
+            tr(l, "Elapsed (s)", "Transcurrido (s)", "Verstrichen (s)", "Decorrido (s)"),
+            tr(l, "Remaining (kA)", "Restante (kA)", "Verbleibend (kA)", "Restante (kA)"), outcome.clone()],
+            result.faults.iter().flat_map(|f| f.post_trip.iter().flat_map(|seq| seq.stages.iter().map(|stage| [
+                f.bus.clone(), stage.open_links.join(", "), n(stage.elapsed_seconds, 3),
+                n(stage.remaining_maximum_ka, 3), status(stage.status),
+            ]))));
         for fault in &result.faults {
             if !fault.outside_source_envelope.is_empty() {
                 section.text(format!("{} · {} · {}", fault.bus,

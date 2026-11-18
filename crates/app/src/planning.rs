@@ -84,12 +84,44 @@ pub fn network_faults(path: &Path, edits: Option<Vec<solarcraft_model::fault_net
     }
     let results = studies.iter().map(|study| study.assess().map_err(|error| e("FAULT_STUDY", format!("{}: {error}", study.name))))
         .collect::<Result<Vec<_>>>()?;
-    let response = json!({"studies": studies, "results": results, "example": network_fault_example()});
+    let response = json!({"studies": studies, "results": results,
+        "example": network_fault_example(), "mesh_example": network_mesh_example()});
     if commit {
         store.update("save network fault studies", |current| current.network_fault_studies = studies)
             .map_err(|error| e("PROJECT_SAVE", error))?;
     }
     Ok(response)
+}
+
+fn network_mesh_example() -> Value {
+    let link = |id, from, to, resistance, fast| {
+        let clearing = if fast { 0.04 } else { 0.11 };
+        let earliest = if fast { 0.02 } else { 0.10 };
+        let model = if fast { "Synthetic fast trip" } else { "Synthetic delayed trip" };
+        json!({"id": id, "from": from, "to": to,
+            "minimum_duty":{"r_mohm":resistance},"maximum_duty":{"r_mohm":resistance},
+            "device":{"model":model,"reference":"Synthetic DC breaker example","rating":"dc","rated_voltage_v":60,
+                "breaking_ka":2,"making_peak_ka":3,"documented_peak_ka":2,"peak_reference":"Synthetic duty bound",
+                "direct_curve_max_ka":2,
+                "minimum_operating":{"kind":"breaker","model":model,"reference":"Synthetic earliest operation",
+                    "points":[[150,earliest],[1500,earliest]]},
+                "maximum_clearing":{"kind":"breaker","model":model,"reference":"Synthetic maximum clearing",
+                    "points":[[150,clearing],[1500,clearing]]}
+            }})
+    };
+    json!([{
+        "name":"Example DC ring","reference":"Synthetic demonstration · replace with project and manufacturer data",
+        "domain":"dc_pole_to_pole","maximum_voltage_v":48,"buses":["Supply","Junction","Fault"],
+        "links":[link("Direct","Supply","Fault",80,true),link("Loop feeder","Supply","Junction",40,false),
+            link("Loop output","Junction","Fault",40,false)],
+        "sources":[{"bus":"Supply","name":"Battery","reference":"Synthetic 48 V source",
+            "minimum":{"type":"voltage","volts":48,"impedance":{"r_mohm":20}},
+            "maximum":{"type":"voltage","volts":48,"impedance":{"r_mohm":20}}}],
+        "faults":[{"bus":"Fault","maximum_clear_seconds":0.30,"minimum_time_ratio":1.5,
+            "trip_timing_reference":"Synthetic timing-envelope demonstration",
+            "trip_sequence":[{"open_links":["Direct"],"delay_seconds":0.05},
+                {"open_links":["Loop feeder","Loop output"],"delay_seconds":0.12}]}]
+    }])
 }
 
 fn network_fault_example() -> Value {

@@ -20,6 +20,7 @@ mod load_import;
 pub mod photo;
 pub mod plant_ops;
 pub mod planning;
+pub mod pvsol_import;
 pub mod scene_ops;
 pub mod ui_strings;
 pub mod userlib;

@@ -5,7 +5,7 @@ This file keeps two claims separate:
 - **Independent engineering validation.** SolarCraft is checked against published methods, open implementations and conservation laws.
 - **Reference parity.** SolarCraft's methods are compared with the behaviour recovered statically from PV\*SOL premium 2026 R4.
 
-The private reference contains saved PV\*SOL results. The archived Rexplorer sample's hourly and monthly totals reconcile for four channels. A matched SolarCraft annual replay and accepted per-metric tolerances remain open. An isolated 60-cell module comparison found SolarCraft maximum-power differences of −0.032% at 1,000 W/m² and 25 °C, +3.062% at 200 W/m² and 25 °C, and +0.637% at 800 W/m² and 50 °C, measured against the offline reconstruction of the reference fit.
+The private reference contains saved PV\*SOL results. The archived Rexplorer sample's hourly and monthly totals reconcile for four channels. The versioned importer can now run a scoped PV replay of three archived projects and compare saved inverter AC and available DC channels. Identical-input weather, shading, thermal behavior and accepted per-metric tolerances remain open. An isolated 60-cell module comparison found SolarCraft maximum-power differences of −0.032% at 1,000 W/m² and 25 °C, +3.062% at 200 W/m² and 25 °C, and +0.637% at 800 W/m² and 50 °C, measured against the offline reconstruction of the reference fit. [Project import guide](pvsol-import.md)
 
 ## 1. Independent validation (passing in CI)
 

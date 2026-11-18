@@ -3,7 +3,7 @@
 //! `synchronous=FULL` (see docs/spikes/F-project-store.md). Every save is a
 //! transaction that also appends to the change log, so autosave is implicit
 //! and history/undo survive restarts.
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use solarcraft_model::Project;
 use std::path::Path;
@@ -32,6 +32,12 @@ pub struct Store { conn: Connection }
 #[derive(Debug, Clone)]
 pub struct Change { pub seq: i64, pub op: String, pub at_unix: i64 }
 
+pub struct InitialBlob<'a> {
+    pub kind: &'a str,
+    pub media_type: &'a str,
+    pub data: &'a [u8],
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -48,19 +54,34 @@ impl Store {
 
     /// Create a new project file. Fails if the file exists.
     pub fn create(path: &Path, project: &Project) -> Result<Self> {
-        if path.exists() { return Err(StoreError::NotAProject(format!("{} already exists", path.display()))); }
-        let conn = Connection::open(path)?;
+        Self::create_with_blobs(path, project, "create", &[])
+    }
+
+    /// Initialize one new file with the project and its source/asset blobs in one transaction.
+    pub fn create_with_blobs(path: &Path, project: &Project, op: &str, blobs: &[InitialBlob<'_>]) -> Result<Self> {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+            .map_err(|error| StoreError::NotAProject(format!("{}: {error}", path.display())))?;
+        let result = Self::initialize(path, project, op, blobs);
+        if result.is_err() { let _ = std::fs::remove_file(path); }
+        result
+    }
+
+    fn initialize(path: &Path, project: &Project, op: &str, blobs: &[InitialBlob<'_>]) -> Result<Self> {
+        let mut conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         Self::configure(&conn)?;
-        conn.execute_batch(
+        let tx = conn.transaction()?;
+        tx.execute_batch(
             "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE project(id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL, rev INTEGER NOT NULL);
              CREATE TABLE changes(seq INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, op TEXT NOT NULL, before TEXT);
              CREATE TABLE blobs(hash TEXT PRIMARY KEY, kind TEXT NOT NULL, media_type TEXT NOT NULL, data BLOB NOT NULL, created_unix INTEGER NOT NULL);",
         )?;
-        conn.execute("INSERT INTO meta VALUES('schema', ?1)", [STORE_SCHEMA])?;
-        conn.execute("INSERT INTO meta VALUES('application', 'SolarCraft')", [])?;
-        conn.execute("INSERT INTO project(id, body, rev) VALUES(1, ?1, 1)", [serde_json::to_string(project)?])?;
-        conn.execute("INSERT INTO changes(at_unix, op, before) VALUES(?1, 'create', NULL)", [now()])?;
+        tx.execute("INSERT INTO meta VALUES('schema', ?1)", [STORE_SCHEMA])?;
+        tx.execute("INSERT INTO meta VALUES('application', 'SolarCraft')", [])?;
+        tx.execute("INSERT INTO project(id, body, rev) VALUES(1, ?1, 1)", [serde_json::to_string(project)?])?;
+        tx.execute("INSERT INTO changes(at_unix, op, before) VALUES(?1, ?2, NULL)", params![now(), op])?;
+        for blob in blobs { Self::insert_blob(&tx, blob.kind, blob.media_type, blob.data)?; }
+        tx.commit()?;
         Ok(Store { conn })
     }
 
@@ -143,12 +164,17 @@ impl Store {
 
     /// Store a content-addressed blob; returns its SHA-256.
     pub fn put_blob(&mut self, kind: &str, media_type: &str, data: &[u8]) -> Result<String> {
-        let hash = sha256_hex(data);
         let tx = self.conn.transaction()?;
+        let hash = Self::insert_blob(&tx, kind, media_type, data)?;
+        tx.commit()?;
+        Ok(hash)
+    }
+
+    fn insert_blob(tx: &Transaction<'_>, kind: &str, media_type: &str, data: &[u8]) -> Result<String> {
+        let hash = sha256_hex(data);
         tx.execute("INSERT OR IGNORE INTO blobs(hash, kind, media_type, data, created_unix) VALUES(?1, ?2, ?3, ?4, ?5)", params![hash, kind, media_type, data, now()])?;
         // Identical content is stored once; the pointer records which blob of a kind was written last.
         tx.execute("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("latest:{kind}"), hash])?;
-        tx.commit()?;
         Ok(hash)
     }
 

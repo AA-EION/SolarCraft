@@ -180,6 +180,7 @@
               <Button x:Name="ResultsClimateButton" Click="OnResultsClimate" Visibility="Collapsed" />
             </StackPanel>
             <TextBlock x:Name="NoResults" Opacity="0.7" TextWrapping="Wrap" />
+            <StackPanel x:Name="PvsolComparisonPanel" Spacing="8" />
             <StackPanel x:Name="PlantResults" Spacing="12" />
             <StackPanel x:Name="Kpis" Orientation="Horizontal" Spacing="12" />
             <TextBlock x:Name="MonthlyHeader" Style="{StaticResource SubtitleTextBlockStyle}" />

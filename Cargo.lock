@@ -2800,7 +2800,9 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "chrono",
+ "flate2",
  "image",
+ "roxmltree 0.21.2",
  "rusqlite",
  "schemars",
  "serde",
@@ -2814,6 +2816,7 @@ dependencies = [
  "solarcraft-scene",
  "solarcraft-store",
  "solarcraft-weather",
+ "zip 9.6.0",
 ]
 
 [[package]]

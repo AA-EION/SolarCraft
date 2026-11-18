@@ -49,6 +49,7 @@ public sealed partial class MainWindow
         fields.Children.Add(draft);
         fields.Children.Add(Row(
             Btn(T("network_fault_example"), () => { draft.Text = state?["example"]?.ToJsonString(StudyJson) ?? "[]"; results.Children.Clear(); }),
+            Btn(T("network_fault_mesh_example"), () => { draft.Text = state?["mesh_example"]?.ToJsonString(StudyJson) ?? "[]"; results.Children.Clear(); }),
             Btn(T("network_fault_preview"), () => Run(false))));
         fields.Children.Add(error);
         fields.Children.Add(results);
@@ -94,6 +95,21 @@ public sealed partial class MainWindow
                     details.Children.Add(Note($"{T("network_fault_no_device")} {source?.GetValue<string>()}"));
                 if (fault?["staged_clearing_required"]?.GetValue<bool>() == true)
                     details.Children.Add(Note(T("network_fault_staged")));
+                if (fault?["post_trip"] is JsonObject sequence)
+                {
+                    details.Children.Add(H($"{T("network_fault_sequence")} · {Status(sequence)}"));
+                    foreach (var stage in Arr(sequence["stages"]))
+                    {
+                        var stageDetails = new StackPanel { Spacing = 4 };
+                        foreach (var device in Arr(stage?["devices"]))
+                            stageDetails.Children.Add(Note($"{S(device,"link")} · {Status(device)} · {Format(device,"minimum_ka")} / {Format(device,"maximum_ka")} kA"));
+                        foreach (var note in Arr(stage?["outside_source_envelope"]))
+                            stageDetails.Children.Add(Note(note?.GetValue<string>() ?? ""));
+                        var links = string.Join(", ", Arr(stage?["open_links"]).Select(item => item?.GetValue<string>()));
+                        details.Children.Add(new Expander { Header = $"{Format(stage,"elapsed_seconds")} s · {links} · {Status(stage)} · {T("network_fault_remaining")} {Format(stage,"remaining_maximum_ka")}",
+                            Content = stageDetails });
+                    }
+                }
                 foreach (var source in Arr(fault?["sources"]))
                     details.Children.Add(Note($"{T("network_fault_source")} {S(source,"name")} · {T("network_fault_min_max")} {Format(source,"minimum_state_ka")} / {Format(source,"maximum_state_ka")}"));
                 foreach (var d in Arr(fault?["devices"]))

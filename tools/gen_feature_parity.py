@@ -76,7 +76,7 @@ S = {
  "ELEC-006": (W, "Several inverter units, each with several MPPTs; one array may span inverters.", f"{T}; MCP plant_flow"),
  "ELEC-007": (P, "Part-load efficiency curve (load fraction knots) or PVWatts; DC power limit and AC clipping (`InverterSpec::efficiency`, `energy::inverter_ac`). No voltage dependence or start threshold.", "`energy` used in workflow test"),
  'ELEC-008': (P, 'Manual and linked DC/AC runs, voltage drop, ampacity and entered conductor-size candidates. Wire losses can be fixed, aggregated hourly or routed hourly by circuit. Cable checks cover selected NEC, IEC and RETIE rules. A transformer network model is pending.', 'planning_workflow and network_fault_workflow'),
- 'ELEC-009': (P, 'The Planner report builds a PV-to-AC overview, cable schedules and device duties for entered radial networks. An editable standards-symbol one-line with integrated storage, EV, transformer, protection and cable topology remains open.', 'scene_workflow and network_fault_workflow'),
+ 'ELEC-009': (P, 'The Planner report builds a PV-to-AC overview, cable schedules, and device duty for entered AC/DC trees and meshes. Planned protection sequences recalculate remaining duty after each opening group. An editable standards-symbol one-line with integrated plant topology remains open.', 'scene_workflow and network_fault_workflow'),
  "ELEC-010": (M, "—", "—"),
  "ELEC-011": (M, "—", "—"),
  "ELEC-012": (P, "Inverter night consumption and battery-inverter standby counted in the balance.", "balance `standby_kwh`"),
@@ -166,12 +166,12 @@ S = {
  "INT-006": (P, 'Revit via IFC (export works; import of Revit IFC uses the extrusion/brep reader). No add-in or APS.', '—'),
  "INT-007": (M, "—", "—"),
  "INT-008": (W, 'Fidelity report on every exchange (counts, units, axes, georeference, max coordinate error, id map, conversions, not carried); relink updates objects from the same file and keeps SolarCraft edits and fields; missing upstream objects are reported, not deleted.', '`cargo test -p solarcraft-scene` io: relink_updates_geometry_and_keeps_solarcraft_edits'),
- 'INT-009': (M, 'Static container, migration branches and several saved project revisions are indexed. The desktop Open path currently accepts native SolarCraft projects; a versioned PV*SOL project importer and identical-input replay remain open.', 'offline format evidence only'),
+ 'INT-009': (P, 'Open supported on-grid v23/v24 PV*SOL archives as native copies with equipment revisions, orientation, MPPT wiring, WBV and supported load inputs. Compare native PV DC and AC results with archived annual, monthly and hourly channels. Older formats, off-grid, 3D geometry and identical-input replay remain open.', 'pvsol_import integration test and private saved-project replays'),
  "INT-010": (M, "—", "—"),
  "INT-011": (P, 'glTF 2.0/GLB (Khronos validator: 0 errors, 0 warnings) and OBJ export and import with lossless SolarCraft round trips; COLLADA not yet.', '`cargo test -p solarcraft-scene` io: every_format_round_trips_solarcraft_scenes_exactly'),
  "INT-012": (P, "IngeTrazo bridge: .igz export opens in IngeTrazo's own reader (groups, layers, IFC tags, datum); a document saved by IngeTrazo comes back exactly, or as edited geometry (geometry_only + relink). IngeTrazo kernels drive triangulation, welding, closure/orientation and hidden lines. Textured/binary .igz (format 2/3) not yet read.", '`cargo test -p solarcraft-scene` io: reads_documents_saved_by_ingetrazo (ignored; tools/validate_exchange.py --ingetrazo)'),
  "MCP-001": (W, "rmcp stdio server, workspace jail, project files only (`crates/mcp`).", "`crates/mcp/tests/stdio.rs`"),
- 'MCP-002': (P, 'Project, catalog, weather, scene, stringing, radial network protection, run, inspect, comparison, reports and CAD calls use the shared API. Run cancellation and progress notifications are pending.', 'MCP plant, scene and stdio tests'),
+ 'MCP-002': (P, 'Project, catalog, weather, scene, stringing, radial and meshed protection, staged coordination, local PV*SOL import and saved-result comparison use the shared API. Run cancellation and progress notifications are pending.', 'MCP plant, scene and stdio tests'),
  "MCP-003": (P, "dry_run, undo, consent for network; no idempotency keys.", "stdio test"),
  "MCP-004": (M, "—", "—"),
  "MCP-005": (W, "CLI `call` exposes the same methods.", "walkthrough"),
@@ -207,7 +207,7 @@ for area, rs in by.items():
         st, impl, test = S.get(r["id"], (M, "—", "—"))
         out.append(f"| {r['id']} | {esc(r['feature'])} | {esc(r['evidence'])}; EV-{r['id']} ({r['baseline_version']}) | {esc(r['user_job'])}. Expected: {esc(r['acceptance_test'])} | {esc(impl)} | {esc(test)} | **{st}** |")
     out.append("")
-out += ["## Desktop workflow", "", 'The desktop shells follow the same system-filtered steps. The 2D route uses one or more editable roofs, including calibrated site photos; the 3D route uses linked fields and string routes. The electrical and catalog pages remain available on either route. Cable Planning handles linked or manual conductors, fixed and hourly losses, local code rules and independent radial AC/DC protection studies. The [report crosswalk](report-coverage.tsv) and [protection input guide](cable-protection.md) document conditional sections and supported study inputs.', ""]
+out += ["## Desktop workflow", "", 'The desktop shells follow the same system-filtered steps. The 2D route uses one or more editable roofs, including calibrated site photos; the 3D route uses linked fields and string routes. The electrical and catalog pages remain available on either route. Cable Planning handles linked or manual conductors, fixed and hourly losses, local code rules and independent AC/DC protection studies for radial and meshed networks. Open can import supported PV*SOL projects as native copies and Results shows the saved comparison. See the [report crosswalk](report-coverage.tsv), [protection guide](cable-protection.md), and [project import guide](pvsol-import.md).', ""]
 out += ["## SolarCraft upgrades and platforms", "", "| ID | Source | User task | Current implementation | Acceptance test | Status |", "|---|---|---|---|---|---|"]
 for u in UPG: out.append(f"| {u[0]} | {u[1]} | {esc(u[2])} | {esc(u[4])} | {esc(u[5])} | **{u[3]}** |")
 open(os.path.join(ROOT, "docs/feature-parity.md"), "w").write("\n".join(out) + "\n")

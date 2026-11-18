@@ -111,9 +111,33 @@ public sealed partial class MainWindow : Window
     {
         var picker = new FileOpenPicker();
         picker.FileTypeFilter.Add(".solarcraft");
+        picker.FileTypeFilter.Add(".pvprj");
         InitPicker(picker);
         var f = await picker.PickSingleFileAsync();
-        if (f is not null) Open(f.Path);
+        if (f is null) return;
+        if (f.FileType.Equals(".pvprj", StringComparison.OrdinalIgnoreCase))
+            await OpenPvsol(f.Path);
+        else Open(f.Path);
+    }
+
+    private async Task OpenPvsol(string source)
+    {
+        var picker = new FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        InitPicker(picker);
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return;
+        var title = System.IO.Path.GetFileNameWithoutExtension(source);
+        var file = System.IO.Path.Combine(folder.Path, title + ".solarcraft");
+        for (int suffix = 2; System.IO.File.Exists(file); suffix++)
+            file = System.IO.Path.Combine(folder.Path, $"{title} ({suffix}).solarcraft");
+        try
+        {
+            await Task.Run(() => Api.Invoke("import_pvsol", new { file, source }));
+            Open(file);
+            ShowInfo(T("pvsol_imported"));
+        }
+        catch (Exception error) { ShowError(error.Message); }
     }
 
     private void Open(string path)

@@ -116,9 +116,46 @@ public sealed partial class MainWindow
         BuildStorage();
         BuildEngineering();
         BuildSimulationPanels();
+        BuildPvsolComparison();
         BuildEconomics();
         BuildPreview();
         BuildScene();
+    }
+
+    private void BuildPvsolComparison()
+    {
+        PvsolComparisonPanel.Children.Clear();
+        var data = Api.Invoke("compare_pvsol", new { file = _file });
+        if (data?["reference"] is not JsonObject reference) return;
+        PvsolComparisonPanel.Children.Add(H(T("pvsol_reference")));
+        PvsolComparisonPanel.Children.Add(Note($"{S(reference,"source_name")} · {T("pvsol_format")} {N(reference,"format")}"));
+        var details = new StackPanel { Spacing = 6 };
+        PvsolComparisonPanel.Children.Add(new Expander { Header = T("pvsol_scope"), Content = details });
+        foreach (var warning in Arr(reference["warnings"]))
+            details.Children.Add(Note(warning?.GetValue<string>() ?? ""));
+        if (data["comparison"] is not JsonObject comparison)
+        {
+            PvsolComparisonPanel.Children.Add(Note(T("pvsol_run_to_compare")));
+            return;
+        }
+        if (comparison.Count == 0) PvsolComparisonPanel.Children.Add(Note(T("pvsol_no_saved_results")));
+        if (data["imported_input_hash_matches"]?.GetValue<bool>() == false)
+            PvsolComparisonPanel.Children.Add(Note(T("pvsol_edited_design")));
+        string Cell(JsonNode? row, string key, int digits = 2) =>
+            row?[key] is null ? "—" : F(N(row, key), digits);
+        foreach (var (key, row) in comparison)
+        {
+            var title = T(key == "pv_dc" ? "pvsol_dc" : "pvsol_ac");
+            var track = new StackPanel { Spacing = 6 };
+            var months = Arr(row?["monthly"]);
+            if (months.Count > 0)
+                track.Children.Add(Table([T("pvsol_month"), "PV*SOL (kWh)", "SolarCraft (kWh)", "Δ (kWh)"],
+                    months.Select(m => (IList<string>)new[] { Cell(m,"month",0), Cell(m,"pvsol_kwh"),
+                        Cell(m,"solarcraft_kwh"), Cell(m,"delta_kwh") })));
+            if (row?["hourly"] is JsonObject hourly)
+                track.Children.Add(Note($"{T("pvsol_hourly_error")} {Cell(hourly,"mae_kwh",3)} kWh · {S(hourly,"source")}"));
+            PvsolComparisonPanel.Children.Add(new Expander { Header = $"{title} · PV*SOL {Cell(row,"pvsol_kwh")} → SolarCraft {Cell(row,"solarcraft_kwh")} kWh · Δ {Cell(row,"delta_pct")}%", Content = track });
+        }
     }
 
     private void BuildEngineering()
@@ -932,6 +969,28 @@ public sealed partial class MainWindow
                 Content.UpdateLayout();
                 network.StartBringIntoView(new BringIntoViewOptions { VerticalAlignmentRatio = 0.0 });
             });
+            var savedMesh = Api.Invoke("network_faults", new { file, mode = "save", studies = initial?["mesh_example"]?.DeepClone() });
+            var meshFault = savedMesh?["results"]?[0]?["faults"]?[0];
+            if (S(meshFault, "status") != "pass" || Math.Abs(N(meshFault?["post_trip"]?["stages"]?[0], "remaining_maximum_ka") - 0.48) > 1e-9)
+                throw new InvalidOperationException("Expected redistribution through the remaining ring path.");
+            Reload();
+            await Capture(NavCables, "28-meshed-protection.png", () =>
+            {
+                var network = CablesPage.Children.OfType<Expander>().Single(x => x.Name == "NetworkFaultSection");
+                network.IsExpanded = true;
+                var contents = (StackPanel)network.Content;
+                var fault = contents.Children.OfType<Expander>().Single();
+                fault.IsExpanded = true;
+                Content.UpdateLayout();
+                network.StartBringIntoView(new BringIntoViewOptions { VerticalAlignmentRatio = 0.0 });
+            });
+            if (Environment.GetEnvironmentVariable("SOLARCRAFT_PVPRJ_QA") is string replay && File.Exists(replay))
+            {
+                Open(replay);
+                if (PvsolComparisonPanel.Children.OfType<Expander>().Count() < 2)
+                    throw new InvalidOperationException("Expected the imported PV*SOL reference on the Results page.");
+                await Capture(NavResults, "29-pvsol-comparison.png");
+            }
         }
         catch (Exception ex) { ok = false; File.WriteAllText(IOPath.Combine(dir, "error.txt"), ex.ToString()); }
         Application.Current.Exit();

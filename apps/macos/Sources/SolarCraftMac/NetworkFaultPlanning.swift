@@ -42,6 +42,11 @@ struct NetworkFaultPlanner: View {
                         preview = [:]
                         detail = nil
                     }
+                    Button(m.t("network_fault_mesh_example")) {
+                        draft = encode(study["mesh_example"])
+                        preview = [:]
+                        detail = nil
+                    }
                     Button(m.t("network_fault_preview")) { evaluate(save: false) }
                     Spacer()
                     Button(m.t("cancel")) { editor = false }
@@ -103,6 +108,22 @@ struct NetworkFaultPlanner: View {
             ForEach(outside, id: \.self) { Text(m.t("network_fault_outside") + " " + $0) }
             ForEach(unprotected, id: \.self) { Text(m.t("network_fault_no_device") + " " + $0) }
             if fault["staged_clearing_required"] as? Bool == true { Text(m.t("network_fault_staged")) }
+            if let sequence = fault["post_trip"] as? JSONDict {
+                let stages = dicts(sequence["stages"])
+                Text(m.t("network_fault_sequence") + " · " + status(sequence)).font(.headline)
+                ForEach(stages.indices, id: \.self) { index in
+                    let stage = stages[index]
+                    let opened = (stage["open_links"] as? [String] ?? []).joined(separator: ", ")
+                    DisclosureGroup(number(stage,"elapsed_seconds") + " s · " + opened + " · " + status(stage)) {
+                        Text(m.t("network_fault_remaining") + " " + number(stage,"remaining_maximum_ka"))
+                        let devices = dicts(stage["devices"])
+                        ForEach(devices.indices, id: \.self) { i in
+                            let device = devices[i]
+                            Text(str(device,"link") + " · " + status(device) + " · " + number(device,"maximum_ka") + " kA")
+                        }
+                    }
+                }
+            }
             let sources = dicts(fault["sources"])
             ForEach(sources.indices, id: \.self) { index in
                 let source = sources[index]

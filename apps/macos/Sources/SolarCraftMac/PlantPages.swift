@@ -505,6 +505,7 @@ struct SimulationPage: View {
                 }
             }
             ResultsPage()
+            PvsolComparison()
             if m.summary != nil {
                 GroupBox(m.t("hours_inspector")) {
                     VStack(alignment: .leading) {

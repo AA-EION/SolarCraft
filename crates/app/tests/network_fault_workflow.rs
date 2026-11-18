@@ -127,3 +127,48 @@ fn radial_ac_dc_envelopes_coordination_save_and_report_use_the_same_results() {
     assert!(invoke(&file,"network_faults",json!({})).unwrap()["studies"].as_array().unwrap().is_empty());
     std::fs::remove_file(file).unwrap();
 }
+
+#[test]
+fn mesh_redistributes_current_and_requires_a_complete_supported_cut_sequence() {
+    let file = std::env::temp_dir().join(format!("SolarCraft-Mesh-{}.solarcraft", std::process::id()));
+    app::create_project(&file, "Meshed protection", 4.71, -74.07, Some(4.0)).unwrap();
+    let mut study = invoke(&file,"network_faults",json!({})).unwrap()["mesh_example"][0].clone();
+    let evaluate = |study: &Value| invoke(&file,"network_faults",json!({"studies":[study]})).unwrap()["results"][0]["faults"][0].clone();
+    let result = evaluate(&study);
+    assert_eq!(result["status"], "pass");
+    assert_eq!(result["mesh"], true);
+    close(&result["maximum_ka"], 0.8);
+    for device in result["devices"].as_array().unwrap() { close(&device["maximum_ka"], 0.4); }
+    let post = &result["post_trip"];
+    assert_eq!(post["isolated"], true);
+    assert_eq!(post["stages"][0]["remaining_sources"], json!(["Battery"]));
+    close(&post["stages"][0]["remaining_maximum_ka"], 0.48);
+    close(&post["stages"][1]["devices"][0]["maximum_ka"], 0.48);
+    close(&post["stages"][1]["remaining_maximum_ka"], 0.0);
+    close(&post["stages"][1]["elapsed_seconds"], 0.17);
+
+    let mut alternating = study.clone();
+    alternating["domain"] = json!("ac_loop");
+    for link in alternating["links"].as_array_mut().unwrap() {
+        for field in ["minimum_duty", "maximum_duty"] {
+            link[field]["x_mohm"] = json!(2.0 * link[field]["r_mohm"].as_f64().unwrap());
+        }
+        link["device"]["rating"] = json!("ac");
+        link["device"]["reverse_rated"] = json!(true);
+    }
+    for key in ["minimum", "maximum"] { alternating["sources"][0][key]["impedance"]["x_mohm"] = json!(40); }
+    close(&evaluate(&alternating)["maximum_ka"], 0.8 / 5_f64.sqrt());
+
+    let stages = study["faults"][0]["trip_sequence"].clone();
+    study["faults"][0]["trip_sequence"] = json!([]);
+    assert_eq!(evaluate(&study)["status"], "incomplete");
+    study["faults"][0]["trip_sequence"] = json!([stages[0]]);
+    assert_eq!(evaluate(&study)["post_trip"]["status"], "fail");
+    study["faults"][0]["trip_sequence"] = stages;
+    for key in ["minimum","maximum"] {
+        study["sources"][0][key] = json!({"type":"current_limited","amps":800,
+            "min_terminal_v":0,"max_terminal_v":100,"supported_seconds":0.08});
+    }
+    assert_eq!(evaluate(&study)["post_trip"]["stages"][1]["status"], "incomplete");
+    std::fs::remove_file(file).unwrap();
+}
