@@ -48,6 +48,8 @@ pub struct Circuit {
     pub protection_a: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design_current_a: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_protection: Option<crate::protection::Protection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -85,6 +87,7 @@ pub struct Estimate {
     pub allowed_a: Option<f64>,
     pub ampacity_ok: Option<bool>,
     pub protection_ok: Option<bool>,
+    pub code_checks: Option<crate::protection::Assessment>,
     pub drop_ok: bool,
     pub suggested: Option<Conductor>,
 }
@@ -100,6 +103,7 @@ impl Circuit {
             || !(0.01..=20_000.0).contains(&self.voltage_v) || !(0.01..=20_000.0).contains(&self.current_a)
             || self.candidates.len() > 100 || self.candidates.iter().any(|s| !(0.01..=2_000.0).contains(&s.area_mm2) || !(0.01..=20_000.0).contains(&s.ampacity_a))
             || !(1.0..=3.0).contains(&self.sizing_factor)
+            || self.code_protection.as_ref().is_some_and(|p| !p.valid())
             || self.design_current_a.is_some_and(|a| !(self.current_a..=50_000.0).contains(&a))
             || self.protection_a.is_some_and(|a| !(0.01..=50_000.0).contains(&a))
             || !(0.01..=1.0).contains(&self.derating) || self.ampacity_a.is_some_and(|a| !(0.01..=20_000.0).contains(&a))
@@ -117,15 +121,19 @@ impl Circuit {
         let allowed_a = self.ampacity_a.map(|base| base * self.derating);
         let area_for_target_mm2 = self.area_mm2 * drop_pct / self.target_drop_pct;
         let design = self.design_current_a.unwrap_or(self.current_a) * self.sizing_factor;
-        let required_base_ampacity_a = design.max(self.protection_a.unwrap_or(0.0)) / self.derating;
-        let protection_ok = self.protection_a.map(|a| a >= design && allowed_a.is_none_or(|limit| a <= limit));
-        let suggested = self.candidates.iter().filter(|s| s.area_mm2 >= area_for_target_mm2 && s.ampacity_a >= required_base_ampacity_a)
+        let code_checks = self.code_protection.as_ref().map(|p| p.assess(self));
+        let basic_required = design.max(self.protection_a.unwrap_or(0.0)) / self.derating;
+        let required_base_ampacity_a = code_checks.as_ref().and_then(|a| a.required_base_a).unwrap_or(basic_required);
+        let minimum_area = area_for_target_mm2.max(code_checks.as_ref().and_then(|a| a.required_fault_area_mm2).unwrap_or(0.0));
+        let protection_ok = code_checks.as_ref().map(|a| a.status == crate::protection::Status::Pass)
+            .or_else(|| self.protection_a.map(|a| a >= design && allowed_a.is_none_or(|limit| a <= limit)));
+        let suggested = self.candidates.iter().filter(|s| s.area_mm2 >= minimum_area && s.ampacity_a >= required_base_ampacity_a)
             .min_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2)).copied();
         Ok(Estimate {
             drop_v, drop_pct, loss_w: self.current_a.powi(2) * rho * loss_m / self.area_mm2 * f64::from(self.circuits),
             conductor_m: loss_m * f64::from(self.circuits),
             area_for_target_mm2, required_base_ampacity_a, suggested,
-            allowed_a, ampacity_ok: allowed_a.map(|a| a >= design), protection_ok, drop_ok: drop_pct <= self.target_drop_pct,
+            allowed_a, ampacity_ok: allowed_a.map(|a| a >= design), protection_ok, code_checks, drop_ok: drop_pct <= self.target_drop_pct,
         })
     }
 }
@@ -152,6 +160,7 @@ pub fn resolve(p: &crate::Project, electrical: &crate::plant::Electrical, spec: 
             let shared = unit.interconnected.iter().find(|items| items.contains(input));
             let indices = shared.map(Vec::as_slice).unwrap_or_else(|| std::slice::from_ref(input));
             let (mut power, mut current, mut short, mut strings) = (0.0, 0.0, 0.0, 0);
+            let mut highest_string_isc: f64 = 0.0;
             for group in indices.iter().flat_map(|&i| unit.mppts.get(i)).flatten() {
                 let array = p.arrays.iter().find(|a| a.id == group.array_id).ok_or("Cable string array does not exist.")?;
                 let module = p.library.module(&array.module_id.value).ok_or("Cable module does not exist.")?;
@@ -159,6 +168,7 @@ pub fn resolve(p: &crate::Project, electrical: &crate::plant::Electrical, spec: 
                 power += module.pmp_stc() * count * f64::from(group.modules_per_string);
                 current += module.i_mp * count;
                 short += module.i_sc * count;
+                if group.strings > 0 { highest_string_isc = highest_string_isc.max(module.i_sc); }
                 strings += group.strings;
             }
             if current <= 0.0 || power <= 0.0 || (spec.circuits != 1 && spec.circuits != strings) {
@@ -166,7 +176,8 @@ pub fn resolve(p: &crate::Project, electrical: &crate::plant::Electrical, spec: 
             }
             circuit.voltage_v = power / current;
             circuit.current_a = current / f64::from(spec.circuits);
-            circuit.design_current_a = Some(short.max(current) / f64::from(spec.circuits));
+            let source_current = if spec.circuits == 1 { short } else { highest_string_isc };
+            circuit.design_current_a = Some(source_current.max(circuit.current_a));
             circuit.binding = Some(Binding::Mppt { unit_id: id.clone(), input: indices[0] });
         }
     }
@@ -190,4 +201,38 @@ pub fn routed(p: &crate::Project, electrical: &crate::plant::Electrical) -> Resu
         runs.push((row, estimate));
     }
     Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plant::{Electrical, InverterUnit, StringGroup};
+
+    #[test]
+    fn separately_protected_string_runs_use_the_highest_short_circuit_current() {
+        let mut p = crate::Project::new("p", "Cable sizing", 4.71, -74.07);
+        let mut other = p.library.modules[0].clone();
+        other.id = "higher-current".into();
+        other.i_sc = 16.0;
+        p.library.modules.push(other);
+        let mut array = p.arrays[0].clone();
+        array.id = "second".into();
+        array.module_id.value = "higher-current".into();
+        p.arrays.push(array);
+        let layout = Electrical { manual: true, inverters: vec![InverterUnit {
+            id: "inv".into(), name: "Inverter".into(), inverter_id: p.library.inverters[0].id.clone(), interconnected: vec![],
+            mppts: vec![vec![
+                StringGroup { array_id: p.arrays[0].id.clone(), modules_per_string: 8, strings: 1 },
+                StringGroup { array_id: p.arrays[1].id.clone(), modules_per_string: 8, strings: 1 },
+            ]],
+        }] };
+        let mut row: Circuit = serde_json::from_value(serde_json::json!({
+            "label":"PV branch","kind":"dc_string","metal":"copper","length_m":15,
+            "area_mm2":6,"temperature_c":30,"voltage_v":300,"current_a":8,"circuits":2,"target_drop_pct":2,
+            "binding":{"kind":"mppt","unit_id":"inv","input":0}
+        })).unwrap();
+        assert_eq!(resolve(&p, &layout, &row).unwrap().design_current_a, Some(16.0));
+        row.circuits = 1;
+        assert_eq!(resolve(&p, &layout, &row).unwrap().design_current_a, Some(p.library.modules[0].i_sc + 16.0));
+    }
 }

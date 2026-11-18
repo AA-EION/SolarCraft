@@ -12,6 +12,7 @@ pub mod plant;
 pub mod validate;
 pub mod workflow;
 pub mod cable;
+pub mod protection;
 pub mod demand;
 
 use serde::{Deserialize, Serialize};

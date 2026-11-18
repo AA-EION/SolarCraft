@@ -117,22 +117,40 @@ pub fn add_generic_storage_equipment(path: &Path) -> Result<Vec<String>> {
 /// average with `unit = "kw"`), optionally `timestamp,value`. Timestamped data
 /// is verified against the project's local standard time before storing a profile.
 pub fn import_load_series(path: &Path, file: &Path, unit: &str) -> Result<Value> {
+    import_load_for(path, file, unit, None)
+}
+
+pub fn import_load_for(path: &Path, file: &Path, unit: &str, island: Option<&str>) -> Result<Value> {
     let text = std::fs::read_to_string(file).map_err(|x| e("FILE_READ", format!("{}: {x}", file.display())))?;
     let (mut s, mut p) = open(path)?;
+    let id = island.map(|name| p.island_clusters.iter().position(|c| c.name == name)
+        .ok_or_else(|| e("NOT_FOUND", format!("Unknown island '{name}'.")))).transpose()?;
     let series = crate::load_import::parse(&text, unit, p.site.utc_offset())?;
     let total: f64 = series.values.iter().sum();
     if !total.is_finite() { return Err(e("LOAD_PARSE", "Annual consumption exceeds the supported numeric range.")); }
     let bytes = serde_json::to_vec(&series.values).map_err(|x| e("ENCODE", x))?;
     let hash = s.put_blob("load", "application/vnd.solarcraft.load+json", &bytes).map_err(|x| e("PROJECT_SAVE", x))?;
     let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    p.loads.profile = LoadProfile::Series { blob: hash, name: name.clone(), step_minutes: series.step_minutes, values: series.values.len(), local_year: series.local_year };
-    p.loads.annual_kwh = total;
-    save(&mut s, &p, &format!("load series {name}"))?;
+    let loads = match id {
+        Some(i) => p.island_clusters[i].load.get_or_insert_with(Default::default),
+        None => &mut p.loads,
+    };
+    loads.profile = LoadProfile::Series { blob: hash, name: name.clone(), step_minutes: series.step_minutes, values: series.values.len(), local_year: series.local_year };
+    loads.annual_kwh = total;
+    let operation = island.map_or_else(|| format!("load series {name}"), |c| format!("island '{c}' load series {name}"));
+    save(&mut s, &p, &operation)?;
     Ok(serde_json::json!({"name": name, "values": series.values.len(), "step_minutes": series.step_minutes, "annual_kwh": total, "local_year": series.local_year}))
 }
 
-pub(crate) fn load_series(s: &Store, p: &Project) -> Result<Option<Vec<f64>>> {
-    if let LoadProfile::Series { blob, .. } = &p.loads.profile {
+pub(crate) fn load_series(s: &Store, p: &Project) -> Result<(Option<Vec<f64>>, Vec<Option<Vec<f64>>>)> {
+    let islands = if p.workflow.system.islanded() { p.island_clusters.as_slice() } else { &[] };
+    let base = if islands.is_empty() || islands.iter().any(|c| c.load.is_none()) { read_load(s, &p.loads.profile)? } else { None };
+    let profiles = islands.iter().map(|c| c.load.as_ref().map_or(Ok(None), |load| read_load(s, &load.profile))).collect::<Result<_>>()?;
+    Ok((base, profiles))
+}
+
+fn read_load(s: &Store, profile: &LoadProfile) -> Result<Option<Vec<f64>>> {
+    if let LoadProfile::Series { blob, .. } = profile {
         let b = s.get_blob(blob).map_err(|x| e("PROJECT_LOAD", x))?.ok_or_else(|| e("LOAD_MISSING", "load series blob missing"))?;
         return Ok(Some(serde_json::from_slice(&b).map_err(|x| e("LOAD_DECODE", x))?));
     }
@@ -147,6 +165,8 @@ pub struct HourRow {
     pub ev_wh: f32, pub heating_wh: f32, pub dc_cable_wh: f32, pub ac_cable_wh: f32, pub generator_charge_wh: f32,
     pub ev_discharge_wh: f32, pub fleet_soc_pct: Vec<f32>, pub heat_store_kwh: Option<f32>,
     pub cluster_soc_pct: Vec<f32>, pub cluster_unserved_wh: Vec<f32>, pub routed_cable_wh: Vec<f32>,
+    pub ev_export_wh: f32, pub ev_to_load_wh: f32, pub cluster_load_wh: Vec<f32>,
+    pub tank_top_c: Option<f32>, pub tank_bottom_c: Option<f32>,
     pub import_wh: f32, pub export_wh: f32, pub curtailed_wh: f32, pub unserved_wh: f32, pub outage: bool, pub residual_wh: f32,
 }
 
@@ -164,6 +184,9 @@ pub fn hour_row(r: &SimResult, k: usize) -> HourRow {
         heat_store_kwh: r.hourly.heat_store_kwh.get(k).copied(),
         cluster_soc_pct: r.hourly.cluster_soc_pct.iter().map(g).collect(), cluster_unserved_wh: r.hourly.cluster_unserved_wh.iter().map(g).collect(),
         routed_cable_wh: r.hourly.routed_cable_wh.iter().map(g).collect(),
+        ev_export_wh: g(&fl.ev_to_grid), ev_to_load_wh: g(&fl.ev_to_load),
+        cluster_load_wh: r.hourly.cluster_load_wh.iter().map(g).collect(),
+        tank_top_c: r.hourly.tank_top_c.get(k).copied(), tank_bottom_c: r.hourly.tank_bottom_c.get(k).copied(),
         import_wh: g(&fl.import), export_wh: g(&fl.export), curtailed_wh: g(&fl.curtailed), unserved_wh: g(&fl.unserved), outage: fl.outage.get(k).copied().unwrap_or(false), residual_wh: g(&fl.residual) }
 }
 
@@ -247,8 +270,8 @@ pub fn compare_variants(path: &Path) -> Result<Vec<VariantMetrics>> {
     for (id, name, q) in designs {
         let res = (|| -> Result<SimResult> {
             let (w, hash) = crate::load_weather(&s, &q)?;
-            let series = load_series(&s, &solarcraft_model::workflow::Workflow::active(&q))?;
-            solarcraft_engine::simulate(&q, &w, &hash, series.as_deref(), |_| true).map_err(|x| e("SIMULATION", x))
+            let (series, islands) = load_series(&s, &solarcraft_model::workflow::Workflow::active(&q))?;
+            solarcraft_engine::simulate_with_island_profiles(&q, &w, &hash, series.as_deref(), &islands, |_| true).map_err(|x| e("SIMULATION", x))
         })();
         let bkwh = q.storage.as_ref().and_then(|st| q.library.battery(&st.battery_id).map(|b| b.capacity_kwh * st.units as f64)).unwrap_or(0.0);
         out.push(match res {

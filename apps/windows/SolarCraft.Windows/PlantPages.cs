@@ -531,7 +531,8 @@ public sealed partial class MainWindow
             var details = new[] {
                 ("ev_wh", T("ev_page")), ("heating_wh", T("heat_page")), ("dc_cable_wh", "DC cable (Wh)"),
                 ("ac_cable_wh", "AC cable (Wh)"), ("generator_charge_wh", T("island_charge")),
-                ("ev_discharge_wh", "V2H (Wh)"), ("heat_store_kwh", T("tank") + " (kWh)"),
+                ("ev_to_load_wh", "V2H (Wh)"), ("ev_export_wh", "V2G (Wh)"), ("heat_store_kwh", T("tank") + " (kWh)"),
+                ("tank_top_c", T("tank_top")), ("tank_bottom_c", T("tank_bottom")),
             }.Where(column => hours.Any(h => Math.Abs(N(h, column.Item1)) > 1e-7)).ToArray();
             if (details.Length > 0)
             {
@@ -548,6 +549,7 @@ public sealed partial class MainWindow
             AddSeries(Arr(_summary?["fleet"]?["groups"]), T("fleet"), "name", "fleet_soc_pct", "%");
             AddSeries(Arr(_summary?["clusters"]), T("clusters"), "name", "cluster_soc_pct", "%");
             AddSeries(Arr(_summary?["clusters"]), T("island_unserved"), "name", "cluster_unserved_wh", "Wh");
+            AddSeries(Arr(_summary?["clusters"]), T("loads"), "name", "cluster_load_wh", "Wh");
             AddSeries(Arr(_summary?["routed_cables"]), T("cable_planner"), "label", "routed_cable_wh", "Wh");
             if (series.Count > 0)
             {
@@ -837,6 +839,7 @@ public sealed partial class MainWindow
             await Capture(NavCables, "22-hourly-cable-estimates.png");
 
             Api.Invoke("set_section", new { file, section = "fleet", value = new { site_charge_kw = 7.2, site_discharge_kw = 2,
+                v2g = new { limit_kw = 1.2, start_hour = 18, end_hour = 22, weekdays = new[] { 0, 1, 2, 3, 4 } },
                 groups = new[] {
                     new { name = "Servicio", vehicles = 2, battery_kwh = 40, initial_soc_pct = 65, departure_soc_pct = 45,
                         trip_kwh = 12, weekdays = new[] { 0, 1, 2, 3, 4 }, arrival_hour = 9, departure_hour = 23,
@@ -846,10 +849,13 @@ public sealed partial class MainWindow
                         charge_kw = 3.6, charge_efficiency = .92, discharge_kw = 1, discharge_efficiency = .9, strategy = "solar_preferred" }
                 } } });
             Api.Invoke("set_section", new { file, section = "heat_store", value = new { capacity_kwh = 9, initial_kwh = 1,
-                charge_kw = 3, discharge_kw = 3, standing_loss_pct_per_day = 2, daily_hot_water_kwh = 2, hot_water_hour = 21 } });
+                charge_kw = 3, discharge_kw = 3, standing_loss_pct_per_day = 2, daily_hot_water_kwh = 2, hot_water_hour = 21,
+                layers = new { top_fraction = 0.4, ambient_c = 20, target_c = 65, space_supply_c = 34, hot_water_supply_c = 50, conductance_w_per_k = 20 },
+            } });
             Api.Invoke("simulate", new { file });
             Reload();
-            if (Arr(_summary?["fleet"]?["groups"]).Count != 2 || _summary?["heat_store"] is null)
+            if (Arr(_summary?["fleet"]?["groups"]).Count != 2 || N(_summary?["fleet"], "v2g_kwh") <= 0 ||
+                _summary?["heat_store"]?["end_top_c"] is null)
                 throw new InvalidOperationException("Fleet or thermal store results did not load.");
             await Capture(NavEv, "23-ev-fleet.png");
             await Capture(NavHeating, "24-heat-store.png");
@@ -860,18 +866,28 @@ public sealed partial class MainWindow
             baseStorage["coupling"] = new JsonObject { ["kind"] = "ac_coupled", ["battery_inverter_id"] = storageIds[2]?.DeepClone() };
             Api.Invoke("workflow_set", new { file, value = new { system = "off_grid", tools = "both" } });
             Api.Invoke("set_section", new { file, section = "island_clusters", value = new[] {
-                new { name = "Principal", inverter_units = unitIds, load_share_pct = 65, storage = baseStorage },
-                new { name = "Taller", inverter_units = Array.Empty<string>(), load_share_pct = 35, storage = baseStorage },
+                new { name = "Principal", inverter_units = unitIds, load_share_pct = 0, storage = baseStorage,
+                    load = new { profile = new { kind = "synthetic", profile = "residential" }, annual_kwh = 2800, critical_fraction = 1 } },
+                new { name = "Taller", inverter_units = Array.Empty<string>(), load_share_pct = 0, storage = baseStorage,
+                    load = new { profile = new { kind = "synthetic", profile = "office" }, annual_kwh = 1600, critical_fraction = 1 } },
             } });
-            Api.Invoke("cable_plan", new { file, mode = "apply_routed", circuits = new[] {
+            var metered = IOPath.Combine(dir, "workshop-load.csv");
+            File.WriteAllLines(metered, Enumerable.Range(0, 8760).Select(i => i % 24 == 10 ? "2" : "0"));
+            Api.Invoke("import_load", new { file, source = metered, island = "Taller" });
+            var linked = Api.Invoke("cable_plan", new { file, mode = "apply_routed", circuits = new[] {
                 new { label = "Salida principal", kind = "ac_single", metal = "copper", length_m = 18,
                     area_mm2 = 10, temperature_c = 50, voltage_v = 230, current_a = 1, circuits = 1, target_drop_pct = 3,
-                    ampacity_a = 55, derating = .85, sizing_factor = 1.25, binding = new { kind = "inverter_ac", unit_id = unitIds[0] } },
+                    ampacity_a = 55, derating = .85, sizing_factor = 1.25, protection_a = 40,
+                    binding = new { kind = "inverter_ac", unit_id = unitIds[0] },
+                    code_protection = new { standard = "iec60364", maximum_circuit_v = 250, device_rated_v = 275, device_dc_rated = false,
+                        prospective_fault_ka = 3, breaking_capacity_ka = 6, conventional_trip_a = 52, conductor_k = 115, device_let_through_a2s = 200000 } },
             } });
             Api.Invoke("simulate", new { file });
             Reload();
-            if (Arr(_summary?["clusters"]).Count != 2 || Arr(_summary?["routed_cables"]).Count != 1)
-                throw new InvalidOperationException("Island or linked cable results did not load.");
+            if (Arr(_summary?["clusters"]).Count != 2 || Arr(_summary?["routed_cables"]).Count != 1 ||
+                S(linked?["estimates"]?[0]?["code_checks"], "status") != "pass" ||
+                N(_summary?["clusters"]?[1]?["balance"], "load_kwh") != 730)
+                throw new InvalidOperationException("Island profile or protection results did not load.");
             await Capture(NavIsland, "25-island-clusters.png");
             await Capture(NavCables, "26-routed-cables.png");
         }

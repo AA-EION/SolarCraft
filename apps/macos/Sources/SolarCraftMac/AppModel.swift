@@ -143,10 +143,12 @@ final class AppModel: ObservableObject {
 
     func pin(_ kind: String, _ id: String) { run { _ = try Core.invokeRaw("library_pin", ["file": file, "kind": kind, "id": id]) }; reload() }
 
-    func importLoad() {
+    func importLoad(island: String? = nil) {
         let panel = NSOpenPanel()
         guard panel.runModal() == .OK, let u = panel.url else { return }
-        run { _ = try Core.invokeRaw("import_load", ["file": file, "source": u.path]) }
+        var request: JSONDict = ["file": file, "source": u.path]
+        if let island { request["island"] = island }
+        run { _ = try Core.invokeRaw("import_load", request) }
         reload()
     }
 

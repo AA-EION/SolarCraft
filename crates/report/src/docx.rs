@@ -52,10 +52,25 @@ fn image_para(svg: &str, width_emu: u32) -> Result<Paragraph, String> {
     Ok(Paragraph::new().add_run(Run::new().add_image(Pic::new(&png).size(width_emu, height_emu))))
 }
 
+fn column_widths(count: usize) -> Vec<usize> {
+    match count {
+        1 => vec![9600],
+        2 => vec![5600, 4000],
+        3 => vec![4800, 2400, 2400],
+        4 => vec![3600, 2000, 2000, 2000],
+        _ => {
+            // Give the label column twice the share of a numeric column.
+            let numeric = 9600 / (count + 1);
+            let mut widths = vec![numeric; count];
+            widths[0] = 9600 - numeric * (count - 1);
+            widths
+        }
+    }
+}
+
 fn table_dyn(header: Option<&Vec<String>>, rows: &[Vec<String>]) -> Table {
     let n = header.map(|h| h.len()).or_else(|| rows.first().map(|r| r.len())).unwrap_or(2).max(1);
-    let first = if n == 2 { 5600 } else { 9600 - 1600 * (n - 1) };
-    let widths: Vec<usize> = (0..n).map(|i| if i == 0 { first } else { (9600 - first) / (n - 1).max(1) }).collect();
+    let widths = column_widths(n);
     let mk_row = |cells: &[String], bold: bool| TableRow::new(cells.iter().enumerate().map(|(i, c)| {
         let mut r = text(c).size(18);
         if bold { r = r.bold(); }
@@ -98,4 +113,19 @@ pub fn render(v: &View) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     doc.build().pack(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::column_widths;
+
+    #[test]
+    fn fleet_and_island_report_tables_keep_all_columns_visible() {
+        for count in [7, 8] {
+            let widths = column_widths(count);
+            assert_eq!(widths.len(), count);
+            assert_eq!(widths.iter().sum::<usize>(), 9600);
+            assert!(widths.iter().all(|&width| width > 0));
+        }
+    }
 }

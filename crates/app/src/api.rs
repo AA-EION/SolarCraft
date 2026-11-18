@@ -154,7 +154,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         }
         "add_equipment" => app::plant_ops::add_equipment(&path(params, "file")?, &s(params, "kind")?, arg(params, "record")?),
         "add_generic_storage_equipment" => Ok(json!({"ids": app::plant_ops::add_generic_storage_equipment(&path(params, "file")?)?})),
-        "import_load" => app::plant_ops::import_load_series(&path(params, "file")?, &path(params, "source")?, params.get("unit").and_then(Value::as_str).unwrap_or("kwh")),
+        "import_load" => app::plant_ops::import_load_for(&path(params, "file")?, &path(params, "source")?, params.get("unit").and_then(Value::as_str).unwrap_or("kwh"), params.get("island").and_then(Value::as_str)),
         "stringing" => app::plant_ops::stringing(&path(params, "file")?),
         "set_stringing" => {
             // {file, manual: bool, inverters?: [...]} — manual=false returns to derived stringing.

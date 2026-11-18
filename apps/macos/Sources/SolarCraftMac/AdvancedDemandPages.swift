@@ -16,6 +16,12 @@ struct FleetControls: View {
     @State private var edit: RecordEdit?
     @State private var charge = 7.2
     @State private var discharge = 0.0
+    @State private var export = false
+    @State private var exportFields: [String: Double] = [:]
+    @State private var exportDays = Set(0..<7)
+    private let exportSpecs: [InputSpec] = [
+        .init("limit_kw", "v2g_limit", 2), .init("start_hour", "v2g_start", 18, whole: true), .init("end_hour", "v2g_end", 22, whole: true),
+    ]
     private var groups: [JSONDict] { dicts(m.section("fleet")["groups"]) }
 
     var body: some View {
@@ -23,6 +29,24 @@ struct FleetControls: View {
             Text(m.t("fleet_hint")).foregroundStyle(.secondary)
             NumField(label: m.t("fleet_charge"), value: $charge)
             NumField(label: m.t("fleet_discharge"), value: $discharge)
+            DisclosureGroup(m.t("v2g")) {
+                Toggle(m.t("v2g"), isOn: $export)
+                if export {
+                    Text(m.t("v2g_hint")).foregroundStyle(.secondary)
+                    ForEach(exportSpecs) { field in NumField(label:m.t(field.label), value:field.field($exportFields)) }
+                    LabeledContent(m.t("v2g_days")) {
+                        HStack {
+                            ForEach(0..<7) { i in
+                                Toggle(Calendar.current.shortWeekdaySymbols[(i + 1) % 7], isOn: Binding(
+                                    get: { exportDays.contains(i) }, set: { on in
+                                        if on { exportDays.insert(i) } else { exportDays.remove(i) }
+                                    }
+                                )).toggleStyle(.checkbox)
+                            }
+                        }
+                    }
+                }
+            }
             ForEach(groups.indices, id: \.self) { i in
                 HStack {
                     Text(str(groups[i], "name"))
@@ -36,7 +60,8 @@ struct FleetControls: View {
                 if !groups.isEmpty { Button(m.t("apply")) { save(groups) }.buttonStyle(.borderedProminent) }
             }
             if let result = m.summary?["fleet"] as? JSONDict {
-                SimpleTable(header: [m.t("fleet_group"), "SOC (%)", "V2H (kWh)", m.t("fleet_low_departures")],
+                if export { LabeledContent(m.t("v2g")) { Text("\(fmt(num(result,"v2g_kwh"),1)) kWh") } }
+                SimpleTable(header: [m.t("fleet_group"), "SOC (%)", "V2H + V2G (kWh)", m.t("fleet_low_departures")],
                     rows: dicts(result["groups"]).map { row in
                         let range = fmt(num(row, "min_soc_pct"), 1) + "–" + fmt(num(row, "max_soc_pct"), 1)
                         return [str(row, "name"), range, fmt(num(row, "discharged_kwh"), 1), fmt(num(row, "departures_below_target"))]
@@ -47,6 +72,11 @@ struct FleetControls: View {
             let fleet = m.section("fleet")
             charge = num(fleet, "site_charge_kw", 7.2)
             discharge = num(fleet, "site_discharge_kw")
+            let rule = fleet["v2g"] as? JSONDict
+            export = rule != nil
+            exportFields = numberInputs(exportSpecs, rule ?? [:])
+            let days = rule?["weekdays"] as? [Int] ?? []
+            exportDays = Set(days.isEmpty ? Array(0..<7) : days)
         }
         .sheet(item: $edit) { draft in
             FleetGroupSheet(record: draft.record) { value in
@@ -60,7 +90,14 @@ struct FleetControls: View {
     private func save(_ groups: [JSONDict]) {
         if groups.isEmpty { m.setSection("fleet", NSNull()); return }
         guard charge.isFinite, charge > 0, discharge.isFinite, discharge >= 0 else { m.error = m.t("fleet_charge"); return }
-        m.setSection("fleet", ["groups": groups, "site_charge_kw": charge, "site_discharge_kw": discharge])
+        var config: JSONDict = ["groups": groups, "site_charge_kw": charge, "site_discharge_kw": discharge]
+        if export {
+            guard var rule = payload(exportSpecs, exportFields), num(rule,"limit_kw") > 0,
+                num(rule,"start_hour") < 24, num(rule,"end_hour") < 24, discharge > 0 else { m.error = m.t("v2g_hint"); return }
+            rule["weekdays"] = exportDays.sorted()
+            config["v2g"] = rule
+        }
+        m.setSection("fleet", config)
     }
 }
 
@@ -123,6 +160,13 @@ private struct FleetGroupSheet: View {
 struct ThermalStoreControls: View {
     @EnvironmentObject var m: AppModel
     @State private var fields: [String: Double] = [:]
+    @State private var layered = false
+    @State private var layers: [String:Double] = [:]
+    private let layerSpecs: [InputSpec] = [
+        .init("top_fraction","tank_top_fraction",0.4), .init("ambient_c","tank_ambient_c",20),
+        .init("target_c","tank_target_c",65), .init("space_supply_c","tank_space_c",35),
+        .init("hot_water_supply_c","tank_dhw_c",50), .init("conductance_w_per_k","tank_transfer",20),
+    ]
     private let specs: [InputSpec] = [
         .init("capacity_kwh","tank_capacity",8), .init("initial_kwh","tank_initial",0),
         .init("charge_kw","tank_charge",3), .init("discharge_kw","tank_discharge",3),
@@ -133,17 +177,36 @@ struct ThermalStoreControls: View {
         DisclosureGroup(m.t("tank")) {
             Text(m.t("tank_hint")).foregroundStyle(.secondary)
             ForEach(specs) { s in NumField(label:m.t(s.label), value:s.field($fields)) }
+            DisclosureGroup(m.t("tank_layers")) {
+                Toggle(m.t("tank_layers"), isOn: $layered)
+                if layered {
+                    ForEach(layerSpecs) { field in NumField(label:m.t(field.label), value:field.field($layers)) }
+                }
+            }
             HStack {
                 Button(m.t("apply")) {
-                    guard let value = payload(specs, fields) else { m.error = m.t("issues"); return }
+                    guard var value = payload(specs, fields) else { m.error = m.t("issues"); return }
+                    if layered {
+                        guard let spec = payload(layerSpecs, layers) else { m.error = m.t("issues"); return }
+                        value["layers"] = spec
+                    }
                     m.setSection("heat_store", value)
                 }.buttonStyle(.borderedProminent).disabled(m.section("heating").isEmpty)
                 Button(m.t("remove")) { m.setSection("heat_store", NSNull()) }.disabled(m.section("heat_store").isEmpty)
             }
             if let result = m.summary?["heat_store"] as? JSONDict {
-                LabeledContent(m.t("tank")) { Text("\(fmt(num(result,"charge_heat_kwh"),1)) / \(fmt(num(result,"discharge_heat_kwh"),1)) kWh") }
+                if result["end_top_c"] is NSNumber {
+                    LabeledContent(m.t("tank_top")) { Text(fmt(num(result,"end_top_c"),1)) }
+                    LabeledContent(m.t("tank_bottom")) { Text(fmt(num(result,"end_bottom_c"),1)) }
+                }
             }
-        }.onAppear { fields = numberInputs(specs, m.section("heat_store")) }
+        }.onAppear {
+            let config = m.section("heat_store")
+            fields = numberInputs(specs, config)
+            let spec = config["layers"] as? JSONDict
+            layered = spec != nil
+            layers = numberInputs(layerSpecs, spec ?? [:])
+        }
     }
 }
 
@@ -155,11 +218,13 @@ struct IslandClusterControls: View {
     var body: some View {
         Section(m.t("clusters")) {
             Text(m.t("clusters_hint")).foregroundStyle(.secondary)
+            Text(m.t("island_load_hint")).foregroundStyle(.secondary)
             ForEach(rows.indices, id: \.self) { i in
                 HStack {
                     Text(str(rows[i], "name"))
                     Spacer()
                     Button(m.t("advanced_edit")) { edit = RecordEdit(index: i, record: rows[i]) }
+                    Button(m.t("import_load")) { m.importLoad(island: str(rows[i],"name")) }
                     Button(m.t("remove")) { var next = rows; next.remove(at: i); m.setSection("island_clusters", next) }
                 }
             }
@@ -190,6 +255,8 @@ private struct IslandClusterSheet: View {
     @State private var name = ""
     @State private var assigned = Set<String>()
     @State private var share = 100.0
+    @State private var source = "shared"
+    @State private var annual = 4000.0
     @State private var battery = ""
     @State private var converter = ""
     @State private var generator = ""
@@ -211,7 +278,19 @@ private struct IslandClusterSheet: View {
     var body: some View {
         Form {
             TextField(m.t("name"), text: $name)
-            NumField(label: m.t("cluster_share"), value: $share)
+            Picker(m.t("island_load_source"), selection: $source) {
+                Text(m.t("island_load_shared")).tag("shared")
+                ForEach(["flat","residential","office","retail"], id: \.self) { kind in Text(m.t("profile_" + kind)).tag(kind) }
+                let prior = record["load"] as? JSONDict ?? [:]
+                if let profile = prior["profile"] as? JSONDict, str(profile,"kind") == "series" {
+                    Text(str(profile,"name")).tag("series")
+                }
+            }
+            if source == "shared" {
+                NumField(label: m.t("cluster_share"), value: $share)
+            } else if source != "series" {
+                NumField(label: m.t("annual_kwh"), value: $annual)
+            }
             Section(m.t("cluster_pv")) {
                 ForEach(units.indices, id: \.self) { i in
                     let id = str(units[i], "id")
@@ -250,6 +329,10 @@ private struct IslandClusterSheet: View {
             name = str(record, "name")
             assigned = Set(record["inverter_units"] as? [String] ?? [])
             share = num(record, "load_share_pct", 100)
+            let load = record["load"] as? JSONDict ?? [:]
+            annual = num(load,"annual_kwh",4000)
+            let profile = load["profile"] as? JSONDict ?? [:]
+            source = str(profile,"kind") == "synthetic" ? str(profile,"profile") : (str(profile,"kind") == "series" ? "series" : "shared")
             battery = str(previous, "battery_id")
             let c = previous["coupling"] as? JSONDict ?? [:]
             switch str(c,"kind") {
@@ -284,6 +367,11 @@ private struct IslandClusterSheet: View {
         var draft: JSONDict = ["name":name.trimmingCharacters(in:.whitespacesAndNewlines), "load_share_pct":share,
             "storage":spec, "inverter_units":assigned.sorted()]
         if m.systemType == "off_grid_generator", !generator.isEmpty { draft["controls"] = plan }
+        if source == "series" { draft["load"] = record["load"] }
+        else if source != "shared" {
+            guard annual.isFinite, annual > 0 else { m.error = m.t("annual_kwh"); return }
+            draft["load"] = ["profile":["kind":"synthetic","profile":source], "annual_kwh":annual,"critical_fraction":1] as JSONDict
+        }
         save(draft)
         dismiss()
     }
@@ -302,6 +390,7 @@ struct AdvancedHourSeries: View {
         return series(dicts(fleet["groups"]), m.t("fleet"), "name", "fleet_soc_pct", "%")
              + series(clusters, m.t("clusters"), "name", "cluster_soc_pct", "%")
              + series(clusters, m.t("island_unserved"), "name", "cluster_unserved_wh", "Wh")
+             + series(clusters, m.t("loads"), "name", "cluster_load_wh", "Wh")
              + series(dicts(m.summary?["routed_cables"]), m.t("cable_planner"), "label", "routed_cable_wh", "Wh")
     }
 

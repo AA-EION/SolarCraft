@@ -321,3 +321,101 @@ fn isolated_dispatch_and_linked_cables_use_the_assigned_equipment() {
     assert!(call("validate", json!({"file":file})).to_string().contains("ISLAND_CLUSTER_INVERTER"));
     std::fs::remove_file(file).ok();
 }
+
+#[test]
+fn vehicle_export_obeys_the_connection_and_mobility_limits() {
+    let file = fixture("v2g");
+    call("use_demo_weather", json!({"file":file}));
+    call("set_section", json!({"file":file,"section":"loads","value":{
+        "profile":{"kind":"synthetic","profile":"flat"},"annual_kwh":876,"critical_fraction":1
+    }}));
+    call("set_section", json!({"file":file,"section":"grid","value":{
+        "feed_in":"surplus","export_limit_kw":0.65,"phases":1,"voltage_v":230
+    }}));
+    let group = json!({"name":"Delivery vans","vehicles":2,"battery_kwh":36,"initial_soc_pct":90,
+        "departure_soc_pct":35,"trip_kwh":3,"weekdays":[0,1,2,3,4,5,6],"arrival_hour":9,"departure_hour":23,
+        "charge_kw":3.5,"charge_efficiency":0.94,"discharge_kw":1.5,"discharge_efficiency":0.9,"strategy":"solar_preferred"});
+    call("set_section", json!({"file":file,"section":"fleet","value":{
+        "groups":[group],"site_charge_kw":5,"site_discharge_kw":2,
+        "v2g":{"limit_kw":0.5,"start_hour":18,"end_hour":22,"weekdays":[0,1,2,3,4]}
+    }}));
+    let r = app::simulate(&file, |_| true).unwrap();
+    let fleet = r.fleet.unwrap();
+    assert!(fleet.v2g_kwh > 100.0);
+    assert_eq!(fleet.v2g_kwh, r.balance.ev_to_grid_kwh);
+    assert!(r.balance.export_kwh >= fleet.v2g_kwh && r.balance.max_abs_residual_wh < 1e-5);
+    assert_eq!(fleet.groups[0].departures_below_target, 0);
+    for (k, &export) in r.flows.export.iter().enumerate() {
+        assert!(export <= 650.0 && (export < 1e-5 || r.flows.import[k] < 1e-5));
+        if r.flows.ev_to_grid[k] > 1e-6 {
+            let t = solarcraft_engine::calendar::local_time(r.local_hour[k]);
+            assert!(t.weekday < 5 && (18..22).contains(&t.hour) && r.flows.ev_to_grid[k] <= 500.0);
+            assert!(r.hourly.ev_wh[k] < 1e-5);
+        }
+    }
+    let preview = call("report_preview", json!({"file":file,"report_type":"system_planner"})).to_string();
+    assert!(preview.contains("Vehicle-to-grid export"));
+    std::fs::remove_file(file).ok();
+}
+
+#[test]
+fn synthetic_and_metered_island_profiles_have_distinct_local_demand() {
+    let file = fixture("island-loads");
+    call("use_demo_weather", json!({"file":file}));
+    let equipment = call("add_generic_storage_equipment", json!({"file":file}))["ids"].clone();
+    let units = call("stringing", json!({"file":file}))["inverters"].as_array().unwrap().iter().map(|u| u["unit"]["id"].clone()).collect::<Vec<_>>();
+    let storage = json!({"battery_id":equipment[1],"units":1,"coupling":{"kind":"ac_coupled","battery_inverter_id":equipment[2]},
+        "model":"simple","soc_min_pct":10,"soc_max_pct":95,"initial_soc_pct":50,"backup_reserve_pct":0,"grid_services_pct":0,
+        "charge_priority":["backup","self_consumption","grid_services"],"grid_charge_backup":false,
+        "grid_service":{"kind":"none"},"outages":[]});
+    workflow(&file,"off_grid","roof");
+    call("set_section", json!({"file":file,"section":"island_clusters","value":[
+        {"name":"Housing","inverter_units":units,"load_share_pct":0,"storage":storage,
+         "load":{"profile":{"kind":"synthetic","profile":"residential"},"annual_kwh":1200,"critical_fraction":1}},
+        {"name":"Metered annex","inverter_units":[],"load_share_pct":100,"storage":storage}
+    ]}));
+    let trace = file.with_extension("csv");
+    std::fs::write(&trace, ("0\n0\n0\n0\n2\n".to_owned() + &"0\n".repeat(19)).repeat(365)).unwrap();
+    call("import_load", json!({"file":file,"source":trace,"island":"Metered annex"}));
+    let r = app::simulate(&file, |_| true).unwrap();
+    assert!((r.balance.load_kwh - 1930.0).abs() < 1e-6);
+    assert_eq!(r.clusters[1].balance.load_kwh, 730.0);
+    assert_eq!(r.balance.import_kwh + r.balance.export_kwh, 0.0);
+    let hours = call("results_hours", json!({"file":file,"day_of_year":3}));
+    assert_eq!(hours["hours"][3]["cluster_load_wh"][1], 0.0);
+    assert_eq!(hours["hours"][4]["cluster_load_wh"][1], 2000.0);
+    let variants = call("compare_variants", json!({"file":file}));
+    assert!(variants["variants"][0]["error"].is_null());
+    std::fs::remove_file(trace).ok();
+    std::fs::remove_file(file).ok();
+}
+
+#[test]
+fn code_checks_distinguish_failed_missing_and_passing_inputs() {
+    let file = fixture("protection");
+    let mut nec = json!({"label":"PV source","kind":"dc_string","metal":"copper","length_m":25,
+        "area_mm2":6,"temperature_c":40,"voltage_v":360,"current_a":10,"circuits":1,"target_drop_pct":3,
+        "ampacity_a":30,"derating":0.75,"protection_a":20,"code_protection":{
+        "standard":"nec2023_pv","pv_isc_a":12,"termination_ampacity_a":25,"equipment_max_device_a":25,
+        "maximum_circuit_v":500,"device_rated_v":600,"device_dc_rated":true,"prospective_fault_ka":1,"breaking_capacity_ka":10
+    }});
+    let response = |row: &Value| call("cable_plan", json!({"file":file,"mode":"preview","circuits":[row]}));
+    let assessment = response(&nec)["estimates"][0]["code_checks"].clone();
+    assert_eq!(assessment["status"], "pass");
+    assert_eq!(assessment["minimum_device_a"], 18.75);
+    nec["code_protection"]["breaking_capacity_ka"] = Value::Null;
+    assert_eq!(response(&nec)["estimates"][0]["code_checks"]["status"], "incomplete");
+    nec["code_protection"]["breaking_capacity_ka"] = json!(0.75);
+    assert_eq!(response(&nec)["estimates"][0]["code_checks"]["status"], "fail");
+    let mut iec = json!({"label":"Inverter feeder","kind":"ac_single","metal":"copper","length_m":25,
+        "area_mm2":4,"temperature_c":40,"voltage_v":230,"current_a":24,"circuits":1,"target_drop_pct":3,
+        "ampacity_a":40,"derating":0.8,"protection_a":25,"code_protection":{
+        "standard":"iec60364","maximum_circuit_v":250,"device_rated_v":275,"device_dc_rated":false,
+        "prospective_fault_ka":3,"breaking_capacity_ka":6,"conventional_trip_a":36.25,"conductor_k":115,"device_let_through_a2s":200000
+    }});
+    assert_eq!(response(&iec)["estimates"][0]["code_checks"]["status"], "pass");
+    iec["code_protection"]["device_let_through_a2s"] = json!(400000);
+    assert_eq!(response(&iec)["estimates"][0]["code_checks"]["status"], "fail");
+    assert!(app::api::dispatch("cable_plan", &json!({"file":file,"mode":"apply_hourly","circuits":[iec]}), &mut |_| true).is_err());
+    std::fs::remove_file(file).ok();
+}

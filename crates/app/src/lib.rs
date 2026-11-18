@@ -114,8 +114,8 @@ pub fn load_weather(s: &Store, p: &Project) -> Result<(Weather, String)> {
 pub fn simulate(path: &Path, progress: impl FnMut(f64) -> bool) -> Result<SimResult> {
     let (mut s, p) = open(path)?;
     let (w, hash) = load_weather(&s, &p)?;
-    let series = plant_ops::load_series(&s, &solarcraft_model::workflow::Workflow::active(&p))?;
-    let r = solarcraft_engine::simulate(&p, &w, &hash, series.as_deref(), progress).map_err(|x| if x.0 == "cancelled" { e("CANCELLED", x) } else { e("SIMULATION", x) })?;
+    let (series, islands) = plant_ops::load_series(&s, &solarcraft_model::workflow::Workflow::active(&p))?;
+    let r = solarcraft_engine::simulate_with_island_profiles(&p, &w, &hash, series.as_deref(), &islands, progress).map_err(|x| if x.0 == "cancelled" { e("CANCELLED", x) } else { e("SIMULATION", x) })?;
     let bytes = serde_json::to_vec(&r).map_err(|x| e("RESULT_ENCODE", x))?;
     let kind = format!("results:{}", r.manifest.inputs_hash);
     s.put_blob(&kind, "application/vnd.solarcraft.results+json", &bytes).map_err(|x| e("PROJECT_SAVE", x))?;

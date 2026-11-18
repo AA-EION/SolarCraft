@@ -167,7 +167,7 @@ fn import_routes(project: &Project, circuits: &mut Vec<Circuit>) {
             circuits.push(Circuit { label: label[..max].into(), kind: Kind::DcString, metal: Metal::Copper,
                 length_m: route.home_run_m / 2.0, extra_m: route.jumper_m, area_mm2: 4.0, temperature_c: 60.0,
                 voltage_v: route.modules.len() as f64 * module.v_mp, current_a: module.i_mp, circuits: 1,
-                target_drop_pct: 1.5, source_route: Some(route.id.clone()), ampacity_a: None, derating: 1.0, candidates: vec![], binding: None, sizing_factor: 1.0, protection_a: None, design_current_a: None });
+                target_drop_pct: 1.5, source_route: Some(route.id.clone()), ampacity_a: None, derating: 1.0, candidates: vec![], binding: None, sizing_factor: 1.0, protection_a: None, design_current_a: None, code_protection: None });
         }
     }
 }

@@ -258,6 +258,22 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
             Some([c.label.clone(), n(c.area_mm2, 2), n(e.conductor_m, 1), n(e.drop_pct, 2), n(e.loss_w, 1)])
         }));
         out.push(cables);
+        use solarcraft_model::protection::{Standard, Status};
+        let mut checks = ContentSection::new("protection_checks", tr(l,"Cable protection checks","Comprobaciones de protección","Schutzprüfungen für Leitungen","Verificações de proteção"));
+        checks.table(vec![tr(l,"Circuit","Circuito","Stromkreis","Circuito"), tr(l,"Rule set","Norma","Norm","Norma"),
+            tr(l,"Status","Estado","Status","Estado"), tr(l,"Minimum device (A)","Protección mínima (A)","Mindestschutz (A)","Proteção mínima (A)")],
+            p.cable_plan.iter().filter_map(|row| {
+                let circuit = solarcraft_model::cable::resolve(p, &electrical, row).ok()?;
+                let e = circuit.estimate().ok()?.code_checks?;
+                let standard = match e.standard { Standard::Nec2023Pv => "NEC 2023 PV DC", Standard::Iec60364 => "IEC 60364-4-43" };
+                let status = match e.status {
+                    Status::Pass => tr(l,"Pass","Cumple","Bestanden","Aprovado"),
+                    Status::Fail => tr(l,"Fail","Falla","Fehlgeschlagen","Falha"),
+                    Status::Incomplete => tr(l,"Incomplete","Incompleto","Unvollständig","Incompleto"),
+                };
+                Some([circuit.label, standard.into(), status, e.minimum_device_a.map_or("–".into(), |a| n(a, 2))])
+            }));
+        if !checks.blocks.is_empty() { out.push(checks); }
     }
     if let Some(scene) = &p.scene {
         let mut routing = ContentSection::new("string_routes", tr(l, "String cable routes", "Rutas de cableado de cadenas", "String-Kabelwege", "Rotas de cabos das strings"));

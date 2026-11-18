@@ -114,6 +114,34 @@ pub struct Fleet {
     /// V2H site limit. Zero disables discharge for the fleet.
     #[serde(default)]
     pub site_discharge_kw: f64,
+    #[serde(default)]
+    pub v2g: Option<VehicleExport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VehicleExport {
+    pub limit_kw: f64,
+    pub start_hour: u32,
+    pub end_hour: u32,
+    /// Local start-day indices, Monday = 0. Empty means every day.
+    #[serde(default)]
+    pub weekdays: Vec<u32>,
+}
+
+impl VehicleExport {
+    pub fn valid(&self) -> bool {
+        (0.01..=100_000.0).contains(&self.limit_kw) && self.start_hour < 24 && self.end_hour < 24
+            && self.weekdays.iter().all(|&d| d < 7)
+            && (0..7).filter(|d| self.weekdays.contains(d)).count() == self.weekdays.len()
+    }
+
+    pub fn active(&self, hour: u32, day: u32) -> bool {
+        let after = hour >= self.start_hour;
+        let wraps = self.end_hour <= self.start_hour;
+        let in_window = if wraps { after || hour < self.end_hour } else { after && hour < self.end_hour };
+        let start_day = if wraps && !after { (day + 6) % 7 } else { day };
+        in_window && (self.weekdays.is_empty() || self.weekdays.contains(&start_day))
+    }
 }
 
 impl Fleet {
@@ -121,6 +149,7 @@ impl Fleet {
         (1..=32).contains(&self.groups.len()) && self.groups.iter().all(FleetGroup::valid)
             && (0.01..=100_000.0).contains(&self.site_charge_kw)
             && (0.0..=100_000.0).contains(&self.site_discharge_kw)
+            && self.v2g.as_ref().is_none_or(|p| p.valid() && self.site_discharge_kw > 0.0)
             && self.groups.iter().enumerate().all(|(i, g)| self.groups[..i].iter().all(|prior| prior.name != g.name))
     }
 }
@@ -137,6 +166,28 @@ pub struct HeatStore {
     pub daily_hot_water_kwh: f64,
     #[serde(default)]
     pub hot_water_hour: u32,
+    #[serde(default)]
+    pub layers: Option<TankLayers>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TankLayers {
+    pub top_fraction: f64,
+    pub ambient_c: f64,
+    pub target_c: f64,
+    pub space_supply_c: f64,
+    pub hot_water_supply_c: f64,
+    pub conductance_w_per_k: f64,
+}
+
+impl TankLayers {
+    pub fn valid(&self) -> bool {
+        (0.05..=0.95).contains(&self.top_fraction) && (0.0..=40.0).contains(&self.ambient_c)
+            && (20.0..=95.0).contains(&self.target_c) && self.target_c - self.ambient_c >= 5.0
+            && (self.ambient_c..self.target_c).contains(&self.space_supply_c)
+            && (self.space_supply_c..self.target_c).contains(&self.hot_water_supply_c)
+            && (0.0..=5000.0).contains(&self.conductance_w_per_k)
+    }
 }
 
 impl HeatStore {
@@ -145,6 +196,7 @@ impl HeatStore {
             && (0.01..=10_000.0).contains(&self.charge_kw) && (0.01..=10_000.0).contains(&self.discharge_kw)
             && (0.0..100.0).contains(&self.standing_loss_pct_per_day)
             && (0.0..=10_000.0).contains(&self.daily_hot_water_kwh) && self.hot_water_hour < 24
+            && self.layers.as_ref().is_none_or(TankLayers::valid)
     }
 }
 
@@ -157,4 +209,7 @@ pub struct IslandCluster {
     pub storage: crate::plant::Storage,
     #[serde(default)]
     pub controls: Option<IslandPlan>,
+    /// With an explicit load, this island is excluded from the shared-percent allocation.
+    #[serde(default)]
+    pub load: Option<crate::plant::Loads>,
 }

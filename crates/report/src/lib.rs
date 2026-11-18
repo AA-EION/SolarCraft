@@ -299,26 +299,49 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
         out.push(Section { id: "ev_fleet", title: tr(l, "EV fleet and bidirectional charging", "Flota eléctrica y carga bidireccional", "Elektroflotte und bidirektionales Laden", "Frota elétrica e carregamento bidirecional"),
             intro: String::new(), header: vec![
                 tr(l,"Group","Grupo","Gruppe","Grupo"), tr(l,"Vehicles","Vehículos","Fahrzeuge","Veículos"), "SOC %".into(),
-                tr(l,"Charge (kWh)","Carga (kWh)","Ladung (kWh)","Carga (kWh)"), "V2H kWh".into(),
+                tr(l,"Charge (kWh)","Carga (kWh)","Ladung (kWh)","Carga (kWh)"),
+                tr(l,"Discharge (kWh)","Descarga (kWh)","Entladung (kWh)","Descarga (kWh)"),
                 tr(l,"Below departure SOC","Salidas bajo el SOC","Unter Abfahrt-SOC","Saídas abaixo do SOC"),
                 tr(l,"Unmet travel (kWh)","Viajes no cubiertos (kWh)","Fehlende Fahrenergie (kWh)","Energia de viagens não suprida (kWh)")], rows });
     }
+    if p.fleet.as_ref().is_some_and(|fleet| fleet.v2g.is_some()) {
+        out.push(Section { id: "vehicle_export", title: tr(l,"Vehicle-to-grid export","Exportación a la red desde vehículos","Fahrzeug-Netzeinspeisung","Exportação de veículos para a rede"),
+            intro: String::new(), header: vec![], rows: vec![
+                vec![tr(l,"Export to the grid","Exportación a la red","Einspeisung ins Netz","Exportação para a rede"), format!("{} kWh",n(r.balance.ev_to_grid_kwh,1))],
+                vec![tr(l,"Vehicle energy used on site","Energía del vehículo usada en el sitio","Fahrzeugenergie am Standort","Energia do veículo usada no local"), format!("{} kWh",n(r.balance.ev_to_load_kwh,1))],
+            ] });
+    }
     if let Some(store) = &r.heat_store {
-        let rows = [
+        let mut rows: Vec<_> = [
             (tr(l,"Charge","Carga","Ladung","Carga"), store.charge_heat_kwh),
             (tr(l,"Discharge","Descarga","Entladung","Descarga"), store.discharge_heat_kwh),
             (tr(l,"Standing loss","Pérdida en reposo","Stillstandsverlust","Perda em repouso"), store.standing_loss_kwh),
             (tr(l,"Hot water demand","Demanda de agua caliente","Warmwasserbedarf","Demanda de água quente"), store.hot_water_kwh),
         ].into_iter().map(|(label,value)| vec![label, format!("{} kWh", n(value,1))]).collect();
+        if let (Some(top), Some(bottom)) = (store.end_top_c, store.end_bottom_c) {
+            rows.push(vec![tr(l,"Final upper / lower layer","Capas superior e inferior al cierre","Obere und untere Schicht am Ende","Camadas superior e inferior no final"),
+                format!("{} / {} °C", n(top,1), n(bottom,1))]);
+            rows.push(vec![tr(l,"Hot water heat from the tank","Calor del tanque para agua caliente","Warmwasserwärme aus dem Speicher","Calor do tanque para água quente"),
+                format!("{} kWh",n(store.tank_to_hot_water_kwh,1))]);
+        }
         out.push(Section { id: "heat_store", title: tr(l,"Thermal storage","Almacenamiento térmico","Wärmespeicher","Armazenamento térmico"),
             intro: String::new(), header: vec![], rows });
     }
     if !r.clusters.is_empty() {
-        let rows = r.clusters.iter().map(|c| vec![c.name.clone(), n(c.storage_kwh,1),
+        let rows = r.clusters.iter().map(|c| {
+            let source = match &c.load_profile {
+                Some(solarcraft_model::plant::LoadProfile::Series { name, .. }) => name.clone(),
+                Some(solarcraft_model::plant::LoadProfile::Synthetic { .. }) =>
+                    tr(l,"Synthetic","Sintético","Synthetisch","Sintético"),
+                _ => tr(l,"Shared","Compartido","Geteilt","Compartilhado"),
+            };
+            vec![c.name.clone(), source, n(c.balance.load_kwh,1), n(c.storage_kwh,1),
             n(c.balance.load_served_kwh,1), n(c.balance.unserved_kwh,1), n(c.balance.generator_kwh,1),
-            c.fuel_unit.as_ref().map_or("–".into(), |unit| format!("{} {unit}", n(c.balance.generator_fuel,1)))]).collect();
+            c.fuel_unit.as_ref().map_or("–".into(), |unit| format!("{} {unit}", n(c.balance.generator_fuel,1)))]
+        }).collect();
         out.push(Section { id: "island_clusters", title: tr(l,"Independent islands","Islas independientes","Unabhängige Inseln","Ilhas independentes"),
-            intro: String::new(), header: vec![tr(l,"Island","Isla","Insel","Ilha"), tr(l,"Battery (kWh)","Batería (kWh)","Batterie (kWh)","Bateria (kWh)"),
+            intro: String::new(), header: vec![tr(l,"Island","Isla","Insel","Ilha"), tr(l,"Load profile","Perfil de consumo","Lastprofil","Perfil de consumo"),
+                tr(l,"Requested (kWh)","Solicitada (kWh)","Bedarf (kWh)","Solicitada (kWh)"), tr(l,"Battery (kWh)","Batería (kWh)","Batterie (kWh)","Bateria (kWh)"),
                 tr(l,"Served (kWh)","Atendida (kWh)","Versorgt (kWh)","Atendida (kWh)"), tr(l,"Unserved (kWh)","No atendida (kWh)","Ungedeckt (kWh)","Não atendida (kWh)"),
                 tr(l,"Generator (kWh)","Generador (kWh)","Generator (kWh)","Gerador (kWh)"), tr(l,"Fuel","Combustible","Kraftstoff","Combustível")], rows });
     }

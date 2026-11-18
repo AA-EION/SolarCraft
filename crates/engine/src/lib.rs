@@ -25,7 +25,7 @@ pub mod flexible;
 pub mod islands;
 mod partial_shading;
 
-pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 8)");
+pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 9)");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step { pub key: String, pub label: String, pub value: f64, pub delta: f64, pub delta_pct: f64 }
@@ -57,7 +57,10 @@ pub struct Hourly {
     #[serde(default)] pub ev_discharge_wh: Vec<f32>,
     #[serde(default)] pub fleet_soc_pct: Vec<Vec<f32>>,
     #[serde(default)] pub heat_store_kwh: Vec<f32>,
+    #[serde(default)] pub tank_top_c: Vec<f32>,
+    #[serde(default)] pub tank_bottom_c: Vec<f32>,
     #[serde(default)] pub cluster_unserved_wh: Vec<Vec<f32>>,
+    #[serde(default)] pub cluster_load_wh: Vec<Vec<f32>>,
     #[serde(default)] pub cluster_soc_pct: Vec<Vec<f32>>,
     #[serde(default)] pub routed_cable_wh: Vec<Vec<f32>>,
 }
@@ -160,7 +163,12 @@ const E_KEYS: [(&str, &str); 16] = [
 ];
 
 /// `progress(fraction) -> continue?`
-pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Option<&[f64]>, mut progress: impl FnMut(f64) -> bool) -> Result<SimResult, SimError> {
+pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Option<&[f64]>, progress: impl FnMut(f64) -> bool) -> Result<SimResult, SimError> {
+    simulate_with_island_profiles(p, w, weather_hash, load_series, &[], progress)
+}
+
+pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &str, load_series: Option<&[f64]>, island_series: &[Option<Vec<f64>>],
+    mut progress: impl FnMut(f64) -> bool) -> Result<SimResult, SimError> {
     let inputs_hash = inputs_hash(p, weather_hash);
     let active = solarcraft_model::workflow::Workflow::active(p);
     let p = active.as_ref();
@@ -198,7 +206,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     let mut monthly = vec![Month::default(); 12];
     for (i, m) in monthly.iter_mut().enumerate() { m.month = i as u32 + 1; }
     let month_of: Vec<usize> = local_hour.iter().map(|&hour| calendar::local_time(hour).month as usize - 1).collect();
-    let mut hourly = Hourly { unix_mid: w.hours.iter().map(|h| h.unix_mid).collect(), poa_w_m2: vec![0.0; n], t_cell_c: vec![0.0; n], dc_w: vec![0.0; n], ac_w: vec![0.0; n], ev_wh: vec![], heating_wh: vec![], dc_cable_wh: vec![0.0; n], ev_discharge_wh: vec![], fleet_soc_pct: vec![], heat_store_kwh: vec![], cluster_unserved_wh: vec![], cluster_soc_pct: vec![], routed_cable_wh: vec![] };
+    let mut hourly = Hourly { unix_mid: w.hours.iter().map(|h| h.unix_mid).collect(), poa_w_m2: vec![0.0; n], t_cell_c: vec![0.0; n], dc_w: vec![0.0; n], ac_w: vec![0.0; n], ev_wh: vec![], heating_wh: vec![], dc_cable_wh: vec![0.0; n], ev_discharge_wh: vec![], fleet_soc_pct: vec![], heat_store_kwh: vec![], tank_top_c: vec![], tank_bottom_c: vec![], cluster_unserved_wh: vec![], cluster_load_wh: vec![], cluster_soc_pct: vec![], routed_cable_wh: vec![] };
     let mut warnings: Vec<Note> = vec![];
     let mut module_shading: Vec<FieldShade> = vec![];
     let mut array_irradiation = vec![];
@@ -456,7 +464,10 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     for v in &mut hourly.t_cell_c { *v /= area_tot as f32; }
 
     // 3. Consumption, storage and grid.
+    let no_shared_load = p.workflow.system.islanded() && !p.island_clusters.is_empty()
+        && p.island_clusters.iter().all(|c| c.load.is_some());
     let profile: Vec<f64> = match (&p.loads.profile, load_series) {
+        _ if no_shared_load => vec![0.0; n],
         (solarcraft_model::plant::LoadProfile::None, _) => vec![0.0; 8760],
         (solarcraft_model::plant::LoadProfile::Synthetic { profile }, _) => loads::synthetic(*profile, p.loads.annual_kwh, p.site.latitude.value),
         (solarcraft_model::plant::LoadProfile::Series { .. }, Some(s)) => loads::hourly_from_series(s).map_err(SimError)?,
@@ -472,6 +483,8 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             let reference = flexible::thermal_store(config, tank, &temperatures, &local_hour, &reference_load, &vec![0.0; n]);
             heat_store = Some(run.result);
             hourly.heat_store_kwh = run.stored;
+            hourly.tank_top_c = run.top_c;
+            hourly.tank_bottom_c = run.bottom_c;
             (run.electrical, reference.electrical, run.demand)
         } else {
             let (series, result) = demand::heating(config, w.hours.iter().map(|h| h.temp_air));
@@ -492,31 +505,40 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         hourly.ev_wh = series;
         result
     });
-    let fleet = p.fleet.as_ref().map(|config| {
+    let mut vehicle_export = vec![];
+    let mut fleet = p.fleet.as_ref().map(|config| {
         let outage: std::collections::HashSet<_> = p.storage.iter().flat_map(|s| &s.outages)
             .flat_map(|o| (0..o.hours.min(8760)).map(|h| (o.start_hour + h) % 8760)).collect();
         let online: Vec<_> = local_hour.iter().map(|h| !outage.contains(h)).collect();
         let bidirectional = p.grid.feed_in != solarcraft_model::plant::FeedIn::Full;
-        let run = flexible::fleet(config, &local_hour, &load_w, &hourly.ac_w, &online, bidirectional);
-        let reference = flexible::fleet(config, &local_hour, &reference_load, &vec![0.0; n], &online, false);
+        let run = flexible::fleet(config, &local_hour, &load_w, &hourly.ac_w, &online, bidirectional, p.grid.export_limit_kw.map(|limit| limit * 1000.0));
+        let reference = flexible::fleet(config, &local_hour, &reference_load, &vec![0.0; n], &online, false, None);
         for (load, extra) in load_w.iter_mut().zip(&run.charge) { *load += f64::from(*extra); }
         for (load, extra) in reference_load.iter_mut().zip(reference.charge) { *load += f64::from(extra); }
         hourly.ev_wh = run.charge;
         hourly.ev_discharge_wh = run.discharge;
+        vehicle_export = run.export;
         hourly.fleet_soc_pct = run.soc;
         run.result
     });
     let units: Vec<energy::UnitInput> = unit_inputs.iter().map(|(id, spec, dc, v)| energy::UnitInput { id, spec, dc_w: dc.clone(), v_dc: v.clone() }).collect();
     let mut clusters = vec![];
     let en = if p.workflow.system.islanded() && !p.island_clusters.is_empty() {
-        let run = islands::simulate(p, &units, &load_w, &local_hour, ac_wire, &routed).map_err(SimError)?;
+        let run = islands::simulate(p, &units, &load_w, &local_hour, ac_wire, &routed, island_series).map_err(SimError)?;
         clusters = run.clusters;
         hourly.cluster_unserved_wh = run.unserved_wh;
+        hourly.cluster_load_wh = run.requested_wh;
         hourly.cluster_soc_pct = run.soc_pct;
         run.energy
     } else {
-        energy::dispatch_bus(p, &units, &load_w, &local_hour, ac_wire, &hourly.ev_discharge_wh, &routed).map_err(SimError)?
+        let ev = energy::VehiclePower { site: &hourly.ev_discharge_wh, grid: &vehicle_export };
+        energy::dispatch_bus(p, &units, &load_w, &local_hour, ac_wire, ev, &routed).map_err(SimError)?
     };
+    if let Some(result) = &mut fleet {
+        result.v2h_kwh = en.balance.ev_to_load_kwh;
+        result.v2g_kwh = en.balance.ev_to_grid_kwh;
+        hourly.ev_discharge_wh = en.flows.ev_to_load.iter().zip(&en.flows.ev_to_grid).map(|(site, grid)| site + grid).collect();
+    }
     for (&idx, series) in &en.flows.routed_ac_wh { hourly.routed_cable_wh[idx].clone_from(series); }
     let routed_cables = routed.labels.into_iter().zip(&hourly.routed_cable_wh).map(|(label, series)| wiring::CircuitResult {
         label, loss_kwh: series.iter().map(|&w| f64::from(w)).sum::<f64>() / 1000.0,

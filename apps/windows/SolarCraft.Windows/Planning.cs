@@ -86,6 +86,24 @@ public sealed partial class MainWindow
                         r["allowed_a"] is null ? "—" : $"{F(N(r, "allowed_a"), 1)} / {F(N(circuits[i], "design_current_a", N(circuits[i], "current_a")) * N(circuits[i], "sizing_factor", 1), 1)}",
                         r["suggested"] is null ? "—" : $"{F(N(r["suggested"], "area_mm2"), 1)} mm²" }))));
                 foreach (var error in Arr(data?["row_errors"]).Where(e => e is not null)) holder.Children.Add(Note(error!.GetValue<string>()));
+                var protection = new StackPanel { Spacing = 6 };
+                holder.Children.Add(protection);
+                void ShowProtection()
+                {
+                    protection.Children.Clear();
+                    var index = picker.SelectedIndex;
+                    if (index < 0 || estimates.ElementAtOrDefault(index)?["code_checks"] is not JsonNode assessment) return;
+                    var standard = S(assessment, "standard") == "nec2023_pv" ? "NEC 2023 PV DC" : "IEC 60364-4-43";
+                    var state = T("code_" + S(assessment,"status"));
+                    var table = Table([T("code_rule_set"), T("status"), T("code_actual"), T("code_threshold")],
+                        Arr(assessment["checks"]).Select(c => (IList<string>)new[] {
+                            T("check_" + S(c,"id")), T("code_" + S(c,"status")),
+                            c?["actual"] is null ? "—" : F(N(c,"actual"),2), c?["limit"] is null ? "—" : F(N(c,"limit"),2),
+                        }));
+                    protection.Children.Add(new Expander { Header = $"{standard} · {state}", Content = table });
+                }
+                picker.SelectionChanged += (_, _) => ShowProtection();
+                ShowProtection();
                 var useSize = Btn(T("cable_use_size"), () =>
                 {
                     int index = picker.SelectedIndex;
@@ -203,6 +221,34 @@ public sealed partial class MainWindow
         var protection = Num(T("cable_protection"), N(original, "protection_a", double.NaN), 280);
         form.Children.Add(ampacity); form.Children.Add(derating); form.Children.Add(factor);
         form.Children.Add(protection); form.Children.Add(candidates);
+        var codePanel = new StackPanel { Spacing = 7 };
+        var code = original?["code_protection"];
+        var rules = Combo(T("code_rule_set"), [
+            ("", T("code_manual")), ("nec2023_pv", "NEC 2023 PV DC"), ("iec60364", "IEC 60364-4-43"),
+        ], S(code, "standard"));
+        codePanel.Children.Add(rules);
+        var codeDetails = new StackPanel { Spacing = 7 };
+        codePanel.Children.Add(codeDetails);
+        var ratingType = Combo(T("code_current_type"), [("", "—"), ("dc","DC"), ("ac","AC")],
+            code?["device_dc_rated"] is JsonValue typed ? (typed.GetValue<bool>() ? "dc" : "ac") : "");
+        codeDetails.Children.Add(ratingType);
+        var codeFields = new[] {
+            ("pv_isc_a", "nec2023_pv"), ("termination_ampacity_a", ""), ("equipment_max_device_a", "nec2023_pv"),
+            ("maximum_circuit_v", ""), ("device_rated_v", ""), ("prospective_fault_ka", ""), ("breaking_capacity_ka", ""),
+            ("conventional_trip_a", "iec60364"), ("conductor_k", "iec60364"), ("device_let_through_a2s", "iec60364"),
+        }.Select(field => (key: field.Item1, standard: field.Item2, input: Num(T("code_" + field.Item1),
+            N(code,field.Item1,double.NaN), 295))).ToArray();
+        foreach (var field in codeFields) codeDetails.Children.Add(field.input);
+        void ShowCode()
+        {
+            var selected = Sel(rules);
+            codeDetails.Visibility = selected.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            foreach (var entry in codeFields)
+                entry.input.Visibility = entry.standard.Length == 0 || entry.standard == selected ? Visibility.Visible : Visibility.Collapsed;
+        }
+        rules.SelectionChanged += (_, _) => ShowCode();
+        ShowCode();
+        form.Children.Add(new Expander { Header = T("code_protection"), Content = codePanel, IsExpanded = code is JsonObject });
         var dialog = new ContentDialog { Title = T(original is null ? "cable_add" : "cable_edit"), XamlRoot = Content.XamlRoot,
             Content = new ScrollViewer { Content = form, MaxHeight = 535 }, PrimaryButtonText = T("cable_preview"), CloseButtonText = T("cancel") };
         var status = Note("");
@@ -227,6 +273,15 @@ public sealed partial class MainWindow
                 result["sizing_factor"] = factor.Value;
                 result["protection_a"] = double.IsNaN(protection.Value) ? null : JsonValue.Create(protection.Value);
                 if (links.TryGetValue(Sel(link), out var binding)) result["binding"] = binding.DeepClone();
+                if (Sel(rules).Length > 0)
+                {
+                    var protectionSpec = new JsonObject { ["standard"] = Sel(rules) };
+                    if (Sel(ratingType).Length > 0) protectionSpec["device_dc_rated"] = Sel(ratingType) == "dc";
+                    foreach (var item in codeFields)
+                        if (item.input.Visibility == Visibility.Visible && double.IsFinite(item.input.Value))
+                            protectionSpec[item.key] = item.input.Value;
+                    result["code_protection"] = protectionSpec;
+                }
                 var sizes = new JsonArray();
                 foreach (var entry in candidates.Text.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
                 {

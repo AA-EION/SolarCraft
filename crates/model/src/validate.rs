@@ -179,13 +179,28 @@ fn validate_clusters(p: &Project, push: &mut Push) {
     let mut units = std::collections::HashSet::new();
     let mut names = std::collections::HashSet::new();
     let mut share = 0.0;
+    let mut shares_site_load = false;
     if clusters.len() > 24 {
         push("ISLAND_CLUSTER_COUNT", Severity::Error, list.into(), "Use at most 24 independently dispatched islands.".into());
         return;
     }
     for (i, c) in clusters.iter().enumerate() {
         let path = format!("{list}/{i}");
-        share += c.load_share_pct;
+        if let Some(load) = &c.load {
+            use crate::plant::LoadProfile;
+            let valid = match &load.profile {
+                LoadProfile::None => false,
+                LoadProfile::Synthetic { .. } => (0.000_001..=1e12).contains(&load.annual_kwh),
+                LoadProfile::Series { blob, values, step_minutes, .. } => !blob.is_empty() && *values >= 8760
+                    && *step_minutes > 0 && 60 % *step_minutes == 0,
+            };
+            if !valid {
+                push("ISLAND_CLUSTER_PROFILE", Severity::Error, format!("{path}/load"), "Configure a positive synthetic load or import a local interval series for this island.".into());
+            }
+        } else {
+            shares_site_load = true;
+            share += c.load_share_pct;
+        }
         if c.name.trim().is_empty() || c.name.len() > 100 || !names.insert(c.name.as_str())
             || !(0.0..=100.0).contains(&c.load_share_pct) {
             push("ISLAND_CLUSTER", Severity::Error, path.clone(), "Give each island a unique name and a load share from 0% to 100%.".into());
@@ -211,8 +226,8 @@ fn validate_clusters(p: &Project, push: &mut Push) {
             }
         });
     }
-    if units.len() != electrical.inverters.len() || (share - 100.0).abs() > 1e-6 {
-        push("ISLAND_CLUSTER_ALLOCATION", Severity::Error, list.into(), "Assign every PV inverter unit once and allocate 100% of the load.".into());
+    if units.len() != electrical.inverters.len() || (shares_site_load && (share - 100.0).abs() > 1e-6) {
+        push("ISLAND_CLUSTER_ALLOCATION", Severity::Error, list.into(), "Assign every PV inverter unit once. Islands sharing the site load must split 100% of that profile.".into());
     }
     if p.workflow.system == SystemType::OffGridGenerator && clusters.iter().all(|c| c.storage.generator_id.is_none()) {
         push("ISLAND_GENERATOR_REQUIRED", Severity::Error, list.into(), "At least one island needs a generator in this workflow.".into());
@@ -222,7 +237,8 @@ fn validate_clusters(p: &Project, push: &mut Push) {
 fn plant_issues(p: &Project, push: &mut Push) {
     use crate::{plant::{Coupling, LoadProfile}, workflow::SystemType};
     let system = p.workflow.system;
-    if !matches!(system, SystemType::Custom | SystemType::GridExport) && matches!(p.loads.profile, LoadProfile::None) {
+    let all_islands_have_loads = system.islanded() && !p.island_clusters.is_empty() && p.island_clusters.iter().all(|c| c.load.is_some());
+    if !matches!(system, SystemType::Custom | SystemType::GridExport) && !all_islands_have_loads && matches!(p.loads.profile, LoadProfile::None) {
         push("WORKFLOW_LOAD_REQUIRED", Severity::Error, "/loads/profile".into(), "Select a consumption profile on the Consumption page.".into());
     }
     if (system.needs_ev() && p.ev.is_none() && p.fleet.is_none()) || p.ev.as_ref().is_some_and(|ev| !ev.valid()) {
@@ -271,8 +287,8 @@ fn plant_issues(p: &Project, push: &mut Push) {
     }
     if let Some(l) = p.grid.export_limit_kw { if l < 0.0 { push("GRID_EXPORT_LIMIT", Severity::Error, "/grid/export_limit_kw".into(), "Export limit cannot be negative.".into()); } }
     if !matches!(p.grid.phases, 1 | 3) { push("GRID_PHASES", Severity::Error, "/grid/phases".into(), "Grid connection must be single-phase (1) or three-phase (3).".into()); }
-    if matches!(p.loads.profile, LoadProfile::Synthetic { .. }) && p.loads.annual_kwh <= 0.0 { push("LOAD_ANNUAL", Severity::Error, "/loads/annual_kwh".into(), "Annual consumption must be positive.".into()); }
-    if !(0.0..=1.0).contains(&p.loads.critical_fraction) { push("LOAD_CRITICAL", Severity::Error, "/loads/critical_fraction".into(), "Critical load share must be between 0 and 1.".into()); }
+    if !all_islands_have_loads && matches!(p.loads.profile, LoadProfile::Synthetic { .. }) && p.loads.annual_kwh <= 0.0 { push("LOAD_ANNUAL", Severity::Error, "/loads/annual_kwh".into(), "Annual consumption must be positive.".into()); }
+    if !all_islands_have_loads && !(0.0..=1.0).contains(&p.loads.critical_fraction) { push("LOAD_CRITICAL", Severity::Error, "/loads/critical_fraction".into(), "Critical load share must be between 0 and 1.".into()); }
     if let Some(st) = &p.storage {
         let Some(b) = p.library.battery(&st.battery_id) else { push("BATTERY_MISSING", Severity::Error, "/storage/battery_id".into(), format!("Battery '{}' is not in the project library.", st.battery_id)); return };
         if st.units == 0 { push("BATTERY_UNITS", Severity::Error, "/storage/units".into(), "At least one battery unit is required.".into()); }

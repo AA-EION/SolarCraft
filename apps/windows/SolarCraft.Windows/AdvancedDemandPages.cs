@@ -27,7 +27,7 @@ public sealed partial class MainWindow
         return await dialog.ShowAsync() == ContentDialogResult.Primary ? result : null;
     }
 
-    private void AdvancedList(Panel panel, JsonArray rows, string title, Func<JsonNode?, Task<JsonObject?>> edit, Action<JsonArray> save)
+    private ComboBox AdvancedList(Panel panel, JsonArray rows, string title, Func<JsonNode?, Task<JsonObject?>> edit, Action<JsonArray> save)
     {
         var file = _file;
         var select = Combo(title, rows.Select((r, i) => (i.ToString(), S(r, "name"))).ToList(), "0");
@@ -54,6 +54,7 @@ public sealed partial class MainWindow
         }
         add.Click += async (_, _) => await Change(-1);
         change.Click += async (_, _) => { if (select.SelectedIndex >= 0) await Change(select.SelectedIndex); };
+        return select;
     }
 
     private void BuildFleet()
@@ -65,6 +66,25 @@ public sealed partial class MainWindow
         var limits = MakeFields(panel, fleet, [
             ("site_charge_kw", "fleet_charge", 7.2, false), ("site_discharge_kw", "fleet_discharge", 0, false),
         ]);
+        var v2g = fleet?["v2g"];
+        var schedule = new StackPanel { Spacing = 8 };
+        var export = new CheckBox { Content = T("v2g"), IsChecked = v2g is JsonObject };
+        schedule.Children.Add(export);
+        var exportDetails = new StackPanel { Spacing = 8 };
+        schedule.Children.Add(exportDetails);
+        exportDetails.Children.Add(Note(T("v2g_hint")));
+        var hours = MakeFields(exportDetails, v2g, [
+            ("limit_kw", "v2g_limit", 2, false), ("start_hour", "v2g_start", 18, true), ("end_hour", "v2g_end", 22, true),
+        ]);
+        var days = Weekdays(v2g?["weekdays"], true);
+        exportDetails.Children.Add(Note(T("v2g_days")));
+        exportDetails.Children.Add(Row(days.Take(4).Cast<UIElement>().ToArray()));
+        exportDetails.Children.Add(Row(days.Skip(4).Cast<UIElement>().ToArray()));
+        void ShowExport() => exportDetails.Visibility = export.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        export.Checked += (_, _) => ShowExport();
+        export.Unchecked += (_, _) => ShowExport();
+        ShowExport();
+        panel.Children.Add(new Expander { Header = T("v2g"), Content = schedule, IsExpanded = v2g is JsonObject });
         void Save(JsonArray rows)
         {
             if (rows.Count == 0) { SetSection("fleet", null); return; }
@@ -72,6 +92,14 @@ public sealed partial class MainWindow
                 var config = ReadFields(limits);
                 if (N(config, "site_charge_kw") <= 0 || N(config, "site_discharge_kw") < 0) throw new ArgumentException(T("fleet_charge"));
                 config["groups"] = rows;
+                if (export.IsChecked == true)
+                {
+                    var rule = ReadFields(hours);
+                    if (N(rule,"limit_kw") <= 0 || N(rule,"start_hour") > 23 || N(rule,"end_hour") > 23 || N(config,"site_discharge_kw") <= 0)
+                        throw new ArgumentException(T("v2g_hint"));
+                    rule["weekdays"] = SelectedDays(days);
+                    config["v2g"] = rule;
+                }
                 Api.Invoke("set_section", new { file = _file, section = "fleet", value = config });
             })) return;
             Reload();
@@ -80,7 +108,8 @@ public sealed partial class MainWindow
         if (groups.Count > 0) panel.Children.Add(Btn(T("apply"), () => Save((JsonArray)groups.DeepClone()), true));
         if (_summary?["fleet"] is JsonNode results)
         {
-            panel.Children.Add(Table([T("fleet_group"), T("fleet_vehicles"), "SOC (%)", "V2H (kWh)", T("fleet_low_departures"), T("fleet_travel_unmet")],
+            if (v2g is JsonObject) panel.Children.Add(Note($"{T("v2g")} · {F(N(results,"v2g_kwh"),1)} kWh"));
+            panel.Children.Add(Table([T("fleet_group"), T("fleet_vehicles"), "SOC (%)", "V2H + V2G (kWh)", T("fleet_low_departures"), T("fleet_travel_unmet")],
                 Arr(results["groups"]).Select(g => (IList<string>)new[] { S(g,"name"), F(N(g,"vehicles")),
                     $"{F(N(g,"min_soc_pct"),1)}–{F(N(g,"max_soc_pct"),1)}", F(N(g,"discharged_kwh"),1),
                     F(N(g,"departures_below_target")), F(N(g,"unmet_travel_kwh"),1) })));
@@ -102,11 +131,7 @@ public sealed partial class MainWindow
             ("charge_efficiency", "ev_efficiency", 0.9, false), ("discharge_kw", "fleet_v2h", 0, false),
             ("discharge_efficiency", "fleet_v2h_eff", 0.9, false),
         ]);
-        var picked = Arr(current?["weekdays"]).Select(v => v!.GetValue<int>()).ToHashSet();
-        var days = Enumerable.Range(0, 7).Select(i => new CheckBox {
-            Content = System.Globalization.CultureInfo.CurrentUICulture.DateTimeFormat.GetAbbreviatedDayName((DayOfWeek)((i + 1) % 7)),
-            IsChecked = current is null ? i < 5 : picked.Contains(i), MinWidth = 65,
-        }).ToArray();
+        var days = Weekdays(current?["weekdays"], false);
         panel.Children.Add(H(T("fleet_arrival_days")));
         panel.Children.Add(Row(days.Take(4).Cast<UIElement>().ToArray()));
         panel.Children.Add(Row(days.Skip(4).Cast<UIElement>().ToArray()));
@@ -116,7 +141,7 @@ public sealed partial class MainWindow
         {
             var group = ReadFields(fields);
             group["name"] = name.Text.Trim();
-            group["weekdays"] = new JsonArray(days.Select((d, i) => (d, i)).Where(k => k.d.IsChecked == true).Select(k => (JsonNode?)JsonValue.Create(k.i)).ToArray());
+            group["weekdays"] = SelectedDays(days);
             group["strategy"] = Sel(strategy);
             if (name.Text.Trim().Length == 0 || Arr(group["weekdays"]).Count == 0 || N(group, "arrival_hour") > 23
                 || N(group, "departure_hour") > 23 || N(group, "vehicles") < 1 || N(group,"trip_kwh") > N(group,"battery_kwh"))
@@ -124,6 +149,19 @@ public sealed partial class MainWindow
             return group;
         });
     }
+
+    private static CheckBox[] Weekdays(JsonNode? value, bool allByDefault)
+    {
+        var selected = Arr(value).Select(v => v!.GetValue<int>()).ToHashSet();
+        return Enumerable.Range(0, 7).Select(i => new CheckBox {
+            Content = System.Globalization.CultureInfo.CurrentUICulture.DateTimeFormat.GetAbbreviatedDayName((DayOfWeek)((i + 1) % 7)),
+            IsChecked = selected.Count == 0 ? allByDefault || i < 5 : selected.Contains(i), MinWidth = 65,
+        }).ToArray();
+    }
+
+    private static JsonArray SelectedDays(CheckBox[] days) =>
+        new(days.Select((box, i) => (box, i)).Where(day => day.box.IsChecked == true)
+            .Select(day => (JsonNode?)JsonValue.Create(day.i)).ToArray());
 
     private void BuildHeatStore()
     {
@@ -136,13 +174,37 @@ public sealed partial class MainWindow
             ("standing_loss_pct_per_day", "tank_standing", 2, false), ("daily_hot_water_kwh", "tank_dhw", 0, false),
             ("hot_water_hour", "tank_dhw_hour", 19, true),
         ]);
-        var save = Btn(T("apply"), () => { if (Try(() => Api.Invoke("set_section", new { file = _file, section = "heat_store", value = ReadFields(fields) }))) Reload(); }, true);
+        var layers = current?["layers"];
+        var layerPanel = new StackPanel { Spacing = 7 };
+        var layered = new CheckBox { Content = T("tank_layers"), IsChecked = layers is JsonObject };
+        layerPanel.Children.Add(layered);
+        var layerDetails = new StackPanel { Spacing = 7 };
+        layerPanel.Children.Add(layerDetails);
+        var layerFields = MakeFields(layerDetails, layers, [
+            ("top_fraction", "tank_top_fraction", 0.4, false), ("ambient_c", "tank_ambient_c", 20, false),
+            ("target_c", "tank_target_c", 65, false), ("space_supply_c", "tank_space_c", 35, false),
+            ("hot_water_supply_c", "tank_dhw_c", 50, false), ("conductance_w_per_k", "tank_transfer", 20, false),
+        ]);
+        void ShowLayers() => layerDetails.Visibility = layered.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        layered.Checked += (_, _) => ShowLayers();
+        layered.Unchecked += (_, _) => ShowLayers();
+        ShowLayers();
+        panel.Children.Add(new Expander { Header = T("tank_layers"), Content = layerPanel, IsExpanded = layers is JsonObject });
+        var save = Btn(T("apply"), () =>
+        {
+            if (!Try(() => {
+                var value = ReadFields(fields);
+                if (layered.IsChecked == true) value["layers"] = ReadFields(layerFields);
+                Api.Invoke("set_section", new { file = _file, section = "heat_store", value });
+            })) return;
+            Reload();
+        }, true);
         save.IsEnabled = _project?["heating"] is JsonObject;
         var remove = Btn(T("remove"), () => SetSection("heat_store", null));
         remove.IsEnabled = current is JsonObject;
         panel.Children.Add(Row(save, remove));
-        if (_summary?["heat_store"] is JsonNode result)
-            panel.Children.Add(Note($"{T("tank")}  {F(N(result,"charge_heat_kwh"),1)} / {F(N(result,"discharge_heat_kwh"),1)} kWh"));
+        if (_summary?["heat_store"] is JsonNode result && result["end_top_c"] is not null)
+            panel.Children.Add(Note($"{T("tank_top")} {F(N(result,"end_top_c"),1)} · {T("tank_bottom")} {F(N(result,"end_bottom_c"),1)}"));
         var store = new Expander { Header = T("tank"), Content = panel, IsExpanded = current is JsonObject };
         if (current is JsonObject) HeatingPage.Children.Insert(0, store);
         else HeatingPage.Children.Add(store);
@@ -153,7 +215,20 @@ public sealed partial class MainWindow
         var rows = Arr(_project?["island_clusters"]);
         var panel = new StackPanel { Spacing = 9 };
         panel.Children.Add(Note(T("clusters_hint")));
-        AdvancedList(panel, rows, T("clusters"), EditIslandCluster, next => SetSection("island_clusters", next));
+        panel.Children.Add(Note(T("island_load_hint")));
+        var selection = AdvancedList(panel, rows, T("clusters"), EditIslandCluster, next => SetSection("island_clusters", next));
+        if (rows.Count > 0) panel.Children.Add(Btn(T("island_import_load"), async () =>
+        {
+            if (selection.SelectedIndex < 0) return;
+            var island = S(rows[selection.SelectedIndex], "name");
+            var file = _file;
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            picker.FileTypeFilter.Add(".csv");
+            picker.FileTypeFilter.Add(".txt");
+            InitPicker(picker);
+            var selected = await picker.PickSingleFileAsync();
+            if (selected is not null && file == _file && Try(() => Api.Invoke("import_load", new { file, source = selected.Path, island }))) Reload();
+        }));
         var results = Arr(_summary?["clusters"]);
         if (results.Count > 0)
             panel.Children.Add(Table([T("name"), "kWh", T("island_unserved"), T("generator")],
@@ -169,6 +244,22 @@ public sealed partial class MainWindow
         panel.Children.Add(name);
         var load = Num(T("cluster_share"), N(current,"load_share_pct", 100), 280);
         panel.Children.Add(load);
+        var selectedLoad = current?["load"];
+        var source = selectedLoad?["profile"];
+        var choices = new List<(string, string)> { ("shared", T("island_load_shared")) };
+        choices.AddRange(new[] { "flat","residential","office","retail" }.Select(key => (key, T("profile_" + key))));
+        if (S(source,"kind") == "series") choices.Add(("series", S(source,"name")));
+        var profiles = Combo(T("island_load_source"), choices, S(source,"kind") == "synthetic" ? S(source,"profile") : S(source,"kind"));
+        panel.Children.Add(profiles);
+        var annual = Num(T("annual_kwh"), N(selectedLoad,"annual_kwh",4000), 280);
+        panel.Children.Add(annual);
+        void ShowLoad()
+        {
+            load.IsEnabled = Sel(profiles) == "shared";
+            annual.IsEnabled = Sel(profiles) is not ("shared" or "series");
+        }
+        profiles.SelectionChanged += (_, _) => ShowLoad();
+        ShowLoad();
         var lib = _project?["library"];
         var storage = current?["storage"] ?? _project?["storage"];
         var units = Arr(Api.Invoke("stringing", new { file = _file })?["inverters"]);
@@ -239,7 +330,15 @@ public sealed partial class MainWindow
             baseStorage["generator_id"] = Sel(gen).Length > 0 ? JsonValue.Create(Sel(gen)) : null;
             var value = Sel(gen).Length > 0 ? ReadFields(controls) : null;
             if (value is not null) value["charge_battery"] = charge.IsChecked == true;
-            return new JsonObject { ["name"] = name.Text.Trim(), ["load_share_pct"] = load.Value, ["storage"] = baseStorage,
+            var loadProfile = Sel(profiles) switch {
+                "series" => selectedLoad?.DeepClone(), "shared" => null,
+                var profileKind when annual.Value > 0 && double.IsFinite(annual.Value) => new JsonObject {
+                    ["profile"] = new JsonObject { ["kind"] = "synthetic", ["profile"] = profileKind },
+                    ["annual_kwh"] = annual.Value, ["critical_fraction"] = 1,
+                },
+                _ => throw new ArgumentException(T("annual_kwh")),
+            };
+            return new JsonObject { ["name"] = name.Text.Trim(), ["load_share_pct"] = load.Value, ["load"] = loadProfile, ["storage"] = baseStorage,
                 ["inverter_units"] = new JsonArray(assigned.Where(c => c.IsChecked == true).Select(c => (JsonNode?)JsonValue.Create((string)c.Tag)).ToArray()),
                 ["controls"] = value };
         });

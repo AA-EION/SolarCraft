@@ -26,6 +26,12 @@ struct SystemWorkflowSection: View {
     }
 }
 
+private let protectionFields = [
+    ("pv_isc_a","nec2023_pv"), ("termination_ampacity_a",""), ("equipment_max_device_a","nec2023_pv"),
+    ("maximum_circuit_v",""), ("device_rated_v",""), ("prospective_fault_ka",""), ("breaking_capacity_ka",""),
+    ("conventional_trip_a","iec60364"), ("conductor_k","iec60364"), ("device_let_through_a2s","iec60364"),
+]
+
 private struct CableDraft: Identifiable {
     let id = UUID()
     let index: Int?
@@ -44,6 +50,9 @@ private struct CableDraft: Identifiable {
     var derating: Double
     var sizingFactor: Double
     var protection: String
+    var standard: String
+    var ratingType: String
+    var protectionValues: [String:String]
     var link: String
     var candidates: String
     let source: String?
@@ -66,6 +75,12 @@ private struct CableDraft: Identifiable {
         derating = num(v, "derating", 1)
         sizingFactor = num(v, "sizing_factor", 1)
         protection = (v["protection_a"] as? NSNumber)?.stringValue ?? ""
+        let code = v["code_protection"] as? JSONDict ?? [:]
+        standard = str(code,"standard")
+        ratingType = (code["device_dc_rated"] as? Bool).map { $0 ? "dc" : "ac" } ?? ""
+        protectionValues = Dictionary(uniqueKeysWithValues: protectionFields.map { field in
+            (field.0, (code[field.0] as? NSNumber)?.stringValue ?? "")
+        })
         if let binding = v["binding"] as? JSONDict {
             let id = str(binding, "unit_id")
             link = str(binding, "kind") == "mppt" ? "dc|\(id)|\(int(binding, "input"))" : "ac|\(id)"
@@ -98,6 +113,16 @@ private struct CableDraft: Identifiable {
             value["binding"] = ["kind":"mppt", "unit_id":parts[1], "input":input] as JSONDict
         } else if !kind.hasPrefix("dc_"), parts.count == 2, parts[0] == "ac" {
             value["binding"] = ["kind":"inverter_ac", "unit_id":parts[1]]
+        }
+        if !standard.isEmpty {
+            var code: JSONDict = ["standard":standard]
+            if !ratingType.isEmpty { code["device_dc_rated"] = ratingType == "dc" }
+            for (key, profile) in protectionFields where profile.isEmpty || profile == standard {
+                guard let text = protectionValues[key], !text.isEmpty else { continue }
+                guard let number = Double(text.replacingOccurrences(of:",",with:".")), number.isFinite else { return nil }
+                code[key] = number
+            }
+            value["code_protection"] = code
         }
         value["candidates"] = sizes
         if let source { value["source_route"] = source }
@@ -145,6 +170,17 @@ struct CablePlannerSection: View {
                                 return [str(c, "label"), fmt(num(r, "drop_pct"), 2) + " %", fmt(num(r, "loss_w"), 1),
                                     fmt(num(r, "area_for_target_mm2"), 2), current, size]
                             })
+                    }
+                    if estimates.indices.contains(selected), let result = estimates[selected]["code_checks"] as? JSONDict {
+                        let label = str(result,"standard") == "nec2023_pv" ? "NEC 2023 PV DC" : "IEC 60364-4-43"
+                        DisclosureGroup(label + " · " + m.t("code_" + str(result,"status"))) {
+                            SimpleTable(header: [m.t("code_rule_set"), m.t("status"), m.t("code_actual"), m.t("code_threshold")],
+                                rows: dicts(result["checks"]).map { row in [
+                                    m.t("check_" + str(row,"id")), m.t("code_" + str(row,"status")),
+                                    (row["actual"] as? NSNumber).map { fmt($0.doubleValue,2) } ?? "–",
+                                    (row["limit"] as? NSNumber).map { fmt($0.doubleValue,2) } ?? "–",
+                                ] })
+                        }
                     }
                     if estimates.indices.contains(selected), let recommendation = estimates[selected]["suggested"] as? JSONDict {
                         Button(m.t("cable_use_size")) {
@@ -245,6 +281,26 @@ private struct CableEditor: View {
                 NumField(label: m.t("cable_derating"), value: $value.derating)
                 NumField(label: m.t("cable_sizing_factor"), value: $value.sizingFactor)
                 TextField(m.t("cable_protection"), text: $value.protection)
+                DisclosureGroup(m.t("code_protection")) {
+                    Picker(m.t("code_rule_set"), selection: $value.standard) {
+                        Text(m.t("code_manual")).tag("")
+                        Text("NEC 2023 PV DC").tag("nec2023_pv")
+                        Text("IEC 60364-4-43").tag("iec60364")
+                    }
+                    if !value.standard.isEmpty {
+                        Picker(m.t("code_current_type"), selection: $value.ratingType) {
+                            Text("–").tag("")
+                            Text("DC").tag("dc")
+                            Text("AC").tag("ac")
+                        }
+                        let fields = protectionFields.filter { $0.1.isEmpty || $0.1 == value.standard }.map { $0.0 }
+                        ForEach(fields, id: \.self) { key in
+                            TextField(m.t("code_" + key), text: Binding(
+                                get: { value.protectionValues[key] ?? "" }, set: { value.protectionValues[key] = $0 }
+                            ))
+                        }
+                    }
+                }
                 TextField(m.t("cable_candidates"), text: $value.candidates)
             }
             if !error.isEmpty { Text(error).foregroundStyle(.red) }
