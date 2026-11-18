@@ -12,13 +12,19 @@ pub enum SystemType {
     GridExport,
     GridConsumption,
     GridBattery,
+    GridEv,
+    GridEvBattery,
+    GridThermal,
+    GridThermalBattery,
     OffGrid,
     OffGridGenerator,
 }
 
 impl SystemType {
     pub fn islanded(self) -> bool { matches!(self, Self::OffGrid | Self::OffGridGenerator) }
-    pub fn needs_storage(self) -> bool { matches!(self, Self::GridBattery | Self::OffGrid | Self::OffGridGenerator) }
+    pub fn needs_ev(self) -> bool { matches!(self, Self::GridEv | Self::GridEvBattery) }
+    pub fn needs_heating(self) -> bool { matches!(self, Self::GridThermal | Self::GridThermalBattery) }
+    pub fn needs_storage(self) -> bool { matches!(self, Self::GridBattery | Self::GridEvBattery | Self::GridThermalBattery | Self::OffGrid | Self::OffGridGenerator) }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +56,8 @@ impl Workflow {
         p.grid.feed_in = if system == GridExport { FeedIn::Full } else { FeedIn::Surplus };
         if system == GridExport { p.loads.profile = LoadProfile::None; }
         if !system.needs_storage() { p.storage = None; }
+        if !system.needs_ev() { p.ev = None; }
+        if !system.needs_heating() { p.heating = None; }
         if system.islanded() {
             p.grid.export_limit_kw = None;
             if let Some(storage) = &mut p.storage {
@@ -66,13 +74,15 @@ impl Workflow {
     pub fn steps(self) -> Vec<&'static str> {
         let mut steps = vec!["project", "site"];
         if self.system != SystemType::GridExport { steps.push("loads"); }
+        if self.system == SystemType::Custom || self.system.needs_ev() { steps.push("ev"); }
+        if self.system == SystemType::Custom || self.system.needs_heating() { steps.push("heating"); }
         steps.push("design");
         if self.tools != PlanningTools::Scene { steps.push("roof"); }
         if self.tools != PlanningTools::Roof { steps.push("scene"); }
         steps.push("electrical");
         if self.system == SystemType::Custom || self.system.needs_storage() { steps.push("storage"); }
         steps.extend(["cables", "plans"]);
-        if !self.system.islanded() { steps.push("economics"); }
+        steps.push(if self.system.islanded() { "island" } else { "economics" });
         steps.extend(["results", "report"]);
         steps
     }

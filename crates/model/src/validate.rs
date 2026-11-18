@@ -174,6 +174,27 @@ fn plant_issues(p: &Project, push: &mut Push) {
     if !matches!(system, SystemType::Custom | SystemType::GridExport) && matches!(p.loads.profile, LoadProfile::None) {
         push("WORKFLOW_LOAD_REQUIRED", Severity::Error, "/loads/profile".into(), "Select a consumption profile on the Consumption page.".into());
     }
+    if (system.needs_ev() && p.ev.is_none()) || p.ev.as_ref().is_some_and(|ev| !ev.valid()) {
+        push("EV_CONFIGURATION", Severity::Error, "/ev".into(), "Configure EV energy, charger power, charging efficiency and arrival/departure hours.".into());
+    }
+    if (system.needs_heating() && p.heating.is_none()) || p.heating.as_ref().is_some_and(|heat| !heat.valid()) {
+        push("HEATING_CONFIGURATION", Severity::Error, "/heating".into(), "Configure a valid heating demand, heat pump and backup capacity.".into());
+    }
+    if let Some(plan) = p.island_plan.as_ref().filter(|_| system.islanded()) {
+        if !plan.valid() || p.economics.horizon_years == 0 || p.economics.horizon_years > 50
+            || !(-99.0..=100.0).contains(&p.economics.discount_rate_pct) {
+            push("ISLAND_PLAN", Severity::Error, "/island_plan".into(), "Check generator settings, cost horizon and discount rate.".into());
+        }
+        if system == SystemType::OffGridGenerator && plan.charge_battery
+            && p.storage.as_ref().is_some_and(|st| matches!(st.coupling, Coupling::DcHybrid { .. })
+                || plan.start_soc_pct < st.soc_min_pct || plan.stop_soc_pct > st.soc_max_pct)
+        {
+            push("ISLAND_GENERATOR_CHARGE", Severity::Error, "/island_plan".into(), "Generator charging requires an AC battery converter and thresholds inside its SOC window.".into());
+        }
+    }
+    for value in [p.hourly_cables.dc_pct, p.hourly_cables.ac_pct].into_iter().flatten() {
+        if !(0.0..=25.0).contains(&value) { push("HOURLY_CABLE_LOSS", Severity::Error, "/hourly_cables".into(), "The hourly cable model requires a design-point loss between 0% and 25%.".into()); }
+    }
     for (key, loss) in [("dc_wiring_pct", p.losses.dc_wiring_pct.value), ("ac_wiring_pct", p.losses.ac_wiring_pct.value)] {
         if !(0.0..100.0).contains(&loss) {
             push("CABLE_LOSS_RANGE", Severity::Error, format!("/losses/{key}"), "Wiring loss must be at least zero and below 100%.".into());

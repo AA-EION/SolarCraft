@@ -180,6 +180,9 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
     };
     let lo = &p.losses;
     let pct = |v: f64| format!("{} %", n(v, 1));
+    let wire_pct = |manual: f64, hourly: Option<f64>| hourly.map_or_else(|| pct(manual), |v| {
+        format!("{} · {}", pct(v), tr(l, "design point (hourly)", "punto de diseño (horario)", "Auslegungspunkt (stündlich)", "ponto de projeto (horário)"))
+    });
     let model_name = format!("{:?}", p.simulation.transposition.value).replace("HayDavies", "Hay–Davies").replace("Perez", "Perez et al. (1990)");
     let roof_svgs: Vec<String> = p.arrays.iter().filter_map(|a| a.roof.as_ref().map(|r| {
         let cap = format!("{} — {}", a.name.value, s["roof_caption"].replace("%N%", &r.modules.len().to_string()).replace("%S%", &n(r.params.setback, 2)));
@@ -203,7 +206,7 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
         }).collect(),
         monthly_header: [s["month"].into(), "GHI kWh/m²".into(), "POA kWh/m²".into(), format!("{} kWh", s["energy"])],
         monthly_rows,
-        assumption_rows: vec![[s["soiling"].into(), pct(lo.soiling_pct.value)], [s["lid"].into(), pct(lo.lid_pct.value)], [s["mismatch"].into(), pct(lo.mismatch_pct.value)], [s["dc_wiring"].into(), pct(lo.dc_wiring_pct.value)], [s["ac_wiring"].into(), pct(lo.ac_wiring_pct.value)], [s["availability"].into(), pct(lo.availability_pct.value)], ["Albedo".into(), n(p.site.albedo.value, 2)]],
+        assumption_rows: vec![[s["soiling"].into(), pct(lo.soiling_pct.value)], [s["lid"].into(), pct(lo.lid_pct.value)], [s["mismatch"].into(), pct(lo.mismatch_pct.value)], [s["dc_wiring"].into(), wire_pct(lo.dc_wiring_pct.value, p.hourly_cables.dc_pct)], [s["ac_wiring"].into(), wire_pct(lo.ac_wiring_pct.value, p.hourly_cables.ac_pct)], [s["availability"].into(), pct(lo.availability_pct.value)], ["Albedo".into(), n(p.site.albedo.value, 2)]],
         models_text: s["models_text"].replace("%MODEL%", &model_name).replace("%PV_MODEL%", match r.manifest.pv_model {
             solarcraft_model::PvModel::SingleDiode => s["single_diode"],
             solarcraft_model::PvModel::TwoDiode => s["two_diode"],
@@ -259,6 +262,40 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             intro: tr(l, "Simulated per MPP tracker: parallel-string mismatch and tracker-limit (voltage window, input current) losses are shown in the last column.", "Simulado por seguidor MPP: la última columna muestra las pérdidas por desajuste de cadenas en paralelo y por límites del seguidor (ventana de tensión, corriente de entrada).", "Je MPP-Tracker simuliert: Die letzte Spalte zeigt Fehlanpassung paralleler Strings und Tracker-Grenzen (Spannungsfenster, Eingangsstrom).", "Simulado por rastreador MPP: a última coluna mostra perdas por descasamento de strings em paralelo e por limites do rastreador (janela de tensão, corrente de entrada)."),
             header: vec![tr(l, "Inverter / MPPT", "Inversor / MPPT", "Wechselrichter / MPPT", "Inversor / MPPT"), tr(l, "Rating", "Potencia", "Leistung", "Potência"), "DC kWh".into(), "AC kWh".into(), tr(l, "Clipping · mismatch / limits", "Recorte · desajuste / límites", "Abregelung · Fehlanpassung / Grenzen", "Corte · descasamento / limites")], rows });
     }
+    if let Some(ev) = &r.ev {
+        let rows = [
+            (tr(l, "Requested at the battery", "Solicitada en la batería", "An der Batterie angefordert", "Solicitada na bateria"), ev.requested_kwh),
+            (tr(l, "Scheduled at the battery", "Programada en la batería", "An der Batterie eingeplant", "Programada na bateria"), ev.charged_kwh),
+            (tr(l, "Charger electricity", "Electricidad del cargador", "Ladestrombedarf", "Eletricidade do carregador"), ev.electrical_kwh),
+            (tr(l, "Unscheduled", "No programada", "Nicht eingeplant", "Não programada"), ev.unscheduled_kwh),
+        ].into_iter().map(|(label, value)| vec![label, format!("{} kWh", n(value, 1))]).collect();
+        out.push(Section { id: "ev", title: tr(l, "Electric vehicle charging", "Carga del vehículo eléctrico", "Elektrofahrzeugladung", "Carregamento do veículo elétrico"),
+            intro: String::new(), header: vec![], rows });
+    }
+    if let Some(heat) = &r.heating {
+        let rows = [
+            (tr(l, "Space heat demand", "Demanda de calefacción", "Raumwärmebedarf", "Demanda de aquecimento"), heat.demand_kwh),
+            (tr(l, "Heat pump electricity", "Electricidad de la bomba de calor", "Strom der Wärmepumpe", "Eletricidade da bomba de calor"), heat.pump_electric_kwh),
+            (tr(l, "Resistance backup", "Respaldo eléctrico", "Elektrische Zusatzheizung", "Aquecimento elétrico auxiliar"), heat.backup_kwh),
+            (tr(l, "Unserved heat", "Calor no atendido", "Ungedeckter Wärmebedarf", "Calor não atendido"), heat.unmet_heat_kwh),
+        ].into_iter().map(|(label, value)| vec![label, format!("{} kWh", n(value, 1))]).collect();
+        out.push(Section { id: "heating", title: tr(l, "Space heating", "Calefacción", "Raumheizung", "Aquecimento ambiente"),
+            intro: String::new(), header: vec![], rows });
+    }
+    if let Some(cost) = &r.island_finance {
+        let rows = [
+            (tr(l, "Investment", "Inversión", "Investition", "Investimento"), format!("{} {}", n(cost.investment, 2), cost.currency)),
+            (tr(l, "Discounted lifetime cost", "Coste descontado de vida útil", "Abgezinste Lebenszykluskosten", "Custo descontado do ciclo de vida"),
+                format!("{} {}", n(cost.discounted_cost, 2), cost.currency)),
+            (tr(l, "Cost per served kWh", "Coste por kWh suministrado", "Kosten je versorgter kWh", "Custo por kWh suprido"),
+                cost.cost_per_served_kwh.map_or("–".into(), |v| format!("{} {}/kWh", n(v, 3), cost.currency))),
+        ].into_iter().map(|(label, value)| vec![label, value]).collect();
+        out.push(Section { id: "island_cost", title: tr(l, "Off-grid economics", "Economía del sistema aislado", "Kosten der Inselanlage", "Economia do sistema isolado"),
+            intro: tr(l, "The discounted calculation repeats the simulated year of delivered energy and fuel volume.",
+                "El cálculo descontado repite el año simulado de energía suministrada y combustible.",
+                "Die Abzinsung wiederholt das simulierte Jahr für gelieferte Energie und Kraftstoffmenge.",
+                "O cálculo descontado repete o ano simulado de energia fornecida e combustível."), header: vec![], rows });
+    }
     let b = &r.balance;
     if b.load_kwh > 0.0 || b.batt_charge_kwh > 0.0 {
         let kwh = |v: f64| format!("{} kWh", n(v, 0));
@@ -280,6 +317,11 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             if let Some(generator) = p.storage.as_ref().and_then(|st| st.generator_id.as_deref()).and_then(|id| p.library.generator(id)) {
                 rows.push(vec![tr(l, "Generator energy", "Energía del generador", "Generatorenergie", "Energia do gerador"), kwh(b.generator_kwh)]);
                 rows.push(vec![tr(l, "Generator fuel", "Combustible del generador", "Generator-Kraftstoff", "Combustível do gerador"), format!("{} {}", n(b.generator_fuel, 1), generator.fuel_unit)]);
+            }
+            if b.generator_hours > 0 {
+                rows.push(vec![tr(l, "Generator hours and starts", "Horas y arranques del generador", "Generatorlaufzeit und Starts", "Horas e partidas do gerador"),
+                    format!("{} h / {}", b.generator_hours, b.generator_starts)]);
+                rows.push(vec![tr(l, "Generator energy to storage", "Energía del generador a la batería", "Generatorenergie zum Speicher", "Energia do gerador para a bateria"), kwh(b.generator_charge_kwh)]);
             }
             rows.push(vec![tr(l, "Unserved demand", "Demanda no atendida", "Nicht versorgter Bedarf", "Demanda não atendida"), kwh(b.unserved_kwh)]);
         } else if b.outage_hours > 0 { rows.push(vec![tr(l, "Outage hours · unserved critical load", "Horas de corte · carga crítica no atendida", "Ausfallstunden · nicht versorgte kritische Last", "Horas de interrupção · carga crítica não atendida"), format!("{} h · {}", b.outage_hours, kwh(b.unserved_kwh))]); }

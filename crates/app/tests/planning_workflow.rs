@@ -70,6 +70,30 @@ fn workflows_preserve_inputs_and_run_without_grid_exchange_when_islanded() {
     let no_generator = app::simulate(&file, |_| true).unwrap();
     assert_eq!(no_generator.balance.generator_kwh, 0.0);
     assert!(no_generator.balance.unserved_kwh > island.balance.unserved_kwh);
+    call("add_equipment", json!({"file":file, "kind":"generator", "record":{
+        "id":"gen-1", "manufacturer":"Fixture", "model":"7 kVA", "rated_va":7000,"max_va":7000,"phases":1,"voltage_v":230,
+        "fuel_unit":"L","fuel_curve":[[0.0,0.0],[1.0,2.0]]
+    }}));
+    workflow(&file, "off_grid_generator", "both");
+    call("set_fields", json!({"file":file,"edits":[
+        {"pointer":"/economics/horizon_years","value":4}, {"pointer":"/storage/initial_soc_pct","value":15}
+    ]}));
+    call("set_section", json!({"file":file, "section":"island_plan", "value":{
+        "minimum_generator_pct":30, "minimum_run_hours":2, "charge_battery":true, "start_soc_pct":25,
+        "stop_soc_pct":70, "fuel_price":1.2, "fuel_escalation_pct":2, "generator_investment":2000
+    }}));
+    let controlled = app::simulate(&file, |_| true).unwrap();
+    assert_eq!(controlled.balance.import_kwh + controlled.balance.export_kwh, 0.0);
+    assert!(controlled.balance.generator_starts > 0 && controlled.balance.generator_hours >= controlled.balance.generator_starts * 2 - 1);
+    assert!(controlled.balance.generator_charge_kwh > 0.0);
+    assert!(controlled.balance.generator_hours < 8760 && controlled.balance.batt_discharge_kwh > 0.0);
+    assert!(controlled.balance.generator_to_load_kwh + controlled.balance.generator_charge_kwh <= controlled.balance.generator_kwh + 1e-6);
+    assert!(controlled.balance.max_abs_residual_wh < 1e-3);
+    let cost = controlled.island_finance.unwrap();
+    assert!(cost.cost_per_served_kwh.unwrap() > 0.0);
+    assert!((cost.years[0].fuel_cost - controlled.balance.generator_fuel * 1.2).abs() < 1e-6);
+    assert_eq!(cost.years.len(), 4);
+
     workflow(&file, "custom", "both");
     let stored = app::get_project(&file).unwrap().storage.unwrap();
     assert_eq!(stored.generator_id.as_deref(), Some("gen-1"));
@@ -119,5 +143,62 @@ fn separate_roofs_and_cable_estimates_round_trip_and_apply_atomically() {
     assert_eq!(actual.cable_plan.len(), 1);
     call("undo", json!({"file":file}));
     assert_eq!(app::get_project(&file).unwrap().losses.dc_wiring_pct.value, 1.5);
+    std::fs::remove_file(file).ok();
+}
+
+
+#[test]
+fn ev_heating_and_hourly_wiring_feed_the_same_project_ledger() {
+    let file = fixture("flex-cables");
+    call("use_demo_weather", json!({"file":file}));
+    call("set_section", json!({"file":file,"section":"loads","value":{
+        "profile":{"kind":"synthetic","profile":"flat"}, "annual_kwh":1752, "critical_fraction":1.0
+    }}));
+    call("set_section", json!({"file":file,"section":"ev","value":{
+        "daily_kwh":8,"charger_kw":3,"efficiency":0.8,"arrival_hour":8,"departure_hour":16,"strategy":"solar_preferred"
+    }}));
+    call("set_section", json!({"file":file,"section":"heating","value":{
+        "setpoint_c":26,"heat_loss_kw_per_k":0.5,"thermal_kw":2,"cutoff_c":-15,"cop_at_0c":2.5,"cop_at_10c":3.8,"resistance_backup_kw":1
+    }}));
+    let steps = workflow(&file,"grid_ev","roof")["steps"].as_array().unwrap().clone();
+    assert!(steps.contains(&json!("ev")) && !steps.contains(&json!("heating")));
+    let ev_only = app::simulate(&file, |_| true).unwrap();
+    assert!(ev_only.ev.is_some() && ev_only.heating.is_none());
+    assert!(app::get_project(&file).unwrap().heating.is_some());
+    workflow(&file,"custom","both");
+
+    let circuit = |kind: &str| json!({
+        "label":kind, "kind":kind,"metal":"copper","length_m":90,"area_mm2":4,
+        "temperature_c":50,"voltage_v":400,"current_a":10,"circuits":1,"target_drop_pct":1.5,
+        "ampacity_a":12,"derating":0.7,"candidates":[{"area_mm2":4,"ampacity_a":12},{"area_mm2":10,"ampacity_a":21},{"area_mm2":16,"ampacity_a":30}]
+    });
+    let rows = vec![circuit("dc_string"), circuit("ac_single")];
+    let preview = call("cable_plan",json!({"file":file,"circuits":rows}));
+    let sized = &preview["estimates"][0];
+    assert_eq!(sized["ampacity_ok"], false);
+    assert_eq!(sized["suggested"]["area_mm2"].as_f64(), Some(10.0));
+    assert!(app::api::dispatch("cable_plan",&json!({"file":file,"mode":"apply_hourly","circuits":rows}),&mut |_| true).is_err());
+    let safe: Vec<_> = rows.into_iter().map(|mut row| {
+        row["area_mm2"] = json!(10);
+        row["ampacity_a"] = json!(21);
+        row
+    }).collect();
+    call("cable_plan",json!({"file":file,"mode":"apply_hourly","circuits":safe}));
+    let run = app::simulate(&file, |_| true).unwrap();
+    let ev = run.ev.as_ref().unwrap();
+    let heat = run.heating.as_ref().unwrap();
+    assert!((ev.charged_kwh - 8.0 * 365.0).abs() < 1e-6 && ev.forecast_surplus_kwh > 1.0);
+    assert!((heat.demand_kwh - 3.0 * 8760.0).abs() < 1e-6 && heat.unmet_heat_kwh.abs() < 1e-6);
+    assert!((run.balance.load_kwh - (1752.0 + ev.electrical_kwh + heat.pump_electric_kwh + heat.backup_kwh)).abs() < 0.001);
+    assert!(run.balance.max_abs_residual_wh < 1e-3);
+    assert!(run.hourly.dc_cable_wh.iter().any(|&w| w > 0.0));
+    assert!(run.flows.ac_cable_loss.iter().any(|&w| w > 0.0));
+    let ratio = |min: f32, max: f32| run.hourly.dc_w.iter().zip(&run.hourly.dc_cable_wh)
+        .find_map(|(&dc, &loss)| (dc > min && dc < max).then_some(loss / dc)).unwrap();
+    assert!(ratio(2100.0, 3800.0) > ratio(100.0, 400.0) * 3.0);
+    let hours = call("results_hours",json!({"file":file,"day_of_year":160}));
+    assert!(hours["hours"].as_array().unwrap().iter().any(|h| h["ev_wh"].as_f64().unwrap() > 0.0));
+    let report = call("report_preview",json!({"file":file,"report_type":"system_planner"})).to_string();
+    assert!(report.contains("Electric vehicle charging") && report.contains("Space heating") && report.contains("Hourly cable losses"));
     std::fs::remove_file(file).ok();
 }

@@ -43,7 +43,7 @@ pub const METHODS: &[&str] = &[
 ];
 
 /// Project sections that `set_section` replaces as a whole (validated on save).
-pub const SECTIONS: &[&str] = &["grid", "loads", "storage", "tariff", "economics", "electrical", "losses", "simulation", "customer", "site"];
+pub const SECTIONS: &[&str] = &["ev", "heating", "island_plan", "hourly_cables", "grid", "loads", "storage", "tariff", "economics", "electrical", "losses", "simulation", "customer", "site"];
 
 fn lib_path(p: &Value) -> PathBuf { p.get("library").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::userlib::default_path) }
 fn cat_path(p: &Value) -> PathBuf { p.get("catalog").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::catalog_ops::default_catalog) }
@@ -132,7 +132,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let circuits = params.get("circuits").map(|rows| serde_json::from_value(rows.clone()))
                 .transpose().map_err(|error| bad(format!("circuits: {error}")))?;
             let mode = params.get("mode").and_then(Value::as_str).unwrap_or("preview");
-            if !matches!(mode, "preview" | "import_routes" | "save" | "apply") { return Err(bad("unknown cable plan mode")); }
+            if !matches!(mode, "preview" | "import_routes" | "save" | "apply" | "apply_hourly") { return Err(bad("unknown cable plan mode")); }
             app::planning::cable_plan(&path(params, "file")?, circuits, mode)
         }
         "design_schedule" => {
@@ -241,6 +241,9 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
 /// Compact result summary (hourly series are fetched with `results_hours`).
 pub fn summary(r: &solarcraft_engine::SimResult) -> Value {
     json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical,
+           "wiring": {"dc_kwh": r.hourly.dc_cable_wh.iter().map(|&w| f64::from(w)).sum::<f64>() / 1000.0,
+               "ac_kwh": r.flows.ac_cable_loss.iter().map(|&w| f64::from(w)).sum::<f64>() / 1000.0},
+           "ev": r.ev, "heating": r.heating, "island_finance": r.island_finance,
            "finance": r.finance.as_ref().map(|f| json!({"currency": f.currency, "investment": f.investment, "npv": f.npv, "irr_pct": f.irr_pct, "payback_years": f.payback_years, "lcoe_per_kwh": f.lcoe_per_kwh, "bill_without": f.bill_without, "bill_with": f.bill_with}))})
 }
 

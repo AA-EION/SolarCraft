@@ -144,6 +144,7 @@ pub struct HourRow {
     pub index: usize, pub month: u32, pub day_of_year: u32, pub hour: u32, pub weekday: u32, pub unix_mid: i64,
     pub poa_w_m2: f32, pub t_cell_c: f32, pub pv_dc_wh: f32, pub pv_ac_wh: f32, pub clipped_wh: f32, pub load_wh: f32, pub pv_to_load_wh: f32,
     pub batt_charge_wh: f32, pub batt_discharge_wh: f32, pub soc_pct: f32, pub backup_wh: f32, pub self_wh: f32, pub grid_services_wh: f32,
+    pub ev_wh: f32, pub heating_wh: f32, pub dc_cable_wh: f32, pub ac_cable_wh: f32, pub generator_charge_wh: f32,
     pub import_wh: f32, pub export_wh: f32, pub curtailed_wh: f32, pub unserved_wh: f32, pub outage: bool, pub residual_wh: f32,
 }
 
@@ -155,6 +156,8 @@ pub fn hour_row(r: &SimResult, k: usize) -> HourRow {
     HourRow { index: k, month: lt.month, day_of_year: lt.day_of_year + 1, hour: lt.hour, weekday: lt.weekday, unix_mid: r.hourly.unix_mid.get(k).copied().unwrap_or(0),
         poa_w_m2: g(&r.hourly.poa_w_m2), t_cell_c: g(&r.hourly.t_cell_c), pv_dc_wh: g(&fl.pv_dc), pv_ac_wh: g(&fl.pv_ac), clipped_wh: g(&fl.clipped), load_wh: g(&fl.load), pv_to_load_wh: g(&fl.pv_to_load),
         batt_charge_wh: g(&fl.batt_charge), batt_discharge_wh: g(&fl.batt_discharge), soc_pct: g(&fl.soc_pct), backup_wh: g(&fl.backup_wh), self_wh: g(&fl.self_wh), grid_services_wh: g(&fl.grid_services_wh),
+        ev_wh: g(&r.hourly.ev_wh), heating_wh: g(&r.hourly.heating_wh), dc_cable_wh: g(&r.hourly.dc_cable_wh),
+        ac_cable_wh: g(&fl.ac_cable_loss), generator_charge_wh: g(&fl.generator_charge),
         import_wh: g(&fl.import), export_wh: g(&fl.export), curtailed_wh: g(&fl.curtailed), unserved_wh: g(&fl.unserved), outage: fl.outage.get(k).copied().unwrap_or(false), residual_wh: g(&fl.residual) }
 }
 

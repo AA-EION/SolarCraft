@@ -12,6 +12,7 @@ pub mod plant;
 pub mod validate;
 pub mod workflow;
 pub mod cable;
+pub mod demand;
 
 use serde::{Deserialize, Serialize};
 
@@ -206,6 +207,15 @@ pub struct Project {
     pub workflow: workflow::Workflow,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cable_plan: Vec<cable::Circuit>,
+    /// Applied hourly design-point loss ratios (%); omitted sides keep fixed percentages.
+    #[serde(default)]
+    pub hourly_cables: cable::HourlyLosses,
+    #[serde(default)]
+    pub ev: Option<demand::Ev>,
+    #[serde(default)]
+    pub heating: Option<demand::Heating>,
+    #[serde(default)]
+    pub island_plan: Option<demand::IslandPlan>,
     #[serde(default)]
     pub tariff: plant::Tariff,
     #[serde(default)]
@@ -252,7 +262,7 @@ impl Project {
             simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
-            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![],
+            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], hourly_cables: Default::default(), ev: None, heating: None, island_plan: None,
             tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None, roof_photos: vec![],
         };
         derive::derive(&mut p);

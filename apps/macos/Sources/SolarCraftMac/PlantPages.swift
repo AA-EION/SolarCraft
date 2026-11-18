@@ -125,7 +125,7 @@ struct StorageLoadsPage: View {
     @State private var generatorID = ""
     @State private var generatorEditor = false
     private var generators: [JSONDict] { dicts(lib["generators"]) }
-    private var requiresStorage: Bool { ["grid_battery", "off_grid", "off_grid_generator"].contains(m.systemType) }
+    private var requiresStorage: Bool { ["grid_battery", "grid_ev_battery", "grid_thermal_battery", "off_grid", "off_grid_generator"].contains(m.systemType) }
 
     private var lib: JSONDict { m.section("library") }
     private var batteries: [JSONDict] { dicts(lib["batteries"]) }
@@ -527,6 +527,18 @@ struct SimulationPage: View {
                             SimpleTable(header: [m.t("day"), m.t("hour"), "PV", m.t("loads"), "→🔋", "🔋→", m.t("grid_import"), m.t("grid_export"), m.t("soc"), m.t("backup_reserve") + " Wh"],
                                         rows: m.dayRows.map { r in ["\(int(r, "day_of_year"))", String(format: "%02d:00", int(r, "hour")) + ((r["outage"] as? Bool) == true ? " ⚡︎" : ""), fmt(num(r, "pv_ac_wh")), fmt(num(r, "load_wh")), fmt(num(r, "batt_charge_wh")), fmt(num(r, "batt_discharge_wh")), fmt(num(r, "import_wh")), fmt(num(r, "export_wh")), fmt(num(r, "soc_pct"), 1), fmt(num(r, "backup_wh"))] })
                                 .font(.caption)
+                            let details = [
+                                ("ev_wh", m.t("ev_page")), ("heating_wh", m.t("heat_page")),
+                                ("dc_cable_wh", "DC cable (Wh)"), ("ac_cable_wh", "AC cable (Wh)"),
+                                ("generator_charge_wh", m.t("island_charge")),
+                            ].filter { d in m.dayRows.contains { abs(num($0, d.0)) > 1e-7 } }
+                            if !details.isEmpty {
+                                ScrollView(.horizontal) {
+                                    SimpleTable(header: [m.t("day"), m.t("hour")] + details.map { $0.1 },
+                                        rows: m.dayRows.map { row in [fmt(num(row, "day_of_year")), String(format: "%02d:00", int(row, "hour"))] + details.map { fmt(num(row, $0.0), 2) } })
+                                        .font(.caption)
+                                }
+                            }
                         }
                     }
                 }

@@ -48,6 +48,7 @@ public sealed partial class MainWindow : Window
         RunResultsButton.Content = T("simulate"); ResultsClimateButton.Content = T("workflow_site");
         NavSetup.Content = T("workflow_setup"); NavSystem.Content = T("workflow_system"); NavOutput.Content = T("workflow_output");
         NavProject.Content = T("project"); NavSite.Content = T("workflow_site"); NavLoads.Content = T("loads");
+        NavEv.Content = T("ev_page"); NavHeating.Content = T("heat_page"); NavIsland.Content = T("island_page");
         NavDesign.Content = T("workflow_pv_modules"); NavRoof.Content = T("roof"); NavScene.Content = T("scene3d");
         NavElectrical.Content = T("electrical"); NavStorage.Content = T("battery"); NavEconomics.Content = T("economics");
         NavResults.Content = T("workflow_results"); NavReport.Content = T("workflow_presentation");
@@ -395,6 +396,9 @@ public sealed partial class MainWindow : Window
     private void OnNavigate(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
+        EvPage.Visibility = tag == "ev" ? Visibility.Visible : Visibility.Collapsed;
+        HeatingPage.Visibility = tag == "heating" ? Visibility.Visible : Visibility.Collapsed;
+        IslandPage.Visibility = tag == "island" ? Visibility.Visible : Visibility.Collapsed;
         LoadsPage.Visibility = tag == "loads" ? Visibility.Visible : Visibility.Collapsed;
         CablesPage.Visibility = tag == "cables" ? Visibility.Visible : Visibility.Collapsed;
         PlansPage.Visibility = tag == "plans" ? Visibility.Visible : Visibility.Collapsed;
@@ -412,8 +416,8 @@ public sealed partial class MainWindow : Window
         UpdateStep();
     }
 
-    private NavigationViewItem[] AllSteps => [NavProject, NavSite, NavLoads, NavDesign, NavRoof, NavScene,
-        NavElectrical, NavStorage, NavCables, NavPlans, NavEconomics, NavResults, NavReport];
+    private NavigationViewItem[] AllSteps => [NavProject, NavSite, NavLoads, NavEv, NavHeating, NavDesign, NavRoof, NavScene,
+        NavElectrical, NavStorage, NavCables, NavPlans, NavEconomics, NavIsland, NavResults, NavReport];
     private NavigationViewItem[] Steps => AllSteps.Where(step => step.Visibility == Visibility.Visible).ToArray();
 
     private void RefreshWorkflowNavigation()

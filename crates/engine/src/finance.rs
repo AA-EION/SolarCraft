@@ -173,3 +173,52 @@ mod tests {
         assert!(b.export_credit > 5.0 * 0.2 - 1e-9 && b.export_credit < 5.0 * 0.5);
     }
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IslandYear {
+    pub year: u32,
+    pub fuel_cost: f64,
+    pub maintenance: f64,
+    pub replacements: f64,
+    pub discounted_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IslandFinance {
+    pub currency: String,
+    pub investment: f64,
+    pub discounted_cost: f64,
+    pub discounted_served_kwh: f64,
+    pub cost_per_served_kwh: Option<f64>,
+    pub years: Vec<IslandYear>,
+}
+
+/// Repeated representative-year dispatch. Fuel and maintenance prices escalate,
+/// while the physical demand served and fuel volume repeat each year.
+pub fn island_cost(p: &solarcraft_model::Project, dc_kwp: f64, balance: &crate::energy::Balance) -> Option<IslandFinance> {
+    let plan = p.island_plan.as_ref()?;
+    let ec = &p.economics;
+    let capacity = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id)
+        .map(|b| b.capacity_kwh * f64::from(s.units))).unwrap_or(0.0);
+    let generator_investment = if p.workflow.system == solarcraft_model::workflow::SystemType::OffGridGenerator {
+        plan.generator_investment
+    } else { 0.0 };
+    let investment = ec.cost_fixed + dc_kwp * ec.cost_per_kwp + capacity * ec.cost_per_battery_kwh + generator_investment;
+    let mut cost = investment - ec.subsidy;
+    let mut energy = 0.0;
+    let mut years = vec![];
+    for year in 1..=ec.horizon_years {
+        let fuel_cost = plan.fuel_price * balance.generator_fuel * (1.0 + plan.fuel_escalation_pct / 100.0).powi(year as i32 - 1);
+        let maintenance = investment * ec.om_pct_of_investment / 100.0 * (1.0 + ec.om_escalation_pct / 100.0).powi(year as i32 - 1);
+        let replacements = if year == ec.inverter_replacement_year { ec.inverter_replacement_cost } else { 0.0 }
+            + if year == ec.battery_replacement_year { ec.battery_replacement_cost } else { 0.0 };
+        let discount = (1.0 + ec.discount_rate_pct / 100.0).powi(year as i32).max(1e-9);
+        let discounted_cost = (fuel_cost + maintenance + replacements) / discount;
+        cost += discounted_cost;
+        energy += balance.load_served_kwh / discount;
+        years.push(IslandYear { year, fuel_cost, maintenance, replacements, discounted_cost });
+    }
+    Some(IslandFinance { currency: p.tariff.currency.clone(), investment, discounted_cost: cost,
+        discounted_served_kwh: energy, cost_per_served_kwh: (energy > 0.0).then(|| cost / energy), years })
+}

@@ -112,6 +112,7 @@ public sealed partial class MainWindow
         BuildGridPanel();
         BuildElectrical();
         BuildLoads();
+        BuildDemandAndIsland();
         BuildStorage();
         BuildEngineering();
         BuildSimulationPanels();
@@ -133,8 +134,9 @@ public sealed partial class MainWindow
         CablesPage.Children.Add(Btn(T("apply"), () =>
         {
             if (Try(() => Api.Invoke("set_fields", new { file = _file, edits = new[] {
-                new { pointer = "/losses/dc_wiring_pct", value = dc.Value },
-                new { pointer = "/losses/ac_wiring_pct", value = ac.Value },
+                new { pointer = "/losses/dc_wiring_pct", value = (object)dc.Value },
+                new { pointer = "/losses/ac_wiring_pct", value = (object)ac.Value },
+                new { pointer = "/hourly_cables", value = (object)new JsonObject() },
             } }))) Reload();
         }, true));
         BuildCablePlanner(CablesPage);
@@ -384,7 +386,7 @@ public sealed partial class MainWindow
         var s = _project!["storage"];
         var lib = _project!["library"];
         p.Children.Add(H(T("use_battery")));
-        var required = SystemType is "grid_battery" or "off_grid" or "off_grid_generator";
+        var required = SystemType is "grid_battery" or "grid_ev_battery" or "grid_thermal_battery" or "off_grid" or "off_grid_generator";
         var enabled = new ToggleSwitch { IsOn = required || s is JsonObject, IsEnabled = !required };
         p.Children.Add(enabled);
         if (Arr(lib?["batteries"]).Count == 0) p.Children.Add(Btn(T("add_generic_storage"), () => { if (Try(() => Api.Invoke("add_generic_storage_equipment", new { file = _file }))) Reload(); }));
@@ -526,6 +528,16 @@ public sealed partial class MainWindow
             host.Children.Add(Note("— PV   — " + T("loads") + "   — " + T("grid_import") + "   — " + T("battery")));
             host.Children.Add(Table(new[] { T("day"), T("hour"), "PV", T("loads"), "→bat", "bat→", T("grid_import"), T("grid_export"), T("soc"), T("backup_reserve") + " Wh" },
                 hours.Select(h => (IList<string>)new[] { F(N(h, "day_of_year")), $"{(int)N(h, "hour"):00}:00" + (h?["outage"]?.GetValue<bool>() == true ? " ⚡" : ""), F(N(h, "pv_ac_wh")), F(N(h, "load_wh")), F(N(h, "batt_charge_wh")), F(N(h, "batt_discharge_wh")), F(N(h, "import_wh")), F(N(h, "export_wh")), F(N(h, "soc_pct"), 1), F(N(h, "backup_wh")) }).ToList(), 12));
+            var details = new[] {
+                ("ev_wh", T("ev_page")), ("heating_wh", T("heat_page")), ("dc_cable_wh", "DC cable (Wh)"),
+                ("ac_cable_wh", "AC cable (Wh)"), ("generator_charge_wh", T("island_charge")),
+            }.Where(column => hours.Any(h => Math.Abs(N(h, column.Item1)) > 1e-7)).ToArray();
+            if (details.Length > 0)
+            {
+                host.Children.Add(Table(new[] { T("day"), T("hour") }.Concat(details.Select(d => d.Item2)).ToList(),
+                    hours.Select(h => (IList<string>)new[] { F(N(h, "day_of_year")), $"{(int)N(h, "hour"):00}:00" }
+                        .Concat(details.Select(d => F(N(h, d.Item1), 2))).ToList()), 12));
+            }
         }
         var buttons = new List<UIElement> { day, Btn(T("apply"), () => Try(() => Show(Arr(Api.Invoke("results_hours", new { file = _file, day_of_year = (int)day.Value })?["hours"])))) };
         foreach (var ch in new[] { "import", "export", "clipped", "curtailed", "unserved", "-soc" })
@@ -747,12 +759,27 @@ public sealed partial class MainWindow
             Reload();
             if (Steps.Contains(NavLoads) || Steps.Contains(NavStorage) || Steps.Contains(NavScene) || _summary is not null)
                 throw new InvalidOperationException("Full-export workflow navigation or result invalidation failed.");
-            await Capture(NavSite, "14-full-export.png");
+            await Capture(NavSite, "16-full-export.png");
             Api.Invoke("workflow_set", new { file, value = new { system = "off_grid_generator", tools = "scene" } });
             Reload();
             if (!Steps.Contains(NavLoads) || !Steps.Contains(NavStorage) || Steps.Contains(NavRoof) || Steps.Contains(NavEconomics))
                 throw new InvalidOperationException("Off-grid workflow navigation failed.");
-            await Capture(NavSite, "15-off-grid.png");
+            await Capture(NavSite, "17-off-grid.png");
+            await Capture(NavIsland, "18-island-controls.png");
+            Api.Invoke("workflow_set", new { file, value = new { system = "grid_ev_battery", tools = "both" } });
+            Api.Invoke("set_section", new { file, section = "ev", value = new { daily_kwh = 12, charger_kw = 7.2, efficiency = 0.92,
+                arrival_hour = 18, departure_hour = 7, strategy = "solar_preferred" } });
+            Reload();
+            if (!Steps.Contains(NavEv) || Steps.Contains(NavHeating) || !Steps.Contains(NavStorage))
+                throw new InvalidOperationException("EV workflow navigation failed.");
+            await Capture(NavEv, "19-ev-controls.png");
+            Api.Invoke("workflow_set", new { file, value = new { system = "grid_thermal", tools = "both" } });
+            Api.Invoke("set_section", new { file, section = "heating", value = new { setpoint_c = 20, heat_loss_kw_per_k = 0.18,
+                thermal_kw = 6, cutoff_c = -15, cop_at_0c = 2.5, cop_at_10c = 3.8, resistance_backup_kw = 3 } });
+            Reload();
+            if (Steps.Contains(NavEv) || !Steps.Contains(NavHeating) || Steps.Contains(NavStorage))
+                throw new InvalidOperationException("Thermal workflow navigation failed.");
+            await Capture(NavHeating, "20-thermal-controls.png");
             Api.Invoke("workflow_set", new { file, value = new { system = "custom", tools = "both" } });
 
             _roofArray = (int)N(Api.Invoke("add_array", new { file, name = "West roof" }), "array");
@@ -762,16 +789,22 @@ public sealed partial class MainWindow
             Reload();
             if (PhotoArrayBox.SelectedIndex != _roofArray || RoofCanvas.Children.Count <= 1)
                 throw new InvalidOperationException("Second roof did not load in the roof editor.");
-            await Capture(NavRoof, "16-second-roof.png");
+            await Capture(NavRoof, "21-second-roof.png");
 
-            Api.Invoke("cable_plan", new { file, mode = "save", circuits = new[] {
+            var candidates = new[] {
+                new { area_mm2 = 2.5, ampacity_a = 16 }, new { area_mm2 = 4.0, ampacity_a = 24 }, new { area_mm2 = 6.0, ampacity_a = 32 },
+            };
+            var appliedCables = Api.Invoke("cable_plan", new { file, mode = "apply_hourly", circuits = new[] {
                 new { label = "West DC", kind = "dc_string", metal = "copper", length_m = 19, area_mm2 = 4, temperature_c = 60,
-                    voltage_v = 390, current_a = 10, circuits = 2, target_drop_pct = 1.5 },
+                    voltage_v = 390, current_a = 10, circuits = 2, target_drop_pct = 1.5, ampacity_a = 24, derating = 0.80, candidates },
                 new { label = "Main AC", kind = "ac_single", metal = "copper", length_m = 15, area_mm2 = 6, temperature_c = 60,
-                    voltage_v = 230, current_a = 20, circuits = 1, target_drop_pct = 1.5 },
+                    voltage_v = 230, current_a = 20, circuits = 1, target_drop_pct = 1.5, ampacity_a = 32, derating = 0.85, candidates },
             } });
+            if (N(appliedCables?["estimates"]?[0]?["suggested"], "area_mm2") != 2.5 ||
+                N(appliedCables?["estimates"]?[1]?["suggested"], "area_mm2") != 4.0)
+                throw new InvalidOperationException("Cable sizing did not return the expected cross sections.");
             Reload();
-            await Capture(NavCables, "17-cable-estimates.png");
+            await Capture(NavCables, "22-hourly-cable-estimates.png");
         }
         catch (Exception ex) { ok = false; File.WriteAllText(IOPath.Combine(dir, "error.txt"), ex.ToString()); }
         Application.Current.Exit();

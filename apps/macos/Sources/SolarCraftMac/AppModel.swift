@@ -94,14 +94,26 @@ final class AppModel: ObservableObject {
             if let circuits { request["circuits"] = circuits }
             result = try Core.invokeJSON("cable_plan", request)
         }
-        if error == nil && (mode == "apply" || mode == "save") { reload() }
+        if error == nil && (["apply", "apply_hourly", "save"].contains(mode)) { reload() }
         return result
+    }
+
+    func saveIsland(plan: JSONDict, costs: JSONDict, currency: String) {
+        let edits: [JSONDict] = [
+            ["pointer": "/island_plan", "value": plan],
+            ["pointer": "/tariff/currency", "value": currency],
+        ] + costs.map { ["pointer": "/economics/" + $0.key, "value": $0.value] }
+        do {
+            _ = try Core.invokeJSON("set_fields", ["file": file, "edits": edits])
+            reload()
+        } catch { self.error = error.localizedDescription }
     }
 
     func setCableLosses(dc: Double, ac: Double) {
         let edits: [JSONDict] = [
             ["pointer": "/losses/dc_wiring_pct", "value": dc],
             ["pointer": "/losses/ac_wiring_pct", "value": ac],
+            ["pointer": "/hourly_cables", "value": JSONDict()],
         ]
         do {
             _ = try Core.invokeJSON("set_fields", ["file": file, "edits": edits])

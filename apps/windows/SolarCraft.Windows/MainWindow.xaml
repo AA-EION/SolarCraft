@@ -54,6 +54,8 @@
         <NavigationViewItem x:Name="NavProject" Tag="project" Icon="Document" />
         <NavigationViewItem x:Name="NavSite" Tag="site" Icon="World" />
         <NavigationViewItem x:Name="NavLoads" Tag="loads" Icon="Calculator" />
+        <NavigationViewItem x:Name="NavEv" Tag="ev" Icon="Calculator" />
+        <NavigationViewItem x:Name="NavHeating" Tag="heating" Icon="Shop" />
         <NavigationViewItemHeader x:Name="NavSystem" />
         <NavigationViewItem x:Name="NavDesign" Tag="design" Icon="ViewAll" />
         <NavigationViewItem x:Name="NavRoof" Tag="roof" Icon="Home" />
@@ -64,6 +66,7 @@
         <NavigationViewItem x:Name="NavPlans" Tag="plans" Icon="List" />
         <NavigationViewItemHeader x:Name="NavOutput" />
         <NavigationViewItem x:Name="NavEconomics" Tag="economics" Icon="Shop" />
+        <NavigationViewItem x:Name="NavIsland" Tag="island" Icon="Shop" />
         <NavigationViewItem x:Name="NavResults" Tag="results" Icon="Play" />
         <NavigationViewItem x:Name="NavReport" Tag="report" Icon="Print" />
       </NavigationView.MenuItems>
@@ -108,6 +111,9 @@
           <StackPanel x:Name="ScenePage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="ElectricalPage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="LoadsPage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="EvPage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="HeatingPage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="IslandPage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="StoragePage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="CablesPage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="PlansPage" Spacing="10" Visibility="Collapsed" />

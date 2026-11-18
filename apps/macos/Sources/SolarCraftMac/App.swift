@@ -34,13 +34,16 @@ struct SolarCraftApp: App {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case project, workflow_site, loads, workflow_pv_modules, roof, scene3d, electrical, battery, workflow_cables, workflow_plans, economics, workflow_results, workflow_presentation
+    case project, workflow_site, loads, ev_page, heat_page, workflow_pv_modules, roof, scene3d, electrical, battery, workflow_cables, workflow_plans, economics, island_page, workflow_results, workflow_presentation
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .project: return "doc.text"
         case .workflow_site: return "sun.max"
         case .loads: return "bolt.circle"
+        case .ev_page: return "ev.charger"
+        case .heat_page: return "heat.waves"
+        case .island_page: return "powersleep"
         case .workflow_pv_modules: return "rectangle.split.2x2"
         case .roof: return "house"
         case .scene3d: return "cube"
@@ -56,6 +59,9 @@ enum Page: String, CaseIterable, Identifiable {
     var workflowTag: String {
         switch self {
         case .workflow_site: return "site"
+        case .ev_page: return "ev"
+        case .heat_page: return "heating"
+        case .island_page: return "island"
         case .workflow_pv_modules: return "design"
         case .scene3d: return "scene"
         case .battery: return "storage"
@@ -67,9 +73,9 @@ enum Page: String, CaseIterable, Identifiable {
         }
     }
     static let groups: [(String, [Page])] = [
-        ("workflow_setup", [.project, .workflow_site, .loads]),
+        ("workflow_setup", [.project, .workflow_site, .loads, .ev_page, .heat_page]),
         ("workflow_system", [.workflow_pv_modules, .roof, .scene3d, .electrical, .battery, .workflow_cables, .workflow_plans]),
-        ("workflow_output", [.economics, .workflow_results, .workflow_presentation]),
+        ("workflow_output", [.economics, .island_page, .workflow_results, .workflow_presentation]),
     ]
 }
 
@@ -166,6 +172,9 @@ struct PageView: View {
         case .project: ProjectPage()
         case .workflow_site: SiteClimatePage()
         case .loads: StorageLoadsPage(consumptionOnly: true)
+        case .ev_page: DemandEditorPage(section: "ev")
+        case .heat_page: DemandEditorPage(section: "heating")
+        case .island_page: IslandControlsPage()
         case .workflow_pv_modules: DesignPage()
         case .roof: RoofPage()
         case .scene3d: ScenePage()

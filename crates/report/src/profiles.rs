@@ -162,6 +162,15 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
         view.contents.extend(planner_sections(input));
         crate::detail::planner(view, input);
     }
+    if !short && !input.project.hourly_cables.is_empty() {
+        let mut wiring = ContentSection::new("hourly_wiring", tr(l, "Hourly cable losses", "Pérdidas horarias de cableado", "Stündliche Leitungsverluste", "Perdas horárias nos cabos"));
+        let n = |series: &[f32]| l.num(series.iter().map(|&w| f64::from(w)).sum::<f64>() / 1000.0, 2);
+        wiring.table(vec![], [
+            ["DC".into(), format!("{} kWh", n(&r.hourly.dc_cable_wh))],
+            ["AC".into(), format!("{} kWh", n(&r.flows.ac_cable_loss))],
+        ]);
+        view.contents.push(wiring);
+    }
     if !view.notes.is_empty() {
         let mut notes = ContentSection::new("notes", view.s["notes"]);
         for note in &view.notes { notes.text(note); }
@@ -232,10 +241,10 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
     let mut out = vec![datasheets];
     if !p.cable_plan.is_empty() {
         let mut cables = ContentSection::new("specified_cables", tr(l, "Cable estimates", "Estimación de cables", "Leitungsverluste", "Estimativa de cabos"));
-        cables.text(tr(l, "Resistive loss at the specified operating point. The simulation uses the DC and AC wiring percentages listed under Assumptions.",
-            "Pérdida resistiva en el punto indicado. La simulación utiliza los porcentajes de cableado de la sección Supuestos.",
-            "Ohmscher Verlust am angegebenen Betriebspunkt. Die Simulation verwendet die Leitungsverluste unter Annahmen.",
-            "Perda resistiva no ponto indicado. A simulação utiliza os percentuais de cabeamento nas premissas."));
+        cables.text(tr(l, "Resistive loss at the specified operating point. See the wiring assumptions and hourly cable loss section for the applied model.",
+            "Pérdida resistiva en el punto indicado. Consulte los supuestos y las pérdidas horarias para ver el modelo aplicado.",
+            "Ohmscher Verlust am angegebenen Betriebspunkt. Die angewandte Methode steht in den Annahmen und stündlichen Leitungsverlusten.",
+            "Perda resistiva no ponto indicado. Veja as premissas e as perdas horárias para o modelo aplicado."));
         cables.table(vec![
             tr(l, "Circuit", "Circuito", "Stromkreis", "Circuito"),
             "mm²".into(), "m".into(), "ΔV (%)".into(), "W".into(),

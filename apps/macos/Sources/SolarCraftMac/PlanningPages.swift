@@ -9,7 +9,7 @@ struct SystemWorkflowSection: View {
         GroupBox(m.t("workflow_type")) {
             Form {
                 Picker(m.t("workflow_type"), selection: $system) {
-                    ForEach(["custom", "grid_export", "grid_consumption", "grid_battery", "off_grid", "off_grid_generator"], id: \.self) { key in
+                    ForEach(["custom", "grid_export", "grid_consumption", "grid_battery", "grid_ev", "grid_ev_battery", "grid_thermal", "grid_thermal_battery", "off_grid", "off_grid_generator"], id: \.self) { key in
                         Text(m.t(key)).tag(key)
                     }
                 }
@@ -40,6 +40,9 @@ private struct CableDraft: Identifiable {
     var current: Double
     var count: Double
     var target: Double
+    var ampacity: String
+    var derating: Double
+    var candidates: String
     let source: String?
 
     init(_ value: JSONDict? = nil, index: Int? = nil, name: String) {
@@ -56,12 +59,27 @@ private struct CableDraft: Identifiable {
         current = num(v, "current_a", 10)
         count = num(v, "circuits", 1)
         target = num(v, "target_drop_pct", 1.5)
+        ampacity = (v["ampacity_a"] as? NSNumber)?.stringValue ?? ""
+        derating = num(v, "derating", 1)
+        candidates = dicts(v["candidates"]).map { "\(num($0, "area_mm2")),\(num($0, "ampacity_a"))" }.joined(separator: "; ")
         source = value?["source_route"] as? String
     }
 
-    var encoded: JSONDict {
+    var encoded: JSONDict? {
+        var sizes: [JSONDict] = []
+        for item in candidates.split(separator: ";") {
+            let pair = item.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard pair.count == 2, let area = Double(pair[0]), let amps = Double(pair[1]), area.isFinite, amps.isFinite else { return nil }
+            sizes.append(["area_mm2": area, "ampacity_a": amps])
+        }
         var value: JSONDict = ["label": label, "kind": kind, "metal": metal, "length_m": length, "extra_m": kind.hasPrefix("dc_") ? extra : 0,
             "area_mm2": area, "temperature_c": temperature, "voltage_v": voltage, "current_a": current, "circuits": Int(count), "target_drop_pct": target]
+        if !ampacity.isEmpty {
+            guard let a = Double(ampacity.replacingOccurrences(of: ",", with: ".")), a.isFinite else { return nil }
+            value["ampacity_a"] = a
+        }
+        value["derating"] = derating
+        value["candidates"] = sizes
         if let source { value["source_route"] = source }
         return value
     }
@@ -79,6 +97,7 @@ struct CablePlannerSection: View {
         GroupBox(m.t("cable_planner")) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(m.t("cable_planner_hint")).foregroundStyle(.secondary)
+                Text(m.t("cable_hourly_hint")).foregroundStyle(.secondary)
                 if !circuits.isEmpty {
                     Picker(m.t("cable_planner"), selection: $selected) {
                         ForEach(circuits.indices, id: \.self) { i in Text(str(circuits[i], "label")).tag(i) }
@@ -97,18 +116,29 @@ struct CablePlannerSection: View {
                 }
                 if !estimates.isEmpty {
                     ScrollView(.horizontal) {
-                        SimpleTable(header: [m.t("cable_planner"), m.t("cable_drop"), "W", "m", m.t("cable_area_target")],
-                            rows: zip(circuits, estimates).map { c, r in [
-                                str(c, "label"), fmt(num(r, "drop_pct"), 2) + " %", fmt(num(r, "loss_w"), 1),
-                                fmt(num(r, "conductor_m"), 1), fmt(num(r, "area_for_target_mm2"), 2),
-                            ] })
+                        SimpleTable(header: [m.t("cable_planner"), m.t("cable_drop"), "W", m.t("cable_area_target"), m.t("cable_current_check"), m.t("cable_suggested")],
+                            rows: zip(circuits, estimates).map { c, r in
+                                let current = r["allowed_a"] is NSNumber ? "\(fmt(num(r, "allowed_a"), 1)) / \(fmt(num(c, "current_a"), 1))" : "–"
+                                let size = (r["suggested"] as? JSONDict).map { fmt(num($0, "area_mm2"), 1) + " mm²" } ?? "–"
+                                return [str(c, "label"), fmt(num(r, "drop_pct"), 2) + " %", fmt(num(r, "loss_w"), 1),
+                                    fmt(num(r, "area_for_target_mm2"), 2), current, size]
+                            })
+                    }
+                    if estimates.indices.contains(selected), let recommendation = estimates[selected]["suggested"] as? JSONDict {
+                        Button(m.t("cable_use_size")) {
+                            var rows = circuits
+                            rows[selected]["area_mm2"] = recommendation["area_mm2"]
+                            rows[selected]["ampacity_a"] = recommendation["ampacity_a"]
+                            run("preview", rows)
+                        }
                     }
                     Text("\(m.t("workflow_dc_loss")) \(percent("dc_loss_pct"))   \(m.t("workflow_ac_loss")) \(percent("ac_loss_pct"))")
                         .monospacedDigit()
                 }
                 HStack {
                     Button(m.t("cable_save")) { run("save", circuits) }
-                    Button(m.t("cable_apply")) { run("apply", circuits) }.buttonStyle(.borderedProminent)
+                    Button(m.t("cable_apply")) { run("apply", circuits) }.disabled(circuits.isEmpty)
+                    Button(m.t("cable_hourly")) { run("apply_hourly", circuits) }.buttonStyle(.borderedProminent)
                         .disabled(circuits.isEmpty)
                 }
             }
@@ -116,9 +146,10 @@ struct CablePlannerSection: View {
         .onAppear { if let state = m.cablePlan(mode: "preview") { data = state } }
         .sheet(item: $draft) { start in
             CableEditor(value: start) { value in
+                guard let encoded = value.encoded else { m.error = m.t("cable_candidates"); return false }
                 var rows = circuits
-                if let index = value.index { rows[index] = value.encoded }
-                else { rows.append(value.encoded) }
+                if let index = value.index { rows[index] = encoded }
+                else { rows.append(encoded) }
                 let saved = run("preview", rows)
                 if saved { selected = value.index ?? rows.count - 1 }
                 return saved
@@ -163,6 +194,9 @@ private struct CableEditor: View {
                 NumField(label: m.t("cable_current"), value: $value.current)
                 NumField(label: m.t("cable_count"), value: $value.count)
                 NumField(label: m.t("cable_target"), value: $value.target)
+                TextField(m.t("cable_ampacity"), text: $value.ampacity)
+                NumField(label: m.t("cable_derating"), value: $value.derating)
+                TextField(m.t("cable_candidates"), text: $value.candidates)
             }
             if !error.isEmpty { Text(error).foregroundStyle(.red) }
             HStack {
