@@ -21,6 +21,8 @@ public sealed partial class MainWindow : Window
     private string? _file;
     private JsonNode? _project;
     private bool _loading;
+    private int _designArray;
+    private bool _designHasErrors;
     private CancellationTokenSource? _cts;
 
     public MainWindow()
@@ -43,13 +45,22 @@ public sealed partial class MainWindow : Window
         Title = T("app_title");
         NewButton.Label = T("new_project"); OpenButton.Label = T("open_project"); UndoButton.Label = T("undo");
         SimulateButton.Label = T("simulate"); CancelButton.Label = T("cancel");
-        NavProject.Content = T("project"); NavSite.Content = T("site_weather"); NavDesign.Content = T("design"); NavRoof.Content = T("roof"); NavResults.Content = T("simulation"); NavReport.Content = T("plans_reports");
-        NavSite.Content = T("site_climate"); NavElectrical.Content = T("electrical"); NavScene.Content = T("scene3d"); NavStorage.Content = T("storage_loads"); NavEconomics.Content = T("economics");
-        EmptyText.Text = T("no_project");
+        RunResultsButton.Content = T("simulate"); ResultsClimateButton.Content = T("workflow_site");
+        NavSetup.Content = T("workflow_setup"); NavSystem.Content = T("workflow_system"); NavOutput.Content = T("workflow_output");
+        NavProject.Content = T("project"); NavSite.Content = T("workflow_site"); NavLoads.Content = T("loads");
+        NavDesign.Content = T("workflow_pv_modules"); NavRoof.Content = T("roof"); NavScene.Content = T("scene3d");
+        NavElectrical.Content = T("electrical"); NavStorage.Content = T("battery"); NavEconomics.Content = T("economics");
+        NavResults.Content = T("workflow_results"); NavReport.Content = T("workflow_presentation");
+        NavCables.Content = T("workflow_cables"); NavPlans.Content = T("workflow_plans");
+        StepBack.Content = T("workflow_back"); StepNext.Content = T("workflow_next");
+        UpdateStep();
+        WelcomeTitle.Text = T("workflow_welcome"); EmptyText.Text = T("workflow_welcome_hint");
+        WelcomeNew.Content = T("new_project"); WelcomeOpen.Content = T("open_project");
         NameBox.Header = T("name"); CustomerBox.Header = T("customer"); AddressBox.Header = T("address");
         LatBox.Header = T("latitude"); LonBox.Header = T("longitude"); ElevBox.Header = T("elevation"); AlbedoBox.Header = T("albedo");
         WeatherHeader.Text = T("weather"); FetchButton.Content = T("fetch_pvgis"); ImportButton.Content = T("import_weather"); DemoButton.Content = T("demo_weather"); DemoWarning.Text = T("demo_warning");
         ModeRadios.Header = T("mode"); EasyRadio.Content = T("easy"); DetailedRadio.Content = T("detailed"); ModeHint.Text = T("mode_hint");
+        DesignArrayBox.Header = T("photo_array"); ModuleBox.Header = T("module"); InverterBox.Header = T("inverter");
         KwpBox.Header = T("target_kwp"); TiltBox.Header = T("tilt"); AzimuthBox.Header = T("azimuth"); MountingBox.Header = T("mounting");
         MountingBox.ItemsSource = new[] { T("open_rack"), T("roof_mounted"), T("integrated") };
         PvModelBox.Header = T("pv_model");
@@ -62,7 +73,8 @@ public sealed partial class MainWindow : Window
         CustomBox.Header = T("custom_points"); ObstaclesBox.Header = T("obstacles"); SetbackBox.Header = T("setback"); ClearanceBox.Header = T("clearance");
         ClickHint.Text = T("click_to_add"); UndoPointButton.Content = T("undo_point"); ClearPointsButton.Content = T("clear_points");
         RoofHint.Text = T("roof_hint"); ApplyRoofButton.Content = T("apply_roof");
-        PhotoPlanButton.Content = T("photo_plan");
+        PhotoPlanButton.Content = T("photo_open"); SavedPhotoButton.Content = T("photo_resume");
+        PhotoArrayBox.Header = T("photo_array");
         LangBox.Header = T("language"); FormatBox.Header = T("format"); DesignerBox.Header = T("designer"); ExportButton.Content = T("export_report");
         ReportTypeBox.Header = T("report_type");
         foreach (ComboBoxItem option in ReportTypeBox.Items) option.Content = T((string)option.Tag);
@@ -105,10 +117,14 @@ public sealed partial class MainWindow : Window
     private void Open(string path)
     {
         _file = path;
+        _designArray = 0;
+        _previewSections = null;
+        _reportExclusions.Clear();
         Nav.IsEnabled = true; UndoButton.IsEnabled = true; SimulateButton.IsEnabled = true;
-        EmptyText.Visibility = Visibility.Collapsed;
+        WelcomePage.Visibility = Visibility.Collapsed;
+        Nav.Visibility = Visibility.Visible;
         Reload();
-        Nav.SelectedItem ??= NavProject;
+        Nav.SelectedItem = NavProject;
     }
 
     private void Reload()
@@ -123,14 +139,34 @@ public sealed partial class MainWindow : Window
             try { r = Api.Invoke("explain", new { file = _file }); } catch (CoreError ce) when (ce.Code == "NO_RESULTS") { }
             ShowResults(r);
             BuildPlantPages();
+            UpdateStep();
         });
     }
 
     private void ShowProject()
     {
         var p = _project!;
-        var a = p["arrays"]![0]!;
+        var arrays = Arr(p["arrays"]);
+        if (arrays.Count == 0) return;
         _loading = true;
+        _designArray = Math.Clamp(_designArray, 0, arrays.Count - 1);
+        var a = arrays[_designArray]!;
+        DesignArrayBox.ItemsSource = arrays.Select(row => Api.Str(row?["name"])).ToList();
+        DesignArrayBox.SelectedIndex = _designArray;
+        void Populate(ComboBox box, JsonNode? records, string id)
+        {
+            box.Items.Clear();
+            foreach (var row in Arr(records))
+                box.Items.Add(new ComboBoxItem { Content = $"{S(row, "manufacturer")} {S(row, "model")}", Tag = S(row, "id") });
+            box.SelectedItem = box.Items.OfType<ComboBoxItem>().FirstOrDefault(item => item.Tag is string value && value == id);
+        }
+        var library = p["library"];
+        Populate(ModuleBox, library?["modules"], Api.Str(a["module_id"]));
+        Populate(InverterBox, library?["inverters"], Api.Str(a["inverter_id"]));
+        InverterBox.IsEnabled = p["electrical"]?["manual"]?.GetValue<bool>() != true;
+        foreach (var (box, key) in new[] { (KwpBox, "target_kwp"), (TiltBox, "tilt"), (AzimuthBox, "azimuth"),
+            (MpsBox, "modules_per_string"), (StringsBox, "strings") })
+            box.Tag = $"/arrays/{_designArray}/{key}";
         NameBox.Text = Api.Str(p["name"]); CustomerBox.Text = p["customer"]!["name"]!.GetValue<string>(); AddressBox.Text = p["customer"]!["address"]!.GetValue<string>();
         LatBox.Value = Api.Num(p["site"]!["latitude"]); LonBox.Value = Api.Num(p["site"]!["longitude"]); ElevBox.Value = Api.Num(p["site"]!["elevation"]); AlbedoBox.Value = Api.Num(p["site"]!["albedo"]);
         WeatherText.Text = p["weather"] is JsonNode w ? $"{w["provider"]}\n{w["summary"]}" : T("no_weather");
@@ -143,10 +179,9 @@ public sealed partial class MainWindow : Window
         MpsBox.IsEnabled = detailed; StringsBox.IsEnabled = detailed;
         foreach (var (box, key) in new[] { (KwpBox, "target_kwp"), (TiltBox, "tilt"), (AzimuthBox, "azimuth"), (MpsBox, "modules_per_string"), (StringsBox, "strings") })
             box.PlaceholderText = Api.IsUser(a[key]) ? "" : T("derived");
-        var mod = p["library"]!["modules"]!.AsArray().FirstOrDefault(m => m!["id"]!.GetValue<string>() == Api.Str(a["module_id"]));
-        var inv = p["library"]!["inverters"]!.AsArray().FirstOrDefault(i => i!["id"]!.GetValue<string>() == Api.Str(a["inverter_id"]));
-        EquipmentText.Text = $"{T("module")}: {mod?["manufacturer"]} {mod?["model"]}\n{T("inverter")}: {Api.Num(a["inverter_count"])} × {inv?["manufacturer"]} {inv?["model"]}";
-        ShowRoof(a["roof"]);
+        EquipmentText.Text = $"{T("inverter")}: {Api.Num(a["inverter_count"])}";
+        ShowRoof(arrays[0]?["roof"]);
+        PopulatePhotoArrays();
         _loading = false;
     }
 
@@ -254,18 +289,23 @@ public sealed partial class MainWindow : Window
 
     private void ShowRoof(JsonNode? roof)
     {
-        RoofCanvas.Children.Clear();
-        RoofCount.Text = "";
-        if (roof is null) return;
+        var count = DrawRoof(RoofCanvas, roof);
+        RoofCount.Text = roof is null ? "" : $"{count} {T("modules_fit")}";
+    }
+
+    private static int DrawRoof(Canvas canvas, JsonNode? roof)
+    {
+        canvas.Children.Clear();
+        if (roof is null) return 0;
         var outline = roof["face"]!["outline"]!.AsArray().Select(p => new[] { p![0]!.GetValue<double>(), p[1]!.GetValue<double>() }).ToList();
-        if (outline.Count < 3) return;
+        if (outline.Count < 3) return 0;
         double minX = outline.Min(p => p[0]), maxX = outline.Max(p => p[0]), minY = outline.Min(p => p[1]), maxY = outline.Max(p => p[1]);
-        if (maxX <= minX || maxY <= minY) return;
+        if (maxX <= minX || maxY <= minY) return 0;
         const double pad = 12;
-        var scale = Math.Min((RoofCanvas.Width - 2 * pad) / (maxX - minX), (RoofCanvas.Height - 2 * pad) / (maxY - minY));
+        var scale = Math.Min((canvas.Width - 2 * pad) / (maxX - minX), (canvas.Height - 2 * pad) / (maxY - minY));
         Windows.Foundation.Point Pt(double x, double y) => new(pad + (x - minX) * scale, pad + (maxY - y) * scale);
         Polygon Poly(IEnumerable<double[]> pts, Brush fill, Brush? stroke) { var pg = new Polygon { Fill = fill, Stroke = stroke, StrokeThickness = 1.5 }; foreach (var p in pts) pg.Points.Add(Pt(p[0], p[1])); return pg; }
-        RoofCanvas.Children.Add(Poly(outline, new SolidColorBrush(ColorHelper.FromArgb(40, 128, 128, 128)), new SolidColorBrush(Colors.Gray)));
+        canvas.Children.Add(Poly(outline, new SolidColorBrush(ColorHelper.FromArgb(40, 128, 128, 128)), new SolidColorBrush(Colors.Gray)));
         var teal = new SolidColorBrush(ColorHelper.FromArgb(255, 0x0f, 0x5c, 0x63));
         var mods = roof["modules"]!.AsArray();
         foreach (var m in mods)
@@ -274,15 +314,16 @@ public sealed partial class MainWindow : Window
             var r = new Rectangle { Width = (x1 - x0) * scale, Height = (y1 - y0) * scale, Fill = teal, Stroke = new SolidColorBrush(Colors.White), StrokeThickness = 0.6 };
             var p = Pt(x0, y1);
             Canvas.SetLeft(r, p.X); Canvas.SetTop(r, p.Y);
-            RoofCanvas.Children.Add(r);
+            canvas.Children.Add(r);
         }
         foreach (var ob in roof["face"]!["obstacles"]!.AsArray())
-            RoofCanvas.Children.Add(Poly(ob!.AsArray().Select(p => new[] { p![0]!.GetValue<double>(), p[1]!.GetValue<double>() }), new SolidColorBrush(Colors.DarkGray), null));
-        RoofCount.Text = $"{mods.Count} {T("modules_fit")}";
+            canvas.Children.Add(Poly(ob!.AsArray().Select(p => new[] { p![0]!.GetValue<double>(), p[1]!.GetValue<double>() }), new SolidColorBrush(Colors.DarkGray), null));
+        return mods.Count;
     }
 
     private void ShowIssues(JsonArray issues)
     {
+        _designHasErrors = issues.Any(i => S(i, "severity") == "error");
         IssuesList.ItemsSource = issues.Count == 0
             ? new List<string> { T("no_issues") }
             : issues.Select(i => (i!["severity"]!.GetValue<string>() == "error" ? "✖ " : "⚠ ") + i["message"]!.GetValue<string>()).ToList();
@@ -348,6 +389,9 @@ public sealed partial class MainWindow : Window
     private void OnNavigate(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag as string;
+        LoadsPage.Visibility = tag == "loads" ? Visibility.Visible : Visibility.Collapsed;
+        CablesPage.Visibility = tag == "cables" ? Visibility.Visible : Visibility.Collapsed;
+        PlansPage.Visibility = tag == "plans" ? Visibility.Visible : Visibility.Collapsed;
         ProjectPage.Visibility = tag == "project" ? Visibility.Visible : Visibility.Collapsed;
         SitePage.Visibility = tag == "site" ? Visibility.Visible : Visibility.Collapsed;
         DesignPage.Visibility = tag == "design" ? Visibility.Visible : Visibility.Collapsed;
@@ -358,20 +402,81 @@ public sealed partial class MainWindow : Window
         StoragePage.Visibility = tag == "storage" ? Visibility.Visible : Visibility.Collapsed;
         EconomicsPage.Visibility = tag == "economics" ? Visibility.Visible : Visibility.Collapsed;
         ReportPage.Visibility = tag == "report" ? Visibility.Visible : Visibility.Collapsed;
+        PageScroll?.ChangeView(null, 0, null, true);
+        UpdateStep();
+    }
+
+    private NavigationViewItem[] Steps => [NavProject, NavSite, NavLoads, NavDesign, NavRoof, NavScene,
+        NavElectrical, NavStorage, NavCables, NavPlans, NavEconomics, NavResults, NavReport];
+
+    private void UpdateStep()
+    {
+        if (StepTitle is null || NavReport is null) return;
+        var steps = Steps;
+        var index = Array.IndexOf(steps, Nav.SelectedItem as NavigationViewItem);
+        StepTitle.Text = index >= 0 ? steps[index].Content as string ?? "" : "";
+        var isReport = index >= 0 && steps[index] == NavReport;
+        var isResults = index >= 0 && steps[index] == NavResults;
+        var weather = _project?["weather"] is not null;
+        var canRun = weather && !_designHasErrors && _cts is null;
+        SimulateButton.IsEnabled = RunResultsButton.IsEnabled = canRun;
+        ResultsClimateButton.Visibility = weather ? Visibility.Collapsed : Visibility.Visible;
+        StepStatus.Text = isReport && _summary is null ? T("workflow_needs_results")
+            : isResults && !weather ? T("no_weather")
+            : isResults && _designHasErrors ? T("issues")
+            : "";
+        StepBack.Visibility = index > 0 ? Visibility.Visible : Visibility.Collapsed;
+        StepNext.Visibility = index >= 0 && index + 1 < steps.Length ? Visibility.Visible : Visibility.Collapsed;
+        StepNext.IsEnabled = !isResults || _summary is not null;
+    }
+
+    private void OnStepBack(object sender, RoutedEventArgs e) => MoveStep(-1);
+    private void OnStepNext(object sender, RoutedEventArgs e) => MoveStep(1);
+
+    private void MoveStep(int offset)
+    {
+        var steps = Steps;
+        int next = Array.IndexOf(steps, Nav.SelectedItem as NavigationViewItem) + offset;
+        if (next >= 0 && next < steps.Length) Nav.SelectedItem = steps[next];
     }
 
     // ---- Edits ----
     private void Set(string pointer, object value)
     {
         if (_loading || _file is null) return;
-        Try(() =>
-        {
-            var r = Api.Invoke("set_fields", new { file = _file, edits = new[] { new { pointer, value } } })!;
-            _project = r["project"]; ShowProject(); ShowIssues(r["issues"]!.AsArray());
-        });
+        if (Try(() => Api.Invoke("set_fields", new { file = _file, edits = new[] { new { pointer, value } } })))
+            Reload();
     }
 
-    private void OnTextCommit(object sender, RoutedEventArgs e) { if (sender is TextBox tb && tb.Tag is string ptr) Set(ptr, tb.Text); }
+    private void OnDesignArray(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loading || _project is null || DesignArrayBox.SelectedIndex < 0) return;
+        _designArray = DesignArrayBox.SelectedIndex;
+        ShowProject();
+    }
+
+    private void OnDesignModule(object sender, SelectionChangedEventArgs e)
+    {
+        if (ModuleBox?.SelectedItem is ComboBoxItem { Tag: string id }) Set($"/arrays/{_designArray}/module_id", id);
+    }
+
+    private void OnDesignInverter(object sender, SelectionChangedEventArgs e)
+    {
+        if (InverterBox?.SelectedItem is ComboBoxItem { Tag: string id }) Set($"/arrays/{_designArray}/inverter_id", id);
+    }
+
+    private void OnTextCommit(object sender, RoutedEventArgs e)
+    {
+        if (sender is not TextBox tb || tb.Tag is not string ptr) return;
+        var current = ptr switch
+        {
+            "/name" => Api.Str(_project?["name"]),
+            "/customer/name" => S(_project?["customer"], "name"),
+            "/customer/address" => S(_project?["customer"], "address"),
+            _ => null,
+        };
+        if (tb.Text != current) Set(ptr, tb.Text);
+    }
     private void OnNumber(NumberBox sender, NumberBoxValueChangedEventArgs args)
     {
         if (sender.Tag is not string ptr || double.IsNaN(args.NewValue) || args.NewValue == args.OldValue) return;
@@ -410,22 +515,34 @@ public sealed partial class MainWindow : Window
     private void OnDemo(object sender, RoutedEventArgs e) { if (Try(() => Api.Invoke("use_demo_weather", new { file = _file }))) Reload(); }
 
     // ---- Simulation ----
+    private void OnResultsClimate(object sender, RoutedEventArgs e) => Nav.SelectedItem = NavSite;
+
     private async void OnSimulate(object sender, RoutedEventArgs e)
     {
+        if (_designHasErrors || _project?["weather"] is null) return;
         if (await RunLong("simulate", new { file = _file })) Nav.SelectedItem = NavResults;
     }
     private void OnCancel(object sender, RoutedEventArgs e) => _cts?.Cancel();
 
     private async Task<bool> RunLong(string method, object parameters)
     {
-        _cts = new CancellationTokenSource();
+        if (_cts is not null || _file is null) return false;
+        using var cancellation = new CancellationTokenSource();
+        _cts = cancellation;
+        Nav.IsEnabled = NewButton.IsEnabled = OpenButton.IsEnabled = UndoButton.IsEnabled = false;
         Progress.Value = 0; Progress.Visibility = Visibility.Visible; CancelButton.Visibility = Visibility.Visible; SimulateButton.IsEnabled = false;
         var progress = new Progress<double>(f => Progress.Value = f);
         var ok = true;
-        try { await Task.Run(() => Api.Invoke(method, parameters, progress, _cts.Token)); }
+        try { await Task.Run(() => Api.Invoke(method, parameters, progress, cancellation.Token)); }
         catch (OperationCanceledException) { ok = false; }
         catch (Exception ex) { ShowError(ex.Message); ok = false; }
-        finally { Progress.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; SimulateButton.IsEnabled = true; }
+        finally
+        {
+            _cts = null;
+            Progress.Visibility = Visibility.Collapsed;
+            CancelButton.Visibility = Visibility.Collapsed;
+            Nav.IsEnabled = NewButton.IsEnabled = OpenButton.IsEnabled = UndoButton.IsEnabled = SimulateButton.IsEnabled = true;
+        }
         Reload();
         return ok;
     }
@@ -433,6 +550,7 @@ public sealed partial class MainWindow : Window
     // ---- Report ----
     private async void OnExport(object sender, RoutedEventArgs e)
     {
+        if (_file is not string file || _summary is null) return;
         var fmt = (FormatBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "pdf";
         var lang = (LangBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "en";
         var picker = new FileSavePicker { SuggestedFileName = Api.Str(_project?["name"]) };
@@ -441,10 +559,11 @@ public sealed partial class MainWindow : Window
         var f = await picker.PickSaveFileAsync();
         if (f is null) return;
         var designer = DesignerBox.Text;
+        var report_type = SelectedReportType();
+        var exclude_sections = _reportExclusions.ToArray();
         try
         {
-            var report_type = SelectedReportType();
-            await Task.Run(() => Api.Invoke("export_report", new { file = _file, output = f.Path, format = fmt, lang, designer, report_type }));
+            await Task.Run(() => Api.Invoke("export_report", new { file, output = f.Path, format = fmt, lang, designer, report_type, exclude_sections }));
             ShowInfo($"{T("report_saved")}: {f.Path}");
             await Windows.System.Launcher.LaunchFileAsync(f);
         }

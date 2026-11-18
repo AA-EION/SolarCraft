@@ -4,13 +4,12 @@
 use crate::{ContentBlock, View};
 use docx_rs::*;
 
-fn svg_to_png(svg: &str) -> Result<(Vec<u8>, u32, u32), String> {
+pub(crate) fn svg_to_png(svg: &str, scale: f32) -> Result<(Vec<u8>, u32, u32), String> {
     let mut opt = resvg::usvg::Options::default();
     let db = opt.fontdb_mut();
     for f in crate::FONTS { db.load_font_data(f.to_vec()); }
     db.set_sans_serif_family(crate::charts::FONT);
     let tree = resvg::usvg::Tree::from_str(svg, &opt).map_err(|e| e.to_string())?;
-    let scale = 2.0;
     let size = tree.size().to_int_size().scale_by(scale).ok_or("bad size")?;
     let mut pix = resvg::tiny_skia::Pixmap::new(size.width(), size.height()).ok_or("pixmap")?;
     pix.fill(resvg::tiny_skia::Color::WHITE);
@@ -48,7 +47,7 @@ fn table_of<const N: usize>(header: Option<&[String; N]>, rows: &[[String; N]]) 
 }
 
 fn image_para(svg: &str, width_emu: u32) -> Result<Paragraph, String> {
-    let (png, w, h) = svg_to_png(svg)?;
+    let (png, w, h) = svg_to_png(svg, 2.0)?;
     let height_emu = (width_emu as f64 * h as f64 / w as f64) as u32;
     Ok(Paragraph::new().add_run(Run::new().add_image(Pic::new(&png).size(width_emu, height_emu))))
 }

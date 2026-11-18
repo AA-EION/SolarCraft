@@ -13,6 +13,7 @@ struct ProjectDoc: Decodable {
     struct Site: Decodable { let latitude: Field<Double>; let longitude: Field<Double>; let elevation: Field<Double>; let albedo: Field<Double> }
     struct ArrayDoc: Decodable {
         let id: String
+        let name: Field<String>
         let tilt: Field<Double>
         let azimuth: Field<Double>
         let target_kwp: Field<Double>
@@ -56,6 +57,8 @@ struct ProjectDoc: Decodable {
     let simulation: Simulation
     let weather: WeatherRef?
     let library: Library
+    struct PhotoRef: Decodable { let array_id: String }
+    let roof_photos: [PhotoRef]?
 }
 
 struct Issue: Decodable, Identifiable {

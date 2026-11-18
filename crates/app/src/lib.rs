@@ -201,6 +201,12 @@ pub fn report_view(path: &Path, lang: &str) -> Result<solarcraft_report::View> {
 }
 
 pub fn report_view_for(path: &Path, lang: &str, report_type: ReportType, designer: &str) -> Result<solarcraft_report::View> {
+    report_view_selected(path, lang, report_type, designer, &[])
+}
+
+pub fn report_view_selected(path: &Path, lang: &str, report_type: ReportType, designer: &str,
+    exclude_sections: &[String]) -> Result<solarcraft_report::View>
+{
     let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}'")))?;
     let (s, p) = open(path)?;
     let r = current_results(&s, &p)?.ok_or_else(|| e("NO_RESULTS", "Run the simulation for the current design first."))?;
@@ -209,6 +215,7 @@ pub fn report_view_for(path: &Path, lang: &str, report_type: ReportType, designe
         weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied } };
     let mut view = solarcraft_report::build_view_for(&input, report_type);
     photo::report_figures(&s, &p, &mut view)?;
+    view.contents.retain(|section| !exclude_sections.iter().any(|id| id == section.id));
     Ok(view)
 }
 
@@ -219,7 +226,13 @@ pub fn generate_report(path: &Path, out: &Path, format: ReportFormat, lang: &str
 }
 
 pub fn generate_report_for(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str, report_type: ReportType) -> Result<ReportOutput> {
-    let view = report_view_for(path, lang, report_type, designer)?;
+    generate_report_selected(path, out, format, lang, designer, report_type, &[])
+}
+
+pub fn generate_report_selected(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str,
+    report_type: ReportType, exclude_sections: &[String]) -> Result<ReportOutput>
+{
+    let view = report_view_selected(path, lang, report_type, designer, exclude_sections)?;
     let bytes = match format {
         ReportFormat::Pdf => solarcraft_report::pdf::render(&view, today_utc()),
         ReportFormat::Docx => solarcraft_report::docx::render(&view),

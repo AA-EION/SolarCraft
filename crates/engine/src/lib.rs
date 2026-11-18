@@ -21,7 +21,7 @@ pub mod finance;
 pub mod loads;
 mod partial_shading;
 
-pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 4)");
+pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 5)");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step { pub key: String, pub label: String, pub value: f64, pub delta: f64, pub delta_pct: f64 }
@@ -221,8 +221,27 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             }
             module_shading.push(diagnostic);
             Some(summary)
+        } else if let Some(roof) = a.roof.as_ref().filter(|roof| !roof.face.obstacles.is_empty() && !roof.modules.is_empty()) {
+            match partial_shading::roof_routes(module, &elec, &a.id, roof.modules.len()) {
+                Ok(routes) => {
+                    let diodes = module.bypass_diodes.unwrap_or(3);
+                    let (summary, diagnostic, trace) = trace_roof(a, roof, &sun, w, &routes, diodes, module.half_cell);
+                    module_shading.push(diagnostic);
+                    ah.shaded = Some(partial_shading::ShadedArray {
+                        trace, routes, module: module_curve, hours: vec![partial_shading::Light::default(); n], diodes,
+                        forward_v: module.bypass_diode_voltage_v.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.5),
+                        half_cell: module.half_cell,
+                    });
+                    Some(summary)
+                }
+                Err(reason) => {
+                    warnings.push(Note { code: "ROOF_SHADING_APPROXIMATION".into(), subject: a.name.value.clone(),
+                        value: 0.0, text: format!("{} uses roof-average electrical shading because {reason}.", a.name.value) });
+                    near_shading(a, &sun)
+                }
+            }
         } else {
-            near_shading(a, &sun)
+            None
         };
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
@@ -271,7 +290,13 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
                 };
                 format!("{}: near shading from the 3D scene ({} occluding objects, {} substrings per module, diffuse sky-view factor {:.3}). Electrical treatment: {treatment}.", a.name.value, sh.obstacles, sh.diodes, sh.diffuse_factor)
             } else {
-                format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); bypass-diode effects of partial shading are modelled only for 3D-scene fields.", a.name.value, sh.obstacles, sh.diffuse_factor)
+                let treatment = match &ah.shaded {
+                    Some(shaded) if shaded.half_cell => "parallel half-cell substrings and shared bypass diodes",
+                    Some(_) => "string I–V curves and explicit bypass diodes",
+                    None => "roof-average electrical approximation",
+                };
+                let routing = if ah.shaded.is_some() { " Installed modules and string membership follow roof placement order and electrical string lengths." } else { "" };
+                format!("{}: near shading from {} roof obstacle(s), diffuse sky-view factor {:.3}. Electrical treatment: {treatment}.{routing}", a.name.value, sh.obstacles, sh.diffuse_factor)
             };
             warnings.push(Note { code: if sh.scene { "SCENE_SHADING".into() } else { "NEAR_SHADING".into() }, subject: a.name.value.clone(), value: sh.obstacles as f64, text });
         }
@@ -533,22 +558,68 @@ fn bound_field<'a>(p: &'a Project, a: &solarcraft_model::Array) -> Result<Option
     Ok(Some((sc, f)))
 }
 
+fn trace_roof(a: &solarcraft_model::Array, roof: &solarcraft_model::RoofLayout, sun: &[spa::SolarPosition],
+    weather: &Weather, routes: &std::collections::BTreeMap<u32, Vec<Vec<usize>>>, diodes: u32, half_cell: bool)
+    -> (NearShading, FieldShade, solarcraft_scene::shade::SubstringTrace)
+{
+    use solarcraft_geometry::{layout::Orientation, roof3d::{Frame, obstacle_triangles}};
+    use solarcraft_scene::{place::{ModuleDims, ModuleField, Mount, PlacedModule}, shade::shade_planar_substrings};
+    use solarcraft_shading::Triangle;
+
+    let frame = Frame::new(a.tilt.value, a.azimuth.value, 3.0);
+    let triangles: Vec<_> = obstacle_triangles(&roof.face, &frame).into_iter()
+        .map(|(t, i)| Triangle::opaque(t[0], t[1], t[2], i as u32 + 1)).collect();
+    let installed = routes.values().flatten().map(Vec::len).sum();
+    let mut modules: Vec<_> = roof.modules.iter().take(installed).enumerate().map(|(i, m)| PlacedModule {
+        id: format!("{}-roof-{}", a.id, i + 1),
+        corners: [[m.x0, m.y0], [m.x1, m.y0], [m.x1, m.y1], [m.x0, m.y1]].map(|p| frame.above(p, 0.03)),
+        normal: frame.n, row: 0, col: 0, portrait: roof.orientation == Orientation::Portrait, string: None,
+    }).collect();
+    for (i, route) in routes.values().flatten().enumerate() {
+        for &m in route { modules[m].string = Some(i as u32); }
+    }
+    let field = ModuleField { id: format!("{}-roof", a.id), name: a.name.value.clone(), array_id: Some(a.id.clone()),
+        mount: Mount::Roof { face: String::new(), standoff: 0.03 },
+        module: ModuleDims { bypass_diodes: diodes, ..Default::default() }, layout: Default::default(),
+        modules, strings: vec![], inverter_at: None, source: None };
+    let (suns, weights) = shade_inputs(sun, weather);
+    let (summary, trace) = shade_planar_substrings(&field, &triangles, &suns, &weights, half_cell);
+    let (near, diagnostic) = shade_summary(summary, a, &weights, roof.face.obstacles.len(), false, diodes, true, half_cell);
+    (near, diagnostic, trace)
+}
+
+fn shade_inputs(sun: &[spa::SolarPosition], weather: &Weather) -> (Vec<(f64, f64)>, Vec<f64>) {
+    let suns = sun.iter().map(|s| (s.apparent_elevation, s.azimuth)).collect();
+    let weights = weather.hours.iter().map(|h| h.dni.max(0.0)).collect();
+    (suns, weights)
+}
+
 fn trace_field(sc: &solarcraft_scene::Scene, f: &solarcraft_scene::place::ModuleField, a: &solarcraft_model::Array,
     sun: &[spa::SolarPosition], w: &Weather, nonlinear: bool, half_cell: bool)
     -> Result<(NearShading, FieldShade, Option<solarcraft_scene::shade::SubstringTrace>), SimError>
 {
     use solarcraft_scene::shade::{shade_field, shade_field_substrings, ShadeOptions};
-    let suns: Vec<(f64, f64)> = sun.iter().map(|s| (s.apparent_elevation, s.azimuth)).collect();
-    let weights: Vec<f64> = w.hours.iter().map(|h| h.dni.max(0.0)).collect();
+    let (suns, weights) = shade_inputs(sun, w);
     let opts = ShadeOptions::default();
     let (fs, trace) = if nonlinear {
         shade_field_substrings(sc, &f.id, &suns, &weights, &opts, half_cell).map(|(summary, trace)| (summary, Some(trace)))
     } else {
         shade_field(sc, &f.id, &suns, &weights, &opts).map(|summary| (summary, None))
     }.map_err(|err| SimError(format!("Shading field {}: {err}", f.id)))?;
-    let wsum: f64 = weights.iter().sum::<f64>().max(1e-9);
-    let loss = |v: &[f32]| v.iter().zip(&weights).map(|(x, w)| (1.0 - *x as f64) * w).sum::<f64>() / wsum * 100.0;
     let obstacles = sc.objects.iter().filter(|o| !o.hidden).count();
-    let field = FieldShade { field: f.id.clone(), array_id: a.id.clone(), diffuse_factor: fs.diffuse_factor, beam_loss_pct: loss(&fs.beam_bypass), beam_area_loss_pct: loss(&fs.beam_area), traced_directions: fs.traced_directions, modules: fs.modules, nonlinear, half_cell: nonlinear && half_cell };
-    Ok((NearShading { beam_shaded: fs.beam_bypass.iter().map(|x| 1.0 - x).collect(), beam_area_shaded: fs.beam_area.iter().map(|x| 1.0 - x).collect(), diffuse_factor: fs.diffuse_factor, obstacles, scene: true, diodes: f.module.bypass_diodes }, field, trace))
+    let (near, field) = shade_summary(fs, a, &weights, obstacles, true, f.module.bypass_diodes, nonlinear, half_cell);
+    Ok((near, field, trace))
+}
+
+fn shade_summary(fs: solarcraft_scene::shade::FieldShading, array: &solarcraft_model::Array, weights: &[f64],
+    obstacles: usize, scene: bool, diodes: u32, nonlinear: bool, half_cell: bool) -> (NearShading, FieldShade)
+{
+    let wsum: f64 = weights.iter().sum::<f64>().max(1e-9);
+    let loss = |v: &[f32]| v.iter().zip(weights).map(|(x, w)| (1.0 - *x as f64) * w).sum::<f64>() / wsum * 100.0;
+    let field = FieldShade { field: fs.field, array_id: array.id.clone(), diffuse_factor: fs.diffuse_factor,
+        beam_loss_pct: loss(&fs.beam_bypass), beam_area_loss_pct: loss(&fs.beam_area), traced_directions: fs.traced_directions,
+        modules: fs.modules, nonlinear, half_cell: nonlinear && half_cell };
+    (NearShading { beam_shaded: fs.beam_bypass.iter().map(|x| 1.0 - x).collect(),
+        beam_area_shaded: fs.beam_area.iter().map(|x| 1.0 - x).collect(), diffuse_factor: fs.diffuse_factor,
+        obstacles, scene, diodes }, field)
 }

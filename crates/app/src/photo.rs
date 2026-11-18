@@ -25,6 +25,10 @@ fn read_source(path: &Path) -> Result<Source> {
     std::fs::File::open(path).map_err(photo_error)?.take(MAX_SOURCE_BYTES + 1)
         .read_to_end(&mut bytes).map_err(photo_error)?;
     if bytes.len() as u64 > MAX_SOURCE_BYTES { return Err(photo_error("Select a JPEG or PNG under 32 MiB.")); }
+    decode_source(bytes)
+}
+
+fn decode_source(bytes: Vec<u8>) -> Result<Source> {
     let mut reader = ImageReader::new(Cursor::new(&bytes)).with_guessed_format().map_err(photo_error)?;
     let mime = match reader.format() {
         Some(ImageFormat::Jpeg) => "image/jpeg",
@@ -54,9 +58,44 @@ fn png(image: RgbaImage) -> Result<Vec<u8>> {
 }
 
 pub fn source(path: &Path) -> Result<Value> {
-    let source = read_source(path)?;
+    source_preview(read_source(path)?)
+}
+
+fn source_preview(source: Source) -> Result<Value> {
     let size = source.image.dimensions();
     Ok(json!({"source_hash": source.hash, "width": size.0, "height": size.1, "png_base64": STANDARD.encode(png(source.image)?)}))
+}
+
+pub fn saved(project: &Path, index: usize) -> Result<Value> {
+    let (store, project) = open(project)?;
+    let array = project.arrays.get(index).ok_or_else(|| photo_error("The selected array does not exist."))?;
+    let photo = project.roof_photos.iter().find(|photo| photo.array_id == array.id)
+        .ok_or_else(|| photo_error("The selected array has no calibrated photograph."))?;
+    let roof = array.roof.as_ref().ok_or_else(|| photo_error("The selected array has no roof layout."))?;
+    let calibration = Calibration::new(&photo.control).map_err(photo_error)?;
+    let project_ring = |ring: &[P]| -> Option<Vec<P>> {
+        ring.iter().map(|&point| calibration.image_at(point).and_then(|p| {
+            p.iter().all(|v| (-1e-7..=1.0 + 1e-7).contains(v)).then(|| p.map(|v| v.clamp(0.0, 1.0)))
+        })).collect()
+    };
+    let trace_error = || photo_error("The current roof extends outside the stored photograph. Open a new photograph to recalibrate it.");
+    let outline = project_ring(&roof.face.outline).ok_or_else(trace_error)?;
+    let obstacles = roof.face.obstacles.iter().map(|ring| project_ring(ring)).collect::<Option<Vec<_>>>()
+        .ok_or_else(trace_error)?;
+    let mut result = source_preview(stored_source(&store, &photo.source_hash)?)?;
+    result["control"] = json!(photo.control);
+    result["outline"] = json!(outline);
+    result["obstacles"] = json!(obstacles);
+    result["obstacle_heights"] = json!(roof.face.obstacle_heights);
+    Ok(result)
+}
+
+fn stored_source(store: &solarcraft_store::Store, hash: &str) -> Result<Source> {
+    let bytes = store.get_blob(hash).map_err(photo_error)?
+        .ok_or_else(|| photo_error("The stored photograph is missing."))?;
+    let source = decode_source(bytes)?;
+    if source.hash != hash { return Err(photo_error("The stored photograph failed its integrity check.")); }
+    Ok(source)
 }
 
 #[derive(Deserialize)]
@@ -122,6 +161,14 @@ fn draw_module_edges(raster: &mut RgbaImage, roof: &RoofLayout, width: f64, dept
 }
 
 pub fn layout(project: &Path, path: &Path, opts: Options, preview: bool) -> Result<Value> {
+    layout_from(project, Some(path), opts, preview)
+}
+
+pub fn layout_saved(project: &Path, opts: Options, preview: bool) -> Result<Value> {
+    layout_from(project, None, opts, preview)
+}
+
+fn layout_from(project: &Path, path: Option<&Path>, opts: Options, preview: bool) -> Result<Value> {
     let (mut store, mut project) = open(project)?;
     let array = project.arrays.get(opts.array).ok_or_else(|| photo_error("The selected array does not exist."))?;
     let id = array.id.clone();
@@ -140,10 +187,22 @@ pub fn layout(project: &Path, path: &Path, opts: Options, preview: bool) -> Resu
         return Err(photo_error("Use up to 48 keep-out polygons with heights from 0 to 30 m."));
     }
     let obstacles = opts.obstacles.iter().map(|p| polygon(p)).collect::<Result<Vec<_>>>()?;
-    if obstacles.iter().flatten().any(|&point| !poly::point_in_ring(point, &outline)) {
+    if obstacles.iter().any(|ring| {
+        ring.iter().any(|&point| !poly::point_in_ring(point, &outline))
+            || ring.iter().zip(ring.iter().cycle().skip(1)).take(ring.len()).any(|(&a, &b)| {
+                outline.iter().zip(outline.iter().cycle().skip(1)).take(outline.len())
+                    .any(|(&c, &d)| poly::segments_intersect(a, b, c, d))
+            })
+    }) {
         return Err(photo_error("Keep-out polygons must be inside the roof."));
     }
-    let source = read_source(path)?;
+    let source = if let Some(path) = path {
+        read_source(path)?
+    } else {
+        let photo = project.roof_photos.iter().find(|photo| photo.array_id == id)
+            .ok_or_else(|| photo_error("The selected array has no calibrated photograph."))?;
+        stored_source(&store, &photo.source_hash)?
+    };
     if opts.source_hash.is_some_and(|hash| hash != source.hash) {
         return Err(photo_error("The image changed after the corner selection. Open the image again."));
     }

@@ -110,11 +110,54 @@ public sealed partial class MainWindow
         try { _cash = Api.Invoke("cash_flow", new { file = _file }); } catch { _cash = null; }
         BuildGridPanel();
         BuildElectrical();
+        BuildLoads();
         BuildStorage();
+        BuildEngineering();
         BuildSimulationPanels();
         BuildEconomics();
         BuildPreview();
         BuildScene();
+    }
+
+    private void BuildEngineering()
+    {
+        CablesPage.Children.Clear();
+        PlansPage.Children.Clear();
+        CablesPage.Children.Add(Note(T("workflow_cable_hint")));
+        var losses = _project?["losses"];
+        var dc = Num(T("workflow_dc_loss"), Api.Num(losses?["dc_wiring_pct"]));
+        var ac = Num(T("workflow_ac_loss"), Api.Num(losses?["ac_wiring_pct"]));
+        foreach (var box in new[] { dc, ac }) { box.Minimum = 0; box.Maximum = 100; }
+        CablesPage.Children.Add(Row(dc, ac));
+        CablesPage.Children.Add(Btn(T("apply"), () =>
+        {
+            if (Try(() => Api.Invoke("set_fields", new { file = _file, edits = new[] {
+                new { pointer = "/losses/dc_wiring_pct", value = dc.Value },
+                new { pointer = "/losses/ac_wiring_pct", value = ac.Value },
+            } }))) Reload();
+        }, true));
+        var schedule = Api.Invoke("design_schedule", new { file = _file });
+        var routes = Arr(schedule?["routes"]);
+        if (routes.Count > 0)
+        {
+            CablesPage.Children.Add(Table([T("photo_array"), T("workflow_string"), T("module"), T("workflow_jumper"), T("workflow_home_run")],
+                routes.Select(r => (IList<string>)new[] { S(r, "field"), S(r, "id"), F(N(r, "modules"), 0), F(N(r, "jumper_m"), 1),
+                    r?["home_run_m"] is null ? "–" : F(N(r, "home_run_m"), 1) }).ToList()));
+        }
+        else CablesPage.Children.Add(Note(T("workflow_no_routes")));
+        PlansPage.Children.Add(H(T("workflow_parts")));
+        PlansPage.Children.Add(Table([T("family"), T("model"), T("workflow_quantity")], Arr(schedule?["equipment"]).Select(row =>
+            (IList<string>)new[] { T(S(row, "kind")), S(row, "model"), F(N(row, "quantity"), 0) }).ToList()));
+        PlansPage.Children.Add(Row(Btn(T("roof"), () => Nav.SelectedItem = NavRoof),
+            Btn(T("scene3d"), () => Nav.SelectedItem = NavScene), Btn(T("workflow_presentation"), () => Nav.SelectedItem = NavReport)));
+        foreach (var array in Arr(_project?["arrays"]).Where(array => array?["roof"] is not null))
+        {
+            var canvas = new Canvas { Width = 560, Height = 245, HorizontalAlignment = HorizontalAlignment.Left };
+            var count = DrawRoof(canvas, array?["roof"]);
+            PlansPage.Children.Add(H(Api.Str(array?["name"])));
+            PlansPage.Children.Add(canvas);
+            PlansPage.Children.Add(Note($"{count} {T("modules_fit")}"));
+        }
     }
 
     private void BuildGridPanel()
@@ -291,9 +334,9 @@ public sealed partial class MainWindow
         })) { ShowInfo($"{kind} {id.Text} ✓"); Reload(); }
     }
 
-    private void BuildStorage()
+    private void BuildLoads()
     {
-        var p = StoragePage; p.Children.Clear();
+        var p = LoadsPage; p.Children.Clear();
         var l = _project!["loads"];
         var prof = l?["profile"];
         var kind = S(prof, "kind");
@@ -314,6 +357,11 @@ public sealed partial class MainWindow
             if (f is not null && Try(() => Api.Invoke("import_load", new { file = _file, source = f.Path }))) Reload();
         })));
 
+    }
+
+    private void BuildStorage()
+    {
+        var p = StoragePage; p.Children.Clear();
         var s = _project!["storage"];
         var lib = _project!["library"];
         p.Children.Add(H(T("use_battery")));
@@ -528,40 +576,96 @@ public sealed partial class MainWindow
                     r?["irr_pct"] is null ? "–" : F(N(r, "irr_pct"), 1), r?["payback_years"] is null ? "–" : F(N(r, "payback_years"), 1) }).ToList(), 12));
     }
 
+    private readonly HashSet<string> _reportExclusions = new();
+
     private void BuildPreview()
     {
         var p = PreviewPanel; p.Children.Clear();
-        p.Children.Add(H(T("report_preview")));
-        p.Children.Add(Btn(T("report_preview"), () =>
+        ExportButton.IsEnabled = _summary is not null;
+        if (_summary is null)
         {
+            _previewSections = null;
+            return;
+        }
+        var previewButton = new Button { Content = T("report_preview") };
+        previewButton.Click += async (_, _) =>
+        {
+            var file = _file;
             var lang = (LangBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "en";
-            if (Try(() => _previewSections = Arr(Api.Invoke("report_preview", new { file = _file, lang, report_type = SelectedReportType() })?["contents"]))) BuildPreview();
-        }));
-        foreach (var s in _previewSections ?? new JsonArray())
+            var designer = DesignerBox.Text;
+            var reportType = SelectedReportType();
+            previewButton.IsEnabled = false;
+            try
+            {
+                var result = await Task.Run(() => Api.Invoke("report_preview", new {
+                    file, lang, designer, report_type = reportType, include_figures = true
+                }));
+                if (file != _file || lang != ((LangBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "en") || reportType != SelectedReportType() || _summary is null) return;
+                _previewSections = Arr(result?["contents"]);
+                BuildPreview();
+            }
+            catch (Exception error) { ShowError(error.Message); }
+            finally { previewButton.IsEnabled = true; }
+        };
+        p.Children.Add(previewButton);
+        if (_previewSections is null) return;
+        p.Children.Add(H(T("report_sections")));
+        var details = new StackPanel { Spacing = 8 };
+        foreach (var section in _previewSections)
         {
-            p.Children.Add(new TextBlock { Text = S(s, "title"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
-            foreach (var block in Arr(s?["blocks"]))
+            var id = S(section, "id");
+            var label = S(section, "title");
+            var content = new StackPanel { Spacing = 6, Visibility = _reportExclusions.Contains(id) ? Visibility.Collapsed : Visibility.Visible };
+            var include = new CheckBox { Content = label, IsChecked = !_reportExclusions.Contains(id), MinHeight = 32 };
+            include.Checked += (_, _) => { _reportExclusions.Remove(id); content.Visibility = Visibility.Visible; };
+            include.Unchecked += (_, _) => { _reportExclusions.Add(id); content.Visibility = Visibility.Collapsed; };
+            p.Children.Add(include);
+            details.Children.Add(content);
+            foreach (var block in Arr(section?["blocks"]))
             {
                 switch (S(block, "kind"))
                 {
                     case "table":
-                        p.Children.Add(Table(Arr(block?["header"]).Select(h => h!.GetValue<string>()).ToList(),
+                        content.Children.Add(Table(Arr(block?["header"]).Select(h => h!.GetValue<string>()).ToList(),
                             Arr(block?["rows"]).Select(r => (IList<string>)Arr(r).Select(c => c!.GetValue<string>()).ToList()).ToList(), 12));
                         break;
                     case "text":
-                        p.Children.Add(Note(S(block, "text")));
+                        content.Children.Add(Note(S(block, "text")));
                         break;
-                    case "figure" when S(block, "caption").Length > 0:
-                        p.Children.Add(Note(S(block, "caption")));
+                    case "figure":
+                        var caption = S(block, "caption");
+                        var data = S(block, "png_base64");
+                        if (caption.Length > 0) content.Children.Add(Note(caption));
+                        if (data.Length > 0)
+                        {
+                            var image = new Image { MaxWidth = 700, MaxHeight = 320, HorizontalAlignment = HorizontalAlignment.Left, Stretch = Stretch.Uniform };
+                            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(image, caption.Length > 0 ? caption : label);
+                            content.Children.Add(image);
+                            _ = LoadPreviewFigure(image, data);
+                        }
                         break;
                 }
             }
         }
+        p.Children.Add(details);
+    }
+
+    private async Task LoadPreviewFigure(Image image, string data)
+    {
+        try { image.Source = await PhotoBitmap(data); }
+        catch (Exception error) { ShowError(error.Message); }
     }
 
     private string SelectedReportType() => (ReportTypeBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "customer_extended";
 
     private void OnReportTypeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _previewSections = null;
+        _reportExclusions?.Clear();
+        if (PreviewPanel is not null) BuildPreview();
+    }
+
+    private void OnReportLanguageChanged(object sender, SelectionChangedEventArgs e)
     {
         _previewSections = null;
         if (PreviewPanel is not null) BuildPreview();
@@ -579,16 +683,16 @@ public sealed partial class MainWindow
             Open(file);
             _dayRows = Arr(Api.Invoke("results_hours", new { file, day_of_year = 172 })?["hours"]);
             _compareRows = Arr(Api.Invoke("compare_variants", new { file })?["variants"]);
-            _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en", report_type = SelectedReportType() })?["contents"]);
+            _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en", report_type = SelectedReportType(), include_figures = true })?["contents"]);
             BuildPlantPages();
-            var items = new[] { NavProject, NavSite, NavDesign, NavRoof, NavScene, NavElectrical, NavStorage, NavResults, NavEconomics, NavReport };
+            var items = Steps;
             for (int i = 0; i < items.Length; i++)
             {
                 Nav.SelectedItem = items[i];
                 await Task.Delay(600);
-                PageHost.UpdateLayout();
+                Content.UpdateLayout();
                 var rtb = new RenderTargetBitmap();
-                await rtb.RenderAsync(PageHost);
+                await rtb.RenderAsync(Content);
                 var pixels = await rtb.GetPixelsAsync();
                 var path = IOPath.Combine(dir, $"{i + 1:00}-{items[i].Tag}.png");
                 using (var fs = File.Create(path))

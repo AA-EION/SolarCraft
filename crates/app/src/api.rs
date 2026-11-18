@@ -24,13 +24,20 @@ fn f(p: &Value, k: &str) -> Result<f64, AppError> {
     arg(p, k)?.as_f64().ok_or_else(|| AppError { code: "INVALID_ARGUMENT", message: format!("'{k}' must be a number") })
 }
 fn path(p: &Value, k: &str) -> Result<PathBuf, AppError> { Ok(PathBuf::from(s(p, k)?)) }
+fn exclude_sections(params: &Value) -> app::Result<Vec<String>> {
+    match params.get("exclude_sections") {
+        None => Ok(vec![]),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|e| bad(format!("exclude_sections: {e}"))),
+    }
+}
+
 fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Value::Null) }
 
 pub const METHODS: &[&str] = &[
     "scene_get", "scene_edit", "scene_place_roof", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
-    "use_demo_weather", "set_roof", "photo_source", "photo_layout", "add_module", "simulate", "explain", "export_report", "undo", "history",
-    "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
+    "use_demo_weather", "set_roof", "photo_source", "photo_saved", "photo_layout", "add_module", "simulate", "explain", "export_report", "undo", "history",
+    "design_schedule", "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
     "report_preview", "catalog_audit", "catalog_import", "catalog_search", "catalog_details", "catalog_history", "catalog_pin", "catalog_apply_tariff", "catalog_coverage", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import", "library_import_workbook", "library_count",
 ];
@@ -96,9 +103,16 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         }
         "use_demo_weather" => Ok(v(&app::use_demo_weather(&path(params, "file")?)?)),
         "photo_source" => app::photo::source(&path(params, "source")?),
+        "photo_saved" => app::photo::saved(&path(params, "file")?,
+            params.get("array").and_then(Value::as_u64).unwrap_or(0) as usize),
         "photo_layout" => {
             let options = serde_json::from_value(arg(params, "options")?.clone()).map_err(|error| app::e("INVALID_ARGUMENT", error))?;
-            app::photo::layout(&path(params, "file")?, &path(params, "source")?, options, params.get("preview").and_then(Value::as_bool).unwrap_or(true))
+            let file = path(params, "file")?;
+            let preview = params.get("preview").and_then(Value::as_bool).unwrap_or(true);
+            match params.get("source") {
+                None | Some(Value::Null) => app::photo::layout_saved(&file, options, preview),
+                Some(_) => app::photo::layout(&file, &path(params, "source")?, options, preview),
+            }
         }
         "add_module" => {
             let m: app::ModuleInput = serde_json::from_value(arg(params, "module")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("module: {e}") })?;
@@ -108,6 +122,15 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "results_summary" => match app::latest_results(&path(params, "file")?)? { Some(r) => Ok(summary(&r)), None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }) },
         "results_hours" => app::plant_ops::results_hours(&path(params, "file")?, params),
         "cash_flow" => match app::latest_results(&path(params, "file")?)? { Some(r) => Ok(v(&r.finance)), None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }) },
+        "design_schedule" => {
+            let project = app::get_project(&path(params, "file")?)?;
+            let routes: Vec<_> = project.scene.as_ref().into_iter().flat_map(|scene| &scene.fields).flat_map(|field| {
+                field.strings.iter().map(move |route| json!({"field": field.name, "id": route.id,
+                    "modules": route.modules.len(), "jumper_m": route.jumper_m,
+                    "home_run_m": field.inverter_at.map(|_| route.home_run_m)}))
+            }).collect();
+            Ok(json!({"equipment": solarcraft_model::derive::equipment_counts(&project), "routes": routes}))
+        }
         "set_section" => {
             let sec = s(params, "section")?;
             if !SECTIONS.contains(&sec.as_str()) { return Err(bad(format!("section must be one of {}", SECTIONS.join(", ")))); }
@@ -149,7 +172,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let fmt: ReportFormat = serde_json::from_value(arg(params, "format")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("format: {e}") })?;
             let lang = params.get("lang").and_then(Value::as_str).unwrap_or("en");
             let designer = params.get("designer").and_then(Value::as_str).unwrap_or("");
-            Ok(v(&app::generate_report_for(&path(params, "file")?, &path(params, "output")?, fmt, lang, designer, report_type(params)?)?))
+            Ok(v(&app::generate_report_selected(&path(params, "file")?, &path(params, "output")?, fmt, lang, designer, report_type(params)?, &exclude_sections(params)?)?))
         }
         "catalog_audit" => app::catalog_ops::audit(&path(params, "source")?),
         "catalog_import" => app::catalog_ops::import(&path(params, "source")?, &cat_path(params)),
@@ -162,8 +185,22 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             app::catalog_ops::apply_tariff(&cat_path(params), &path(params, "file")?, i.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)), x.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)))
         }
         "catalog_coverage" => app::catalog_ops::coverage(&path(params, "tsv")?, params.get("catalog").and_then(Value::as_str).map(std::path::Path::new), params.get("output").and_then(Value::as_str).map(std::path::Path::new)),
-        "report_preview" => Ok(v(&app::report_view_for(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"),
-            report_type(params)?, params.get("designer").and_then(Value::as_str).unwrap_or(""))?)),
+        "report_preview" => {
+            let view = app::report_view_selected(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"),
+                report_type(params)?, params.get("designer").and_then(Value::as_str).unwrap_or(""), &exclude_sections(params)?)?;
+            let mut preview = v(&view);
+            if params.get("include_figures").and_then(Value::as_bool).unwrap_or(false) {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+                for block in preview["contents"].as_array_mut().into_iter().flatten()
+                    .flat_map(|section| section["blocks"].as_array_mut().into_iter().flatten()) {
+                    if let Some(index) = block["index"].as_u64() {
+                        let png = solarcraft_report::figure_png(&view, index as usize).map_err(|error| app::e("REPORT", error))?;
+                        block["png_base64"] = json!(STANDARD.encode(png));
+                    }
+                }
+            }
+            Ok(preview)
+        }
         "scene_get" => app::scene_ops::get(&path(params, "file")?),
         "scene_edit" => app::scene_ops::edit(&path(params, "file")?, arg(params, "edits")?, params.get("preview").and_then(Value::as_bool).unwrap_or(false)),
         "scene_place_roof" => app::scene_ops::place_roof(&path(params, "file")?, &s(params, "face")?),

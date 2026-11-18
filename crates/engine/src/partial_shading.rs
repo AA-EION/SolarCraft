@@ -26,16 +26,7 @@ impl ModuleCurve {
 pub(crate) fn routes(field: &ModuleField, module: &ModuleSpec, electrical: &Electrical, array: &str)
     -> Result<BTreeMap<u32, Vec<Vec<usize>>>, &'static str>
 {
-    if module.unverified.get("standardCellConnection").and_then(|v| v.as_bool()) == Some(false) {
-        return Err("the module has nonstandard cell wiring");
-    }
-    let diodes = field.module.bypass_diodes;
-    if diodes == 0 || module.bypass_diodes.is_some_and(|specified| specified != diodes) {
-        return Err("the placed module's bypass configuration differs from the selected module");
-    }
-    if module.half_cell && diodes != 3 {
-        return Err("the half-cell module does not have three shared bypass diodes");
-    }
+    check_wiring(module, field.module.bypass_diodes)?;
     let by_id: HashMap<_, _> = field.modules.iter().enumerate().map(|(i, m)| (m.id.as_str(), i)).collect();
     let mut assigned = HashSet::new();
     let mut routes = BTreeMap::<u32, Vec<Vec<usize>>>::new();
@@ -52,14 +43,52 @@ pub(crate) fn routes(field: &ModuleField, module: &ModuleSpec, electrical: &Elec
     if assigned.len() != field.modules.len() {
         return Err("the placed field has unrouted modules");
     }
-    let mut expected = BTreeMap::new();
-    for group in electrical.inverters.iter().flat_map(|unit| unit.mppts.iter().flatten()).filter(|g| g.array_id == array) {
-        *expected.entry(group.modules_per_string).or_insert(0usize) += group.strings as usize;
-    }
+    let expected = string_counts(electrical, array);
     if expected != routes.iter().map(|(length, strings)| (*length, strings.len())).collect() {
         return Err("the scene routes do not match the electrical stringing");
     }
     Ok(routes)
+}
+
+fn check_wiring(module: &ModuleSpec, diodes: u32) -> Result<(), &'static str> {
+    if module.unverified.get("standardCellConnection").and_then(|v| v.as_bool()) == Some(false) {
+        return Err("the module has nonstandard cell wiring");
+    }
+    if !(1..=12).contains(&diodes) || module.bypass_diodes.is_some_and(|specified| specified != diodes) {
+        return Err("the placed module's bypass configuration is unsupported or differs from the selected module");
+    }
+    if module.half_cell && diodes != 3 {
+        return Err("the half-cell module does not have three shared bypass diodes");
+    }
+    Ok(())
+}
+
+fn string_counts(electrical: &Electrical, array: &str) -> BTreeMap<u32, usize> {
+    let mut counts = BTreeMap::new();
+    for group in electrical.inverters.iter().flat_map(|unit| unit.mppts.iter().flatten()).filter(|g| g.array_id == array) {
+        *counts.entry(group.modules_per_string).or_insert(0) += group.strings as usize;
+    }
+    counts
+}
+
+pub(crate) fn roof_routes(module: &ModuleSpec, electrical: &Electrical, array: &str, count: usize)
+    -> Result<BTreeMap<u32, Vec<Vec<usize>>>, &'static str>
+{
+    check_wiring(module, module.bypass_diodes.unwrap_or(3))?;
+    let lengths = string_counts(electrical, array);
+    if lengths.iter().map(|(length, number)| *length as usize * *number).sum::<usize>() > count || lengths.contains_key(&0) {
+        return Err("the roof does not contain enough module positions for the electrical stringing");
+    }
+    let mut next = 0;
+    Ok(lengths.into_iter().map(|(length, count)| {
+        let strings = (0..count).map(|_| {
+            let end = next + length as usize;
+            let ids = (next..end).collect();
+            next = end;
+            ids
+        }).collect();
+        (length, strings)
+    }).collect())
 }
 
 #[derive(Default, Clone, Copy)]

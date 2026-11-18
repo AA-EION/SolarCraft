@@ -15,23 +15,73 @@
       <ProgressBar x:Name="Progress" Maximum="1" Visibility="Collapsed" />
       <InfoBar x:Name="Info" IsOpen="False" />
     </StackPanel>
-    <NavigationView x:Name="Nav" Grid.Row="2" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" SelectionChanged="OnNavigate" IsEnabled="False">
+    <NavigationView x:Name="Nav" Grid.Row="2" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" SelectionChanged="OnNavigate" IsEnabled="False" Visibility="Collapsed">
+      <NavigationView.Resources>
+        <ResourceDictionary>
+          <ResourceDictionary.ThemeDictionaries>
+            <ResourceDictionary x:Key="Default">
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#244348" />
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#2F5157" />
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="#233D42" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#F1FAF9" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#F1FAF9" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#F1FAF9" />
+              <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#78D5CA" />
+            </ResourceDictionary>
+            <ResourceDictionary x:Key="Light">
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#DDEDEB" />
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#CEE6E3" />
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="#BBDBD7" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#163439" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#163439" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#163439" />
+              <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#286A65" />
+            </ResourceDictionary>
+            <ResourceDictionary x:Key="HighContrast">
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="{ThemeResource SystemColorHighlightColor}" />
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="{ThemeResource SystemColorHighlightColor}" />
+              <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="{ThemeResource SystemColorHighlightColor}" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="{ThemeResource SystemColorHighlightTextColor}" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="{ThemeResource SystemColorHighlightTextColor}" />
+              <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="{ThemeResource SystemColorHighlightTextColor}" />
+              <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="{ThemeResource SystemColorHighlightTextColor}" />
+            </ResourceDictionary>
+          </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
+      </NavigationView.Resources>
       <NavigationView.MenuItems>
+        <NavigationViewItemHeader x:Name="NavSetup" />
         <NavigationViewItem x:Name="NavProject" Tag="project" Icon="Document" />
         <NavigationViewItem x:Name="NavSite" Tag="site" Icon="World" />
+        <NavigationViewItem x:Name="NavLoads" Tag="loads" Icon="Calculator" />
+        <NavigationViewItemHeader x:Name="NavSystem" />
         <NavigationViewItem x:Name="NavDesign" Tag="design" Icon="ViewAll" />
         <NavigationViewItem x:Name="NavRoof" Tag="roof" Icon="Home" />
         <NavigationViewItem x:Name="NavScene" Tag="scene" Icon="Globe" />
         <NavigationViewItem x:Name="NavElectrical" Tag="electrical" Icon="Switch" />
         <NavigationViewItem x:Name="NavStorage" Tag="storage" Icon="Shuffle" />
-        <NavigationViewItem x:Name="NavResults" Tag="results" Icon="Calculator" />
+        <NavigationViewItem x:Name="NavCables" Tag="cables" Icon="Link" />
+        <NavigationViewItem x:Name="NavPlans" Tag="plans" Icon="List" />
+        <NavigationViewItemHeader x:Name="NavOutput" />
         <NavigationViewItem x:Name="NavEconomics" Tag="economics" Icon="Shop" />
+        <NavigationViewItem x:Name="NavResults" Tag="results" Icon="Play" />
         <NavigationViewItem x:Name="NavReport" Tag="report" Icon="Print" />
       </NavigationView.MenuItems>
-      <ScrollViewer>
+      <NavigationView.Header>
+        <Grid ColumnSpacing="12">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+          <StackPanel Spacing="4">
+            <TextBlock x:Name="StepTitle" Style="{StaticResource TitleTextBlockStyle}" TextWrapping="Wrap" />
+            <TextBlock x:Name="StepStatus" TextWrapping="Wrap" />
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top">
+            <Button x:Name="StepBack" Click="OnStepBack" />
+            <Button x:Name="StepNext" Click="OnStepNext" />
+          </StackPanel>
+        </Grid>
+      </NavigationView.Header>
+      <ScrollViewer x:Name="PageScroll" HorizontalScrollMode="Auto" HorizontalScrollBarVisibility="Auto">
         <Grid x:Name="PageHost" Padding="24" MaxWidth="1100" HorizontalAlignment="Left">
-          <TextBlock x:Name="EmptyText" Style="{StaticResource SubtitleTextBlockStyle}" />
-
           <StackPanel x:Name="ProjectPage" Spacing="10" Visibility="Collapsed">
             <TextBox x:Name="NameBox" Width="360" HorizontalAlignment="Left" LostFocus="OnTextCommit" Tag="/name" />
             <TextBox x:Name="CustomerBox" Width="360" HorizontalAlignment="Left" LostFocus="OnTextCommit" Tag="/customer/name" />
@@ -56,10 +106,16 @@
 
           <StackPanel x:Name="ScenePage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="ElectricalPage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="LoadsPage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="StoragePage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="CablesPage" Spacing="10" Visibility="Collapsed" />
+          <StackPanel x:Name="PlansPage" Spacing="10" Visibility="Collapsed" />
           <StackPanel x:Name="EconomicsPage" Spacing="10" Visibility="Collapsed" />
 
           <StackPanel x:Name="DesignPage" Spacing="10" Visibility="Collapsed">
+            <ComboBox x:Name="DesignArrayBox" Width="300" SelectionChanged="OnDesignArray" />
+            <ComboBox x:Name="ModuleBox" Width="340" SelectionChanged="OnDesignModule" />
+            <ComboBox x:Name="InverterBox" Width="340" SelectionChanged="OnDesignInverter" />
             <RadioButtons x:Name="ModeRadios" SelectionChanged="OnMode" MaxColumns="2">
               <RadioButton x:Name="EasyRadio" />
               <RadioButton x:Name="DetailedRadio" />
@@ -78,7 +134,11 @@
           </StackPanel>
 
           <StackPanel x:Name="RoofPage" Spacing="10" Visibility="Collapsed">
-            <Button x:Name="PhotoPlanButton" Click="OnPhotoPlan" />
+            <ComboBox x:Name="PhotoArrayBox" Width="300" SelectionChanged="OnPhotoArray" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button x:Name="PhotoPlanButton" Click="OnPhotoPlan" />
+              <Button x:Name="SavedPhotoButton" Click="OnSavedPhoto" Visibility="Collapsed" />
+            </StackPanel>
             <ComboBox x:Name="RoofShapeBox" Width="260" SelectedIndex="0" SelectionChanged="OnRoofShape" />
             <NumberBox x:Name="EaveBox" Width="220" HorizontalAlignment="Left" Value="10" />
             <NumberBox x:Name="RidgeBox" Width="220" HorizontalAlignment="Left" Value="6" Visibility="Collapsed" />
@@ -104,7 +164,11 @@
           </StackPanel>
 
           <StackPanel x:Name="ResultsPage" Spacing="14" Visibility="Collapsed">
-            <TextBlock x:Name="NoResults" Opacity="0.7" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button x:Name="RunResultsButton" Style="{StaticResource AccentButtonStyle}" Click="OnSimulate" />
+              <Button x:Name="ResultsClimateButton" Click="OnResultsClimate" Visibility="Collapsed" />
+            </StackPanel>
+            <TextBlock x:Name="NoResults" Opacity="0.7" TextWrapping="Wrap" />
             <StackPanel x:Name="PlantResults" Spacing="12" />
             <StackPanel x:Name="Kpis" Orientation="Horizontal" Spacing="12" />
             <TextBlock x:Name="MonthlyHeader" Style="{StaticResource SubtitleTextBlockStyle}" />
@@ -121,7 +185,7 @@
               <ComboBoxItem Tag="customer_extended" />
               <ComboBoxItem Tag="system_planner" />
             </ComboBox>
-            <ComboBox x:Name="LangBox" Width="220">
+            <ComboBox x:Name="LangBox" Width="220" SelectionChanged="OnReportLanguageChanged">
               <ComboBoxItem Content="English" Tag="en" />
               <ComboBoxItem Content="Español" Tag="es" />
               <ComboBoxItem Content="Deutsch" Tag="de" />
@@ -138,5 +202,13 @@
         </Grid>
       </ScrollViewer>
     </NavigationView>
+    <StackPanel x:Name="WelcomePage" Grid.Row="2" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center">
+      <TextBlock x:Name="WelcomeTitle" Style="{StaticResource TitleTextBlockStyle}" TextAlignment="Center" />
+      <TextBlock x:Name="EmptyText" TextWrapping="Wrap" TextAlignment="Center" />
+      <StackPanel Spacing="8" Orientation="Horizontal" HorizontalAlignment="Center">
+        <Button x:Name="WelcomeNew" Click="OnNew" Style="{StaticResource AccentButtonStyle}" />
+        <Button x:Name="WelcomeOpen" Click="OnOpen" />
+      </StackPanel>
+    </StackPanel>
   </Grid>
 </Window>

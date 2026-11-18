@@ -87,6 +87,12 @@ pub struct View {
     pub(crate) figures: Vec<String>,
 }
 
+/// Rasterize a preview at its designed on-screen dimensions.
+pub fn figure_png(view: &View, index: usize) -> Result<Vec<u8>, String> {
+    let svg = view.figures.get(index).ok_or("missing report figure")?;
+    docx::svg_to_png(svg, 1.0).map(|(data, _, _)| data)
+}
+
 pub fn build_view(inp: &ReportInput) -> View {
     build_view_for(inp, ReportType::default())
 }

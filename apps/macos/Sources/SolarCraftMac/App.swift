@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import AppKit
 import Charts
 import SwiftUI
 
@@ -33,49 +34,105 @@ struct SolarCraftApp: App {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case project, site_climate, design, scene3d, electrical, storage_loads, simulation, economics, plans_reports
+    case project, workflow_site, loads, workflow_pv_modules, roof, scene3d, electrical, battery, workflow_cables, workflow_plans, economics, workflow_results, workflow_presentation
     var id: String { rawValue }
     var icon: String {
         switch self {
         case .project: return "doc.text"
-        case .site_climate: return "sun.max"
-        case .design: return "house"
+        case .workflow_site: return "sun.max"
+        case .loads: return "bolt.circle"
+        case .workflow_pv_modules: return "rectangle.split.2x2"
+        case .roof: return "house"
         case .scene3d: return "cube"
         case .electrical: return "bolt"
-        case .storage_loads: return "battery.75percent"
-        case .simulation: return "chart.bar"
+        case .battery: return "battery.75percent"
+        case .workflow_cables: return "point.bottomleft.forward.to.point.topright.scurvepath"
+        case .workflow_plans: return "list.bullet.rectangle"
         case .economics: return "banknote"
-        case .plans_reports: return "doc.richtext"
+        case .workflow_results: return "chart.bar"
+        case .workflow_presentation: return "doc.richtext"
         }
     }
+    static let groups: [(String, [Page])] = [
+        ("workflow_setup", [.project, .workflow_site, .loads]),
+        ("workflow_system", [.workflow_pv_modules, .roof, .scene3d, .electrical, .battery, .workflow_cables, .workflow_plans]),
+        ("workflow_output", [.economics, .workflow_results, .workflow_presentation]),
+    ]
 }
 
 struct RootView: View {
     @EnvironmentObject var m: AppModel
     @State private var page: Page? = .project
+    private var canSimulate: Bool {
+        m.project?.weather != nil && !m.busy && !m.issues.contains { $0.severity == "error" }
+    }
     var body: some View {
         NavigationSplitView {
-            List(Page.allCases, selection: $page) { p in Label(m.t(p.rawValue), systemImage: p.icon).tag(p) }
-                .disabled(m.project == nil)
-                .navigationSplitViewColumnWidth(190)
+            List(selection: $page) {
+                ForEach(Page.groups.indices, id: \.self) { index in
+                    let (group, pages) = Page.groups[index]
+                    Section(m.t(group)) {
+                        ForEach(pages) { p in Label(m.t(p.rawValue), systemImage: p.icon).tag(p) }
+                    }
+                }
+            }.disabled(m.project == nil || m.busy).navigationSplitViewColumnWidth(220)
         } detail: {
             VStack(spacing: 0) {
                 if let e = m.error { Text(e).foregroundStyle(.white).padding(8).frame(maxWidth: .infinity).background(.red.opacity(0.85)) }
                 if let n = m.notice { Text(n).padding(6).frame(maxWidth: .infinity).background(.green.opacity(0.15)) }
                 if m.project == nil {
                     VStack(spacing: 12) {
-                        Text(m.t("no_project")).font(.title3)
-                        HStack { Button(m.t("new_project")) { m.newProject() }; Button(m.t("open_project")) { m.openProject() } }
+                        Text(m.t("workflow_welcome")).font(.title2.bold())
+                        Text(m.t("workflow_welcome_hint")).foregroundStyle(.secondary)
+                        HStack {
+                            Button(m.t("new_project")) { m.newProject() }.buttonStyle(.borderedProminent)
+                            Button(m.t("open_project")) { m.openProject() }
+                        }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
+                    let current = page ?? .project
+                    let index = Page.allCases.firstIndex(of: current) ?? 0
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(m.t(current.rawValue)).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                            if current == .workflow_presentation && m.summary == nil {
+                                Text(m.t("workflow_needs_results")).foregroundStyle(.secondary)
+                            } else if current == .workflow_results && m.project?.weather == nil {
+                                Text(m.t("no_weather")).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if index > 0 {
+                            Button(m.t("workflow_back")) { page = Page.allCases[index - 1] }
+                        }
+                        if index + 1 < Page.allCases.count {
+                            Button(m.t("workflow_next")) { page = Page.allCases[index + 1] }
+                                .disabled(current == .workflow_results && m.summary == nil)
+                        }
+                    }.padding(.horizontal, 20).padding(.vertical, 10).disabled(m.busy)
+                    Divider()
                     ScrollView {
-                        PageView(page: page ?? .project).id(page).padding(20).frame(maxWidth: 980, alignment: .leading)
-                    }
+                        VStack(alignment: .leading, spacing: 14) {
+                            if current == .workflow_results {
+                                if m.project?.weather == nil {
+                                    Button(m.t("workflow_site")) { page = .workflow_site }
+                                } else {
+                                    Button(m.t("simulate")) { m.simulate() }.buttonStyle(.borderedProminent).disabled(!canSimulate)
+                                    IssueList(issues: m.issues.filter { $0.severity == "error" }.map {
+                                        ["severity": $0.severity, "message": $0.message]
+                                    })
+                                }
+                            }
+                            PageView(page: current).id(current)
+                        }.padding(20).frame(maxWidth: 980, alignment: .leading)
+                    }.disabled(m.busy)
                 }
             }
+            .onChange(of: m.completedRuns) { _, _ in page = .workflow_results }
+            .onChange(of: m.url) { _, _ in page = .project }
             .toolbar {
                 if m.busy { ProgressView(value: m.progress).frame(width: 120); Button(m.t("cancel")) { m.cancel() } }
-                Button { m.simulate() } label: { Label(m.t("simulate"), systemImage: "play.fill") }.disabled(m.project == nil || m.busy)
+                Button { m.simulate() } label: { Label(m.t("simulate"), systemImage: "play.fill") }.disabled(!canSimulate)
             }
         }
     }
@@ -83,17 +140,22 @@ struct RootView: View {
 
 struct PageView: View {
     let page: Page
+    var includeReportPreview = false
     @ViewBuilder var body: some View {
         switch page {
         case .project: ProjectPage()
-        case .site_climate: SiteClimatePage()
-        case .design: VStack(alignment: .leading, spacing: 18) { DesignPage(); RoofPage() }
+        case .workflow_site: SiteClimatePage()
+        case .loads: StorageLoadsPage(consumptionOnly: true)
+        case .workflow_pv_modules: DesignPage()
+        case .roof: RoofPage()
         case .scene3d: ScenePage()
         case .electrical: ElectricalPage()
-        case .storage_loads: StorageLoadsPage()
-        case .simulation: SimulationPage()
+        case .battery: StorageLoadsPage(consumptionOnly: false)
+        case .workflow_cables: CablesPage()
+        case .workflow_plans: EngineeringPlansPage()
+        case .workflow_results: SimulationPage()
         case .economics: EconomicsPage()
-        case .plans_reports: PlansReportsPage()
+        case .workflow_presentation: ReportPage(includePreview: includeReportPreview)
         }
     }
 }
@@ -183,16 +245,29 @@ struct SitePage: View {
 
 struct DesignPage: View {
     @EnvironmentObject var m: AppModel
+    @State private var selectedArray = 0
     var body: some View {
-        if let p = m.project, let a = p.arrays.first {
+        if let p = m.project, !p.arrays.isEmpty {
+            let index = min(selectedArray, p.arrays.count - 1)
+            let a = p.arrays[index]
+            let arrayPath = "/arrays/\(index)"
             Form {
+                Picker(m.t("photo_array"), selection: $selectedArray) {
+                    ForEach(p.arrays.indices, id: \.self) { n in Text(p.arrays[n].name.value).tag(n) }
+                }
+                Picker(m.t("module"), selection: Binding(get: { a.module_id.value }, set: { m.set(arrayPath + "/module_id", $0) })) {
+                    ForEach(p.library.modules, id: \.id) { Text("\($0.manufacturer) \($0.model)").tag($0.id) }
+                }
+                Picker(m.t("inverter"), selection: Binding(get: { a.inverter_id.value }, set: { m.set(arrayPath + "/inverter_id", $0) })) {
+                    ForEach(p.library.inverters, id: \.id) { Text("\($0.manufacturer) \($0.model)").tag($0.id) }
+                }.disabled(m.stringingDoc?["manual"] as? Bool == true)
                 Picker(m.t("mode"), selection: Binding(get: { p.mode }, set: { m.setMode($0) })) {
                     Text(m.t("easy")).tag("easy"); Text(m.t("detailed")).tag("detailed")
                 }.pickerStyle(.segmented)
                 Text(m.t("mode_hint")).font(.caption).foregroundStyle(.secondary)
-                NumberRow(label: m.t("target_kwp"), field: a.target_kwp, pointer: "/arrays/0/target_kwp")
-                NumberRow(label: m.t("tilt"), field: a.tilt, pointer: "/arrays/0/tilt")
-                NumberRow(label: m.t("azimuth"), field: a.azimuth, pointer: "/arrays/0/azimuth")
+                NumberRow(label: m.t("target_kwp"), field: a.target_kwp, pointer: arrayPath + "/target_kwp").id(arrayPath + "/target_kwp")
+                NumberRow(label: m.t("tilt"), field: a.tilt, pointer: arrayPath + "/tilt").id(arrayPath + "/tilt")
+                NumberRow(label: m.t("azimuth"), field: a.azimuth, pointer: arrayPath + "/azimuth").id(arrayPath + "/azimuth")
                 Picker(m.t("mounting"), selection: Binding(get: { p.simulation.mounting.value }, set: { m.set("/simulation/mounting", $0) })) {
                     Text(m.t("open_rack")).tag("open_rack"); Text(m.t("roof_mounted")).tag("roof_mounted"); Text(m.t("integrated")).tag("integrated")
                 }
@@ -201,13 +276,11 @@ struct DesignPage: View {
                     Text(m.t("two_diode")).tag("two_diode")
                 }
                 if p.mode == "detailed" {
-                    IntRow(label: m.t("modules_per_string"), field: a.modules_per_string, pointer: "/arrays/0/modules_per_string")
-                    IntRow(label: m.t("strings"), field: a.strings, pointer: "/arrays/0/strings")
+                    IntRow(label: m.t("modules_per_string"), field: a.modules_per_string, pointer: arrayPath + "/modules_per_string").id(arrayPath + "/modules_per_string")
+                    IntRow(label: m.t("strings"), field: a.strings, pointer: arrayPath + "/strings").id(arrayPath + "/strings")
                 } else {
                     LabeledContent(m.t("strings")) { Text("\(a.strings.value) × \(a.modules_per_string.value)").monospacedDigit() }
                 }
-                LabeledContent(m.t("module")) { Text(p.library.modules.first { $0.id == a.module_id.value }.map { "\($0.manufacturer) \($0.model)" } ?? a.module_id.value) }
-                LabeledContent(m.t("inverter")) { Text(p.library.inverters.first { $0.id == a.inverter_id.value }.map { "\(a.inverter_count.value) × \($0.manufacturer) \($0.model)" } ?? "—") }
                 Section(m.t("issues")) {
                     if m.issues.isEmpty { Text(m.t("no_issues")).foregroundStyle(.secondary) }
                     ForEach(m.issues) { i in
@@ -273,11 +346,13 @@ struct ResultsPage: View {
 
 struct ReportPage: View {
     @EnvironmentObject var m: AppModel
+    var includePreview = false
     @State private var lang = String((Locale.preferredLanguages.first ?? "en").prefix(2))
     @State private var format = "pdf"
     @State private var reportType = "customer_extended"
     @State private var designer = ""
-    @State private var contents: [String] = []
+    @State private var contents: [JSONDict] = []
+    @State private var excluded: Set<String> = []
     var body: some View {
         Form {
             Picker(m.t("report_type"), selection: $reportType) {
@@ -288,17 +363,52 @@ struct ReportPage: View {
             Picker(m.t("language"), selection: $lang) { Text("English").tag("en"); Text("Español").tag("es"); Text("Deutsch").tag("de"); Text("Português (BR)").tag("pt") }
             Picker(m.t("format"), selection: $format) { Text("PDF").tag("pdf"); Text("DOCX").tag("docx") }.pickerStyle(.segmented)
             TextField(m.t("designer"), text: $designer)
-            Button(m.t("export_report")) { m.exportReport(lang: lang, format: format, designer: designer, reportType: reportType) }.disabled(m.results == nil)
-            if m.results == nil {
-                Text(m.t("no_results")).foregroundStyle(.secondary)
-            } else {
-                Button(m.t("report_preview")) { contents = m.reportContents(lang: lang, reportType: reportType) }
-                ForEach(contents.indices, id: \.self) { index in Text(contents[index]) }
+            Button(m.t("export_report")) {
+                m.exportReport(lang: lang, format: format, designer: designer, reportType: reportType, excludeSections: excluded.sorted())
+            }.disabled(m.results == nil)
+            if m.results != nil {
+                Button(m.t("report_preview")) { contents = m.reportContents(lang: lang, reportType: reportType, designer: designer) }
+                if !contents.isEmpty {
+                    Section(m.t("report_sections")) {
+                        ForEach(contents.indices, id: \.self) { index in
+                            let section = contents[index]
+                            let id = str(section, "id")
+                            Toggle(str(section, "title"), isOn: Binding(get: { !excluded.contains(id) }, set: { include in
+                                if include { excluded.remove(id) } else { excluded.insert(id) }
+                            }))
+                            if !excluded.contains(id) {
+                                let blocks = dicts(section["blocks"])
+                                ForEach(blocks.indices, id: \.self) { i in
+                                    let block = blocks[i]
+                                    if str(block, "kind") == "table" {
+                                        ScrollView(.horizontal) {
+                                            SimpleTable(header: block["header"] as? [String] ?? [],
+                                                        rows: Array((block["rows"] as? [[String]] ?? []).prefix(12))).font(.caption)
+                                        }
+                                    } else {
+                                        let text = str(block, "kind") == "text" ? str(block, "text") : str(block, "caption")
+                                        if !text.isEmpty { Text(text).foregroundStyle(.secondary) }
+                                        if let bytes = Data(base64Encoded: str(block, "png_base64")), let picture = NSImage(data: bytes) {
+                                            Image(nsImage: picture).resizable().scaledToFit().frame(maxWidth: 700, maxHeight: 320)
+                                                .accessibilityLabel(text.isEmpty ? str(section, "title") : text)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        .onChange(of: reportType) { contents.removeAll() }
+        .onAppear {
+            if includePreview && m.results != nil {
+                contents = m.reportContents(lang: lang, reportType: reportType, designer: designer)
+            }
+        }
+        .onChange(of: reportType) { contents.removeAll(); excluded.removeAll() }
         .onChange(of: lang) { contents.removeAll() }
-        .onChange(of: m.url) { contents.removeAll() }
+        .onChange(of: m.url) { contents.removeAll(); excluded.removeAll() }
+        .onChange(of: m.results == nil) { _, empty in if empty { contents.removeAll() } }
     }
 }
 

@@ -140,3 +140,49 @@ pub fn modules_by_array(e: &crate::plant::Electrical) -> std::collections::BTree
     for u in &e.inverters { for g in u.mppts.iter().flatten() { *m.entry(g.array_id.clone()).or_insert(0) += g.modules_per_string * g.strings; } }
     m
 }
+
+
+/// Equipment attached to the design. Routing, mounting and protection materials
+/// require their own specifications and are not inferred here.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EquipmentCount {
+    pub kind: &'static str,
+    pub model: String,
+    pub quantity: u32,
+}
+
+pub fn equipment_counts(project: &Project) -> Vec<EquipmentCount> {
+    let electrical = electrical(project);
+    let assigned = modules_by_array(&electrical);
+    let mut counts = std::collections::BTreeMap::new();
+    let mut add = |kind, id: &str, make: &str, model: &str, quantity| {
+        let row = counts.entry((kind, id.to_string())).or_insert_with(|| EquipmentCount {
+            kind, model: format!("{make} {model}"), quantity: 0,
+        });
+        row.quantity += quantity;
+    };
+    for array in &project.arrays {
+        if let (Some(&quantity), Some(device)) = (assigned.get(&array.id), project.library.module(&array.module_id.value)) {
+            add("module", &device.id, &device.manufacturer, &device.model, quantity);
+        }
+    }
+    for unit in &electrical.inverters {
+        if let Some(device) = project.library.inverter(&unit.inverter_id) {
+            add("inverter", &device.id, &device.manufacturer, &device.model, 1);
+        }
+    }
+    if let Some(storage) = &project.storage {
+        if let Some(device) = project.library.battery(&storage.battery_id) {
+            add("battery", &device.id, &device.manufacturer, &device.model, storage.units);
+        }
+        if let crate::plant::Coupling::AcCoupled { battery_inverter_id } = &storage.coupling {
+            if let Some(device) = project.library.battery_inverter(battery_inverter_id) {
+                add("battery_inverter", &device.id, &device.manufacturer, &device.model, 1);
+            }
+        }
+        if let Some(device) = storage.generator_id.as_deref().and_then(|id| project.library.generator(id)) {
+            add("generator", &device.id, &device.manufacturer, &device.model, 1);
+        }
+    }
+    counts.into_values().collect()
+}

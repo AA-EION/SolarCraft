@@ -15,7 +15,7 @@
 //! * Sun positions can be binned (default 1° × 1°) so large plants trace
 //!   each distinct sun direction once; `exact` traces every input position.
 use crate::mesh::{self, add, cross, dot, norm, scale, sub};
-use crate::place::PlacedModule;
+use crate::place::{ModuleField, PlacedModule};
 use crate::{Kind, Scene, V3};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -117,11 +117,6 @@ pub fn occluders(scene: &Scene) -> Vec<Triangle> {
     t
 }
 
-fn module_owner(scene: &Scene, field: &str, idx: usize) -> u32 {
-    let before: usize = scene.fields.iter().take_while(|f| f.id != field).map(|f| f.modules.len()).sum();
-    MODULE_OWNER + (before + idx) as u32
-}
-
 /// Sample points of a module grouped by bypass-diode substring, 2 cm in front of it.
 pub fn substring_samples(m: &PlacedModule, diodes: u32, opt: &ShadeOptions) -> Vec<Vec<V3>> {
     samples(m, diodes, opt, false)
@@ -176,15 +171,29 @@ pub fn shade_field_substrings(scene: &Scene, field_id: &str, suns: &[(f64, f64)]
 
 fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions, keep_substrings: bool, split_halves: bool) -> Result<(FieldShading, SubstringTrace), String> {
     let f = scene.field(field_id).ok_or_else(|| format!("no field {field_id}"))?;
-    let tris = occluders(scene);
-    let bvh = Bvh::from_triangles(&tris);
+    let first_owner = MODULE_OWNER + scene.fields.iter().take_while(|field| field.id != field_id)
+        .map(|field| field.modules.len() as u32).sum::<u32>();
+    Ok(trace_modules(f, &occluders(scene), (first_owner, scene.georef.true_north_deg), suns, weights, opt, keep_substrings, split_halves))
+}
+
+/// Compute substring traces for a planar layout supplied in east/north/up coordinates.
+/// Obstacles have nonzero owners; coplanar modules are not included in the obstacle mesh.
+pub fn shade_planar_substrings(field: &ModuleField, obstacles: &[Triangle], suns: &[(f64, f64)], weights: &[f64], split_halves: bool)
+    -> (FieldShading, SubstringTrace)
+{
+    trace_modules(field, obstacles, (MODULE_OWNER, 0.0), suns, weights, &ShadeOptions::default(), true, split_halves)
+}
+
+fn trace_modules(f: &ModuleField, tris: &[Triangle], (first_owner, tn): (u32, f64), suns: &[(f64, f64)], weights: &[f64],
+    opt: &ShadeOptions, keep_substrings: bool, split_halves: bool) -> (FieldShading, SubstringTrace)
+{
+    let bvh = Bvh::from_triangles(tris);
     // Distinct traced directions.
     let mut bins: HashMap<(i64, i64), usize> = HashMap::new();
     let mut dirs: Vec<V3> = vec![];
     let mut of_sun: Vec<Option<usize>> = Vec::with_capacity(suns.len());
     // Sun azimuths are from true north; the scene's +y axis is `true_north_deg` west of it.
-    let tn = scene.georef.true_north_deg;
-    for (k, &(el, az_true)) in suns.iter().enumerate() {
+    for &(el, az_true) in suns {
         let az = (az_true - tn).rem_euclid(360.0);
         if el <= 0.0 { of_sun.push(None); continue; }
         if opt.exact { of_sun.push(Some(dirs.len())); dirs.push(sun_dir(el, az)); continue; }
@@ -193,7 +202,6 @@ fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], op
         let b = *bins.entry(key).or_insert(next);
         if b == next { dirs.push(sun_dir((key.0 as f64 * opt.bin_deg).max(0.01), key.1 as f64 * opt.bin_deg)); }
         of_sun.push(Some(b));
-        let _ = k;
     }
     let mut wbin = vec![0.0f64; dirs.len()];
     for (k, b) in of_sun.iter().enumerate() { if let Some(b) = b { wbin[*b] += weights.get(k).copied().unwrap_or(1.0).max(0.0); } }
@@ -201,7 +209,7 @@ fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], op
     let sky_dirs = |n: V3| hemisphere(n, opt.sky_rings, opt.sky_sectors);
     struct Acc { bypass: Vec<f64>, area: Vec<f64>, mods: Vec<(usize, f64, f64, f64)>, rays: u64 }
     let per: Vec<_> = f.modules.par_iter().enumerate().map(|(mi, m)| {
-        let owner = module_owner(scene, field_id, mi);
+        let owner = first_owner + mi as u32;
         let subs = samples(m, f.module.bypass_diodes, opt, split_halves);
         let center = add(m.center(), scale(m.normal, 0.02));
         let probes: Vec<V3> = {
@@ -257,7 +265,7 @@ fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], op
     let to_sun = |v: &[f64]| of_sun.iter().map(|b| b.map_or(1.0, |b| if f.modules.is_empty() { 1.0 } else { v[b] as f32 })).collect::<Vec<f32>>();
     let diffuse_factor = if f.modules.is_empty() { 1.0 } else { acc.mods.iter().map(|m| m.3).sum::<f64>() / nm };
     let summary = FieldShading {
-        field: field_id.into(),
+        field: f.id.clone(),
         beam_bypass: to_sun(&acc.bypass),
         beam_area: to_sun(&acc.area),
         diffuse_factor,
@@ -268,5 +276,5 @@ fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], op
         rays: acc.rays,
     };
     if keep_substrings { trace.directions = of_sun; }
-    Ok((summary, trace))
+    (summary, trace)
 }

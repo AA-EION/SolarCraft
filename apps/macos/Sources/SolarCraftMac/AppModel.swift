@@ -17,12 +17,13 @@ final class AppModel: ObservableObject {
     /// Raw project and result documents for the plant pages (JSON objects from the core).
     @Published var raw: JSONDict = [:]
     @Published var summary: JSONDict?
+    @Published var designSchedule: JSONDict?
+    @Published private(set) var completedRuns = 0
     @Published var stringingDoc: JSONDict?
     @Published var dayRows: [JSONDict] = []
     @Published var cash: JSONDict?
     @Published var variantRows: [JSONDict] = []
     @Published var libraryItems: [JSONDict] = []
-    @Published var previewSections: [JSONDict] = []
     @Published var catalogHits: [JSONDict] = []
     private var running: Core.Progress?
 
@@ -49,6 +50,7 @@ final class AppModel: ObservableObject {
             raw = (try? Core.invokeJSON("get_project", ["file": file])) ?? [:]
             summary = try? Core.invokeJSON("results_summary", ["file": file])
             stringingDoc = try? Core.invokeJSON("stringing", ["file": file])
+            designSchedule = try? Core.invokeJSON("design_schedule", ["file": file])
             cash = try? Core.invokeJSON("cash_flow", ["file": file])
         }
     }
@@ -66,6 +68,17 @@ final class AppModel: ObservableObject {
             if !errs.isEmpty { error = errs.joined(separator: "\n") }
         }
         reload()
+    }
+
+    func setCableLosses(dc: Double, ac: Double) {
+        let edits: [JSONDict] = [
+            ["pointer": "/losses/dc_wiring_pct", "value": dc],
+            ["pointer": "/losses/ac_wiring_pct", "value": ac],
+        ]
+        do {
+            _ = try Core.invokeJSON("set_fields", ["file": file, "edits": edits])
+            reload()
+        } catch { self.error = error.localizedDescription }
     }
 
     func setStringing(manual: Bool, inverters: [JSONDict]) {
@@ -134,15 +147,13 @@ final class AppModel: ObservableObject {
         background("catalog_import", ["source": u.path])
     }
 
-    func loadPreview(_ lang: String) { run { previewSections = (try Core.invokeJSON("report_preview", ["file": file, "lang": lang])["sections"] as? [JSONDict]) ?? [] } }
-
-    func reportContents(lang: String, reportType: String) -> [String] {
-        var titles: [String] = []
+    func reportContents(lang: String, reportType: String, designer: String) -> [JSONDict] {
+        var contents: [JSONDict] = []
         run {
-            let report = try Core.invokeJSON("report_preview", ["file": file, "lang": lang, "report_type": reportType])
-            titles = (report["contents"] as? [JSONDict] ?? []).compactMap { $0["title"] as? String }
+            let report = try Core.invokeJSON("report_preview", ["file": file, "lang": lang, "report_type": reportType, "designer": designer, "include_figures": true])
+            contents = dicts(report["contents"])
         }
-        return titles
+        return contents
     }
 
     func newProject() {
@@ -166,11 +177,10 @@ final class AppModel: ObservableObject {
 
     /// Set one field by JSON pointer (becomes user-owned; the rest is re-derived).
     func set(_ pointer: String, _ value: Any) {
-        run {
-            let r = try Core.invoke("set_fields", ["file": file, "edits": [["pointer": pointer, "value": value]]], as: SetResult.self)
-            project = r.project
-            issues = r.issues
-        }
+        do {
+            _ = try Core.invokeJSON("set_fields", ["file": file, "edits": [["pointer": pointer, "value": value]]])
+            reload()
+        } catch { self.error = error.localizedDescription }
     }
 
     func setRoof(outline: [[Double]]?, obstacles: [[[Double]]], heights: [Double], setback: Double, clearance: Double) {
@@ -228,18 +238,20 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 self.busy = false
                 self.error = message
+                self.running = nil
                 self.reload()
+                if method == "simulate" && message == nil { self.completedRuns += 1 }
             }
         }
     }
 
-    func exportReport(lang: String, format: String, designer: String, reportType: String) {
+    func exportReport(lang: String, format: String, designer: String, reportType: String, excludeSections: [String]) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [format == "pdf" ? .pdf : (UTType(filenameExtension: "docx") ?? .data)]
         panel.nameFieldStringValue = (project?.name.value ?? "Report") + "." + format
         guard panel.runModal() == .OK, let u = panel.url else { return }
         run {
-            let r = try Core.invoke("export_report", ["file": file, "output": u.path, "format": format, "lang": lang, "designer": designer, "report_type": reportType], as: ReportOutput.self)
+            let r = try Core.invoke("export_report", ["file": file, "output": u.path, "format": format, "lang": lang, "designer": designer, "report_type": reportType, "exclude_sections": excludeSections], as: ReportOutput.self)
             notice = "\(t("report_saved")): \(r.path)"
             NSWorkspace.shared.open(u)
         }

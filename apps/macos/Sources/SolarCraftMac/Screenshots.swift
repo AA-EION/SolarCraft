@@ -52,12 +52,11 @@ enum Screenshots {
         do { model.url = URL(fileURLWithPath: try DemoProject.build(in: dir.appendingPathComponent("project"))) } catch { print("FAIL demo project: \(error)"); return 1 }
         model.reload()
         model.loadDay(172)
-        model.loadPreview("en")
         model.loadLibrary()
         model.variantRows = (try? Core.invokeJSON("compare_variants", ["file": model.url!.path])["variants"] as? [JSONDict]) ?? []
         var failures = 0
         for page in Page.allCases {
-            let root = PageView(page: page).environmentObject(model).padding(20).frame(width: 1000, alignment: .topLeading).background(Color(nsColor: .windowBackgroundColor))
+            let root = PageView(page: page, includeReportPreview: true).environmentObject(model).padding(20).frame(width: 1000, alignment: .topLeading).background(Color(nsColor: .windowBackgroundColor))
             let host = NSHostingView(rootView: root)
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 800), styleMask: [.borderless], backing: .buffered, defer: false)
             window.contentView = host

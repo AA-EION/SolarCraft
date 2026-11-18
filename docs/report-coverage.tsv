@@ -29,7 +29,7 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 18	SystemSetup_ModuleAreas_Image3D		yes	yes	available	scene_plans	Current 3D scene, when present
 19	SystemSetup_ModuleAreas_ImageRoofPlan		yes	yes	available	roof_plans	Editable roof outline, setbacks, modules and associated figures
 20	SystemSetup_ModuleAreas_ImagePhotoPlan		yes	yes	available	photo_plan	Rectified user photograph and current roof overlay, when attached
-21	SystemSetup_ModuleAreas_Shading		no	yes	available	losses; field_shading	Geometric field shading and electrical losses from the run
+21	SystemSetup_ModuleAreas_Shading		no	yes	available	losses; field_shading; module_shading	Geometric shading per field and per module, plus electrical losses from the run
 22	SystemSetup_ModuleAreas_Degradation		no	yes	partial	financial_projection	Annual projection uses configured degradation. No per-module degradation history.
 23	SystemSetup_ModuleAreas_DegradationValue		no	yes	partial	financial_projection	Annual projection uses configured degradation. No per-module degradation history.
 24	SystemSetup_ModuleAreas_DegradationCharacteristicCurve		no	yes	pending		Nonlinear degradation characteristic model
@@ -134,6 +134,6 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 123	DimensioningPlan		yes	yes	partial	roof_plans; photo_plan	Roof dimensions are in the plan data. A dedicated dimension sheet is absent.
 124	StringPlan		yes	yes	available	scene_plans	Top-down identified strings with planned modules, when routed
 125	CablePlan		yes	yes	partial	string_routes	Measured jumpers and home-run lengths. A dedicated cable route drawing is absent.
-126	Partslist		yes	yes	partial	equipment	Assigned equipment quantities. Mounting, hardware and conductor bill of materials is absent.
+126	Partslist		yes	yes	partial	equipment	Assigned module, inverter, battery, battery inverter and generator quantities. Mounting, hardware and conductor bill of materials is absent.
 127	Screenshots		yes	yes	partial	scene_plans	Generated scene views. A user-curated screenshot collection is absent.
 128	FurtherPictures		yes	yes	pending		User-selected illustration attachments

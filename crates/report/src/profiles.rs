@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::{charts, tr, ReportInput, View};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -175,31 +174,22 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
 fn equipment_summary(input: &ReportInput) -> ContentSection {
     let p = input.project;
     let l = input.lang;
-    let electrical = solarcraft_model::derive::electrical(p);
-    let assigned = solarcraft_model::derive::modules_by_array(&electrical);
-    let mut counts = BTreeMap::<(String, String), u32>::new();
-    for array in &p.arrays {
-        if let (Some(&count), Some(module)) = (assigned.get(&array.id), p.library.module(&array.module_id.value)) {
-            let kind = tr(l, "PV module", "Módulo FV", "PV-Modul", "Módulo FV");
-            *counts.entry((kind, format!("{} {}", module.manufacturer, module.model))).or_default() += count;
-        }
-    }
-    for unit in &electrical.inverters {
-        if let Some(inverter) = p.library.inverter(&unit.inverter_id) {
-            let kind = tr(l, "Inverter", "Inversor", "Wechselrichter", "Inversor");
-            *counts.entry((kind, format!("{} {}", inverter.manufacturer, inverter.model))).or_default() += 1;
-        }
-    }
-    if let Some((storage, battery)) = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id).map(|b| (s, b))) {
-        let kind = tr(l, "Battery", "Batería", "Batterie", "Bateria");
-        counts.insert((kind, format!("{} {}", battery.manufacturer, battery.model)), storage.units);
-    }
     let mut section = ContentSection::new("equipment", tr(l, "System components", "Componentes del sistema", "Anlagenkomponenten", "Componentes do sistema"));
     section.table(vec![
         tr(l, "Equipment", "Equipo", "Gerät", "Equipamento"),
         tr(l, "Model", "Modelo", "Modell", "Modelo"),
         tr(l, "Quantity", "Cantidad", "Anzahl", "Quantidade"),
-    ], counts.into_iter().map(|((kind, model), count)| vec![kind, model, count.to_string()]));
+    ], solarcraft_model::derive::equipment_counts(p).into_iter().map(|row| {
+        let kind = match row.kind {
+            "module" => tr(l, "PV module", "Módulo FV", "PV-Modul", "Módulo FV"),
+            "inverter" => tr(l, "Inverter", "Inversor", "Wechselrichter", "Inversor"),
+            "battery" => tr(l, "Battery", "Batería", "Batterie", "Bateria"),
+            "battery_inverter" => tr(l, "Battery inverter", "Inversor de batería", "Batteriewechselrichter", "Inversor de bateria"),
+            "generator" => tr(l, "Generator", "Generador", "Generator", "Gerador"),
+            _ => row.kind.into(),
+        };
+        vec![kind, row.model, row.quantity.to_string()]
+    }));
     section
 }
 
@@ -251,14 +241,41 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
         if !routing.blocks.is_empty() { out.push(routing); }
     }
     if !r.module_shading.is_empty() {
-        let mut shading = ContentSection::new("field_shading", tr(l, "3D shading by field", "Sombreado 3D por campo", "3D-Verschattung je Modulfeld", "Sombreamento 3D por campo"));
+        let mut shading = ContentSection::new("field_shading", tr(l, "Shading by field", "Sombreado por campo", "Verschattung je Modulfeld", "Sombreamento por campo"));
         shading.table(vec![tr(l, "Field", "Campo", "Modulfeld", "Campo"),
             tr(l, "Geometric beam loss", "Pérdida directa geométrica", "Geometrischer Direktstrahlungsverlust", "Perda direta geométrica"),
             tr(l, "Sky factor", "Factor de cielo", "Himmelsfaktor", "Fator de céu"),
-        ], r.module_shading.iter().map(|field| [
-            field.field.clone(), format!("{} %", n(field.beam_area_loss_pct, 2)), format!("{} %", n(field.diffuse_factor * 100.0, 1)),
-        ]));
+            tr(l, "Electrical model", "Modelo eléctrico", "Elektrisches Modell", "Modelo elétrico"),
+        ], r.module_shading.iter().map(|field| {
+            let model = if field.half_cell {
+                tr(l, "Parallel half-cells", "Medias células en paralelo", "Parallele Halbzellen", "Meias células em paralelo")
+            } else if field.nonlinear {
+                tr(l, "Substring I–V curves", "Curvas I–V de subcadenas", "I–V-Kurven der Teilstrings", "Curvas I–V de subcadeias")
+            } else {
+                tr(l, "Field average", "Promedio del campo", "Modulfeld-Mittelwert", "Média do campo")
+            };
+            [field.field.clone(), format!("{} %", n(field.beam_area_loss_pct, 2)), format!("{} %", n(field.diffuse_factor * 100.0, 1)), model]
+        }));
         out.push(shading);
+        let title = tr(l, "Module shading schedule", "Tabla de sombreado por módulo", "Verschattung je Modul", "Tabela de sombreamento por módulo");
+        let mut modules = ContentSection::new("module_shading", title);
+        modules.text(tr(l,
+            "Beam loss is weighted by direct normal irradiance. The column describes blocked beam samples, and sky view describes unblocked sky. Electrical output is calculated for each tracker.",
+            "La pérdida directa se pondera por irradiancia directa normal. La tabla muestra el haz bloqueado y la fracción de cielo libre. La producción eléctrica se calcula por seguidor.",
+            "Der Direktstrahlungsverlust wird nach Direktnormalstrahlung gewichtet. Die Tabelle zeigt blockierte Direktstrahlung und freien Himmel. Die elektrische Leistung wird je MPP-Tracker berechnet.",
+            "A perda direta é ponderada pela irradiância direta normal. A tabela mostra o feixe bloqueado e a fração de céu livre. A potência elétrica é calculada por rastreador."));
+        for field in &r.module_shading {
+            modules.text(field.field.clone());
+            modules.table(vec![
+                tr(l, "Module", "Módulo", "Modul", "Módulo"), "String".into(),
+                tr(l, "Beam loss", "Pérdida directa", "Direktverlust", "Perda direta"),
+                tr(l, "Sky view", "Vista del cielo", "Himmelssicht", "Visão do céu"),
+            ], field.modules.iter().map(|m| [
+                m.id.clone(), m.string.map(|id| (id + 1).to_string()).unwrap_or_else(|| "—".into()),
+                format!("{} %", n(m.beam_area_loss_pct, 2)), format!("{} %", n(m.sky_view * 100.0, 1)),
+            ]));
+        }
+        out.push(modules);
     }
     out
 }

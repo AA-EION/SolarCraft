@@ -92,6 +92,7 @@ struct SiteClimatePage: View {
 struct OutageEdit: Identifiable { let id = UUID(); var day = 172.0; var hour = 18.0; var hours = 4.0 }
 
 struct StorageLoadsPage: View {
+    var consumptionOnly: Bool
     @EnvironmentObject var m: AppModel
     // Loads
     @State private var profile = "residential"
@@ -125,7 +126,7 @@ struct StorageLoadsPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            GroupBox(m.t("loads")) {
+            if consumptionOnly { GroupBox(m.t("loads")) {
                 Form {
                     Picker(m.t("load_profile"), selection: $profile) {
                         ForEach(["none", "residential", "office", "retail", "flat", "series"], id: \.self) { Text(m.t("profile_" + $0)).tag($0) }
@@ -139,7 +140,7 @@ struct StorageLoadsPage: View {
                     }
                 }
             }
-            GroupBox(m.t("use_battery")) {
+            } else { GroupBox(m.t("use_battery")) {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle(m.t("use_battery"), isOn: $enabled)
                     if enabled {
@@ -183,6 +184,7 @@ struct StorageLoadsPage: View {
                     Button(m.t("apply")) { applyStorage() }.keyboardShortcut(.defaultAction)
                     IssueList(issues: m.issues.filter { $0.pointer.hasPrefix("/storage") || $0.pointer.hasPrefix("/loads") }.map { ["severity": $0.severity, "message": $0.message] })
                 }
+            }
             }
         }
         .onAppear(perform: load)
@@ -637,21 +639,60 @@ struct EconomicsPage: View {
     }
 }
 
-// MARK: - plans and reports
+// MARK: - design schedules
 
-struct PlansReportsPage: View {
+struct CablesPage: View {
+    @EnvironmentObject var m: AppModel
+    @State private var dc = 0.0
+    @State private var ac = 0.0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(m.t("workflow_cable_hint")).foregroundStyle(.secondary)
+            Form {
+                NumField(label: m.t("workflow_dc_loss"), value: $dc)
+                NumField(label: m.t("workflow_ac_loss"), value: $ac)
+                Button(m.t("apply")) {
+                    m.setCableLosses(dc: dc, ac: ac)
+                }.disabled(!(0...100).contains(dc) || !(0...100).contains(ac))
+            }
+            let routes = dicts(m.designSchedule?["routes"])
+            if routes.isEmpty {
+                Text(m.t("workflow_no_routes")).foregroundStyle(.secondary)
+            } else {
+                ScrollView(.horizontal) {
+                    SimpleTable(header: ["photo_array", "workflow_string", "module", "workflow_jumper", "workflow_home_run"].map { m.t($0) },
+                                rows: routes.map { route in [
+                                    str(route, "field"), str(route, "id"), fmt(num(route, "modules")),
+                                    fmt(num(route, "jumper_m"), 1),
+                                    route["home_run_m"] is NSNumber ? fmt(num(route, "home_run_m"), 1) : "–",
+                                ] })
+                }
+            }
+        }.onAppear {
+            let losses = m.section("losses")
+            dc = num(losses["dc_wiring_pct"] as? JSONDict ?? [:], "value")
+            ac = num(losses["ac_wiring_pct"] as? JSONDict ?? [:], "value")
+        }
+    }
+}
+
+struct EngineeringPlansPage: View {
     @EnvironmentObject var m: AppModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ReportPage()
-            GroupBox(m.t("report_preview")) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Button(m.t("report_preview")) { m.loadPreview(String((Locale.preferredLanguages.first ?? "en").prefix(2))) }.disabled(m.results == nil)
-                    ForEach(m.previewSections.indices, id: \.self) { i in
-                        let s = m.previewSections[i]
-                        Text(str(s, "title")).font(.headline)
-                        SimpleTable(header: (s["header"] as? [String]) ?? [], rows: (s["rows"] as? [[String]]) ?? []).font(.caption)
-                    }
+        VStack(alignment: .leading, spacing: 16) {
+            Text(m.t("workflow_parts")).font(.headline)
+            let equipment = dicts(m.designSchedule?["equipment"])
+            SimpleTable(header: [m.t("family"), m.t("model"), m.t("workflow_quantity")],
+                        rows: equipment.map { [m.t(str($0, "kind")), str($0, "model"), fmt(num($0, "quantity"))] })
+            let arrays = m.project?.arrays ?? []
+            ForEach(arrays.indices, id: \.self) { index in
+                let array = arrays[index]
+                if let roof = array.roof {
+                    Divider()
+                    Text(array.name.value).font(.headline)
+                    RoofPreview(roof: roof).frame(height: 280)
+                    Text("\(roof.modules.count) \(m.t("modules_fit"))").foregroundStyle(.secondary)
                 }
             }
         }
