@@ -7,6 +7,7 @@ pub mod docx;
 pub mod i18n;
 pub mod pdf;
 mod profiles;
+mod detail;
 pub use profiles::{ContentBlock, ContentSection, ReportType};
 
 use i18n::Lang;
@@ -222,6 +223,12 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
     };
     profiles::compose(&mut view, inp);
     view
+}
+
+impl View {
+    pub fn add_roof_photo(&mut self, caption: String, svg: String) {
+        profiles::add_roof_photo(self, caption, svg);
+    }
 }
 
 /// Plant sections: every value is read from the stored run (traceable via the run's inputs hash).

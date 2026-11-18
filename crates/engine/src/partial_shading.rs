@@ -26,12 +26,15 @@ impl ModuleCurve {
 pub(crate) fn routes(field: &ModuleField, module: &ModuleSpec, electrical: &Electrical, array: &str)
     -> Result<BTreeMap<u32, Vec<Vec<usize>>>, &'static str>
 {
-    if module.half_cell || module.unverified.get("standardCellConnection").and_then(|v| v.as_bool()) == Some(false) {
-        return Err("the module has parallel or nonstandard cell wiring");
+    if module.unverified.get("standardCellConnection").and_then(|v| v.as_bool()) == Some(false) {
+        return Err("the module has nonstandard cell wiring");
     }
     let diodes = field.module.bypass_diodes;
     if diodes == 0 || module.bypass_diodes.is_some_and(|specified| specified != diodes) {
         return Err("the placed module's bypass configuration differs from the selected module");
+    }
+    if module.half_cell && diodes != 3 {
+        return Err("the half-cell module does not have three shared bypass diodes");
     }
     let by_id: HashMap<_, _> = field.modules.iter().enumerate().map(|(i, m)| (m.id.as_str(), i)).collect();
     let mut assigned = HashSet::new();
@@ -73,6 +76,7 @@ pub(crate) struct ShadedArray {
     pub hours: Vec<Light>,
     pub diodes: u32,
     pub forward_v: f64,
+    pub half_cell: bool,
 }
 
 impl ShadedArray {
@@ -83,26 +87,39 @@ impl ShadedArray {
     pub(crate) fn curves(&self, hour: usize, length: u32, start: usize, count: usize) -> Vec<(IvCurve, f64)> {
         let light = self.hours[hour];
         let routes = &self.routes[&length][start..start + count];
-        let mut distinct = BTreeMap::<Vec<(u8, u32)>, u32>::new();
+        let mut distinct = BTreeMap::<Vec<((u8, u8), u32)>, u32>::new();
         for route in routes {
             let mut levels = BTreeMap::new();
             for &module in route {
                 if let Some(transmissions) = self.trace.transmission(hour, module) {
-                    for &transmission in transmissions { *levels.entry(transmission).or_default() += 1; }
+                    if self.half_cell {
+                        for pair in transmissions.chunks_exact(2) {
+                            let a = pair[0].min(pair[1]);
+                            let b = pair[0].max(pair[1]);
+                            *levels.entry((a, b)).or_default() += 1;
+                        }
+                    } else {
+                        for &factor in transmissions { *levels.entry((factor, factor)).or_default() += 1; }
+                    }
                 } else {
-                    *levels.entry(255).or_default() += self.diodes;
+                    *levels.entry((255, 255)).or_default() += self.diodes;
                 }
             }
             *distinct.entry(levels.into_iter().collect()).or_default() += 1;
         }
         distinct.into_iter().filter_map(|(levels, multiplicity)| {
-            let params: Vec<_> = levels.into_iter().map(|(transmission, count)| {
+            let at = |transmission| {
                 let irradiance = light.diffuse + light.direct * f64::from(transmission) / 255.0;
-                // The same module curve represents a substring once its voltage
-                // is divided by the number of equal series substrings.
-                (self.module.at(irradiance.max(1e-5), light.temperature), count)
-            }).collect();
-            IvCurve::substrings(&params, self.diodes, self.forward_v).map(|curve| (curve, f64::from(multiplicity)))
+                self.module.at(irradiance.max(1e-5), light.temperature)
+            };
+            let curve = if self.half_cell {
+                let params: Vec<_> = levels.into_iter().map(|((a, b), count)| (at(a), (a != b).then(|| at(b)), count)).collect();
+                IvCurve::parallel_substrings(&params, self.diodes, self.forward_v)
+            } else {
+                let params: Vec<_> = levels.into_iter().map(|((a, _), count)| (at(a), count)).collect();
+                IvCurve::substrings(&params, self.diodes, self.forward_v)
+            };
+            curve.map(|curve| (curve, f64::from(multiplicity)))
         }).collect()
     }
 }

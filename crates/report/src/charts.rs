@@ -22,6 +22,85 @@ fn nice_step(max: f64) -> f64 {
 
 fn esc(s: &str) -> String { s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;") }
 
+/// Up to two series with the same numeric x axis and caller-supplied tick labels.
+pub fn time_lines(series: &[(String, Vec<(u32, f64)>)], ticks: &[(u32, &str)], unit: &str, lang: Lang) -> String {
+    let points = || series.iter().flat_map(|(_, data)| data.iter().copied());
+    let start = ticks.first().map_or(0, |tick| tick.0);
+    let end = ticks.last().map_or(start + 1, |tick| tick.0).max(start + 1);
+    let min = points().map(|(_, y)| y).fold(f64::INFINITY, f64::min);
+    let max = points().map(|(_, y)| y).fold(f64::NEG_INFINITY, f64::max);
+    let (min, max) = if min.is_finite() && max.is_finite() { (min, max.max(min + 1.0)) } else { (0.0, 1.0) };
+    let x = |period: u32| 81.0 + 534.0 * (f64::from(period) - f64::from(start)) / f64::from(end - start);
+    let y = |value: f64| 20.0 + 143.0 * (max - value) / (max - min);
+    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="220" viewBox="0 0 640 220" font-family="{FONT_CSS}">"#);
+    for k in 0..=4 {
+        let value = min + (max - min) * f64::from(k) / 4.0;
+        let yy = y(value);
+        let _ = write!(svg, r#"<line x1="81" x2="615" y1="{yy:.1}" y2="{yy:.1}" stroke="{GRID}"/><text x="74" y="{:.1}" font-size="10" fill="{MUTED}" text-anchor="end">{}</text>"#, yy + 4.0, esc(&lang.num(value, 1)));
+    }
+    let _ = write!(svg, r#"<text x="74" y="184" font-size="10" fill="{MUTED}" text-anchor="end">{}</text>"#, esc(unit));
+    for &(period, label) in ticks {
+        let _ = write!(svg, r#"<text x="{:.1}" y="184" font-size="11" fill="{INK}" text-anchor="middle">{}</text>"#, x(period), esc(label));
+    }
+    for (i, (label, data)) in series.iter().enumerate() {
+        let color = [BAR, "#2563eb"][i % 2];
+        if !label.is_empty() {
+            let left = 81 + i * 250;
+            let _ = write!(svg, r#"<rect x="{left}" y="201" width="9" height="9" fill="{color}"/><text x="{}" y="210" font-size="11" fill="{INK}">{}</text>"#, left + 15, esc(label));
+        }
+        let _ = write!(svg, r#"<polyline fill="none" stroke="{color}" stroke-width="2" points=""#);
+        for &(period, value) in data { let _ = write!(svg, "{:.2},{:.2} ", x(period), y(value)); }
+        svg.push_str("\"/>");
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// A conservation diagram through one accounting boundary. Ribbon widths are
+/// in kWh. The junction does not infer individual source-to-load paths.
+pub fn balance_flow(inputs: &[(String, f64)], outputs: &[(String, f64)], lang: Lang) -> String {
+    let left: Vec<_> = inputs.iter().filter(|(_, value)| *value > 1e-6).collect();
+    let right: Vec<_> = outputs.iter().filter(|(_, value)| *value > 1e-6).collect();
+    let total = |side: &[&(String, f64)]| side.iter().map(|(_, v)| v).sum::<f64>();
+    let scale = 126.0 / total(&left).max(total(&right)).max(1.0);
+    let colors = ["#0f766e", "#0369a1", "#a16207", "#6d28d9"];
+    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="700" height="260" viewBox="0 0 700 260" font-family="{FONT_CSS}">"#);
+    for (side, to_right) in [(&left, false), (&right, true)] {
+        let mut trunk = 38.0;
+        for (i, (label, value)) in side.iter().enumerate() {
+            let height = *value * scale;
+            let color = colors[i % colors.len()];
+            let outer = 25.0 + i as f64 * 26.0 + (trunk - 38.0);
+            let (edge, centre, tx, anchor) = if to_right { (560, 354, 690, "end") } else { (140, 346, 10, "start") };
+            let ctrl = (edge + centre) / 2;
+            let _ = write!(svg, r#"<path d="M{edge},{outer:.2} C{ctrl},{outer:.2} {ctrl},{trunk:.2} {centre},{trunk:.2} L{centre},{:.2} C{ctrl},{:.2} {ctrl},{:.2} {edge},{:.2} Z" fill="{color}" fill-opacity="0.43"/>"#, trunk + height, trunk + height, outer + height, outer + height);
+            let label_y = if height >= 14.0 { outer + 12.0 } else { outer + height + 11.0 };
+            let _ = write!(svg, r#"<text x="{tx}" y="{label_y:.1}" text-anchor="{anchor}" font-size="11" fill="{INK}">{}</text><text x="{tx}" y="{:.1}" text-anchor="{anchor}" font-size="10" fill="{MUTED}">{} kWh</text>"#, esc(label), label_y + 12.0, esc(&lang.num(*value, 1)));
+            trunk += height;
+        }
+    }
+    let _ = write!(svg, r#"<rect x="346" y="38" width="8" height="{:.2}" fill="{INK}"/>"#, total(&left).max(total(&right)) * scale);
+    svg.push_str("</svg>");
+    svg
+}
+
+pub fn connections(rows: &[(String, String)], grid_label: &str) -> String {
+    let height = rows.len() * 47 + 24;
+    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="700" height="{height}" viewBox="0 0 700 {height}" font-family="{FONT_CSS}">"#);
+    let y1 = 31;
+    let y2 = (rows.len() - 1) * 47 + y1;
+    let _ = write!(svg, r#"<line x1="525" x2="525" y1="{y1}" y2="{y2}" stroke="{BAR}" stroke-width="2"/>"#);
+    for (i, (modules, inverter)) in rows.iter().enumerate() {
+        let y = i * 47 + 31;
+        let label: String = inverter.chars().take(37).collect();
+        let _ = write!(svg, r##"<rect x="12" y="{}" width="175" height="33" rx="6" fill="#ecf7f5" stroke="#b5d7d3"/><rect x="250" y="{}" width="215" height="33" rx="6" fill="#edf4fa" stroke="#adc5d9"/><path d="M187 {y}h63 M465 {y}h60" fill="none" stroke="{BAR}" stroke-width="1.5"/><text x="99" y="{}" font-size="12" text-anchor="middle" fill="{INK}">{}</text><text x="357" y="{}" font-size="12" text-anchor="middle" fill="{INK}">{}</text>"##, y - 16, y - 16, y + 4, esc(modules), y + 4, esc(&label));
+    }
+    let mid = (y1 + y2) / 2;
+    let _ = write!(svg, r##"<path d="M525 {mid}h24" stroke="{BAR}" stroke-width="2"/><rect x="549" y="{}" width="140" height="33" rx="6" fill="#f3f4f6" stroke="#a6b0bc"/><text x="619" y="{}" font-size="12" text-anchor="middle" fill="{INK}">{}</text>"##, mid - 16, mid + 4, esc(grid_label));
+    svg.push_str("</svg>");
+    svg
+}
+
 /// The requested load and its sources, with unserved energy as a separate segment.
 pub fn load_supply(series: &[(String, f64); 5], demand: f64, lang: Lang) -> String {
     let colors = ["#0f766e", "#6d28d9", "#2563eb", "#92400e", "#a3a3a3"];

@@ -31,6 +31,10 @@ fn ledger_closes_and_is_consistent() {
         let r = simulate(&project(lat, lon, 10.0), &synthetic(lat, lon), "h", None, |_| true).unwrap();
         assert!(r.manifest.ledger_closure_error_kwh.abs() < 1e-6, "closure {}", r.manifest.ledger_closure_error_kwh);
         let monthly: f64 = r.monthly.iter().map(|m| m.ac_kwh).sum();
+        let inverter_months: f64 = r.electrical.iter().flat_map(|u| u.monthly_net_ac_kwh).sum();
+        assert!((inverter_months - monthly).abs() < 1e-6);
+        let poa: f64 = r.array_irradiation[0].poa_kwh_m2.iter().sum();
+        assert!((poa - r.annual.poa_kwh_m2).abs() < 1e-6);
         assert!((monthly - r.annual.ac_kwh).abs() < 1e-6 * r.annual.ac_kwh.max(1.0));
         let hourly: f64 = r.hourly.ac_w.iter().map(|&v| v as f64).sum::<f64>() / 1000.0;
         assert!((hourly - r.annual.ac_kwh).abs() / r.annual.ac_kwh < 1e-4);

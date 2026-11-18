@@ -2800,6 +2800,7 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "chrono",
+ "image",
  "rusqlite",
  "schemars",
  "serde",

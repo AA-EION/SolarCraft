@@ -17,6 +17,7 @@ use std::path::Path;
 pub mod api;
 pub mod catalog_ops;
 mod load_import;
+pub mod photo;
 pub mod plant_ops;
 pub mod scene_ops;
 pub mod ui_strings;
@@ -206,7 +207,9 @@ pub fn report_view_for(path: &Path, lang: &str, report_type: ReportType, designe
     let (w, _) = load_weather(&s, &p)?;
     let input = solarcraft_report::ReportInput { project: &p, result: &r, lang: l, date: today_utc(), designer: designer.into(),
         weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied } };
-    Ok(solarcraft_report::build_view_for(&input, report_type))
+    let mut view = solarcraft_report::build_view_for(&input, report_type);
+    photo::report_figures(&s, &p, &mut view)?;
+    Ok(view)
 }
 
 /// Generate the customer report from the latest stored results.

@@ -306,6 +306,28 @@ struct SceneImportArgs {
     preview: bool,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct PhotoLayoutArgs {
+    file: String,
+    /// Workspace-relative JPEG or PNG.
+    source: String,
+    /// Four normalized [x,y] image points. Eave-left, eave-right, upper-right, upper-left.
+    corners: [[f64; 2]; 4],
+    width_m: f64,
+    depth_m: f64,
+    #[serde(default)]
+    array: usize,
+    /// An optional traced outline in the calibrated rectangle.
+    outline: Option<Vec<[f64; 2]>>,
+    #[serde(default)]
+    obstacles: Vec<Vec<[f64; 2]>>,
+    #[serde(default)]
+    obstacle_heights: Vec<f64>,
+    /// Preview is the default. Set apply=true to save the roof and photo.
+    #[serde(default)]
+    apply: bool,
+}
+
 fn ok(v: Value) -> Result<CallToolResult, ErrorData> { Ok(CallToolResult::structured(v)) }
 fn app_err(e: app::AppError) -> Result<CallToolResult, ErrorData> { Ok(CallToolResult::structured_error(json!({"code": e.code, "message": e.message}))) }
 fn to_value<T: serde::Serialize>(v: &T) -> Value { serde_json::to_value(v).unwrap_or(Value::Null) }
@@ -397,6 +419,16 @@ impl SolarCraftMcp {
         let f = self.path(&a.file, true, true)?;
         let req = json!({"file": f.to_string_lossy(), "array": a.array, "outline": a.outline, "obstacles": a.obstacles, "obstacle_heights": a.obstacle_heights, "params": a.params});
         match app::api::dispatch("set_roof", &req, &mut |_| true) { Ok(v) => ok(v), Err(e) => app_err(e) }
+    }
+
+    #[tool(description = "Rectify a measured rectangle from a workspace roof image and calculate module placement. Preview by default. Set apply=true to attach the photo and layout as one undoable change.")]
+    async fn photo_layout(&self, Parameters(a): Parameters<PhotoLayoutArgs>) -> Result<CallToolResult, ErrorData> {
+        let f = self.path(&a.file, true, true)?;
+        let src = self.path(&a.source, false, true)?;
+        self.api("photo_layout", json!({"file": f, "source": src, "preview": !a.apply, "options": {
+            "control": {"corners": a.corners, "width_m": a.width_m, "depth_m": a.depth_m},
+            "array": a.array, "outline": a.outline, "obstacles": a.obstacles, "obstacle_heights": a.obstacle_heights
+        }}))
     }
 
     #[tool(description = "Attach offline clear-sky demonstration weather (no network). Overestimates yield; for trying the workflow only.")]

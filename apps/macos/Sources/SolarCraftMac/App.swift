@@ -330,6 +330,7 @@ func parseObstacles(_ text: String) -> [[[Double]]] {
 
 struct RoofPage: View {
     @EnvironmentObject var m: AppModel
+    @State private var showPhoto = false
     @State private var shape = "rect"
     @State private var eave = 10.0
     @State private var ridge = 6.0
@@ -355,6 +356,7 @@ struct RoofPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Form {
+                Button(m.t("photo_plan")) { showPhoto = true }.disabled(m.url == nil)
                 Picker(m.t("roof_shape"), selection: $shape) {
                     Text(m.t("roof_rect")).tag("rect")
                     Text(m.t("roof_trapezoid")).tag("trapezoid")
@@ -395,6 +397,7 @@ struct RoofPage: View {
             }
         }
         .onAppear(perform: loadFromProject)
+        .sheet(isPresented: $showPhoto) { PhotoPlanSheet().environmentObject(m) }
     }
 
     private func loadFromProject() {

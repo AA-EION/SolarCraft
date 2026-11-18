@@ -62,6 +62,7 @@ public sealed partial class MainWindow : Window
         CustomBox.Header = T("custom_points"); ObstaclesBox.Header = T("obstacles"); SetbackBox.Header = T("setback"); ClearanceBox.Header = T("clearance");
         ClickHint.Text = T("click_to_add"); UndoPointButton.Content = T("undo_point"); ClearPointsButton.Content = T("clear_points");
         RoofHint.Text = T("roof_hint"); ApplyRoofButton.Content = T("apply_roof");
+        PhotoPlanButton.Content = T("photo_plan");
         LangBox.Header = T("language"); FormatBox.Header = T("format"); DesignerBox.Header = T("designer"); ExportButton.Content = T("export_report");
         ReportTypeBox.Header = T("report_type");
         foreach (ComboBoxItem option in ReportTypeBox.Items) option.Content = T((string)option.Tag);

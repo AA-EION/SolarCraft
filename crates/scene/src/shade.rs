@@ -124,16 +124,22 @@ fn module_owner(scene: &Scene, field: &str, idx: usize) -> u32 {
 
 /// Sample points of a module grouped by bypass-diode substring, 2 cm in front of it.
 pub fn substring_samples(m: &PlacedModule, diodes: u32, opt: &ShadeOptions) -> Vec<Vec<V3>> {
+    samples(m, diodes, opt, false)
+}
+
+fn samples(m: &PlacedModule, diodes: u32, opt: &ShadeOptions, split_halves: bool) -> Vec<Vec<V3>> {
     let (c0, x, y) = (m.corners[0], sub(m.corners[1], m.corners[0]), sub(m.corners[3], m.corners[0]));
     let lift = scale(m.normal, 0.02);
     let nd = diodes.max(1) as usize;
-    let (na, nl) = (opt.samples_across.max(1), opt.samples_long.max(1));
-    (0..nd).map(|s| {
+    let branches = if split_halves { 2 } else { 1 };
+    let (na, nl) = (opt.samples_across.max(1), (opt.samples_long / branches).max(1));
+    (0..nd * branches).map(|i| {
+        let (s, branch) = (i / branches, i % branches);
         let mut pts = vec![];
         for a in 0..na { for b in 0..nl {
             // `across` runs over the short side, split into substrings; `long` along the long side.
             let across = (s as f64 + (a as f64 + 0.5) / na as f64) / nd as f64;
-            let long = (b as f64 + 0.5) / nl as f64;
+            let long = (branch as f64 + (b as f64 + 0.5) / nl as f64) / branches as f64;
             let (u, v) = if m.portrait { (across, long) } else { (long, across) };
             pts.push(add(add(c0, add(scale(x, u), scale(y, v))), lift));
         } }
@@ -161,14 +167,14 @@ pub fn sun_dir(elev: f64, az: f64) -> V3 { solarcraft_shading::sun_dir(elev, az)
 /// Shade one field for a list of sun positions (`(apparent elevation, azimuth)`, degrees)
 /// with per-position weights (beam irradiance, for the per-module loss figures).
 pub fn shade_field(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions) -> Result<FieldShading, String> {
-    shade(scene, field_id, suns, weights, opt, false).map(|(summary, _)| summary)
+    shade(scene, field_id, suns, weights, opt, false, false).map(|(summary, _)| summary)
 }
 
-pub fn shade_field_substrings(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions) -> Result<(FieldShading, SubstringTrace), String> {
-    shade(scene, field_id, suns, weights, opt, true)
+pub fn shade_field_substrings(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions, split_halves: bool) -> Result<(FieldShading, SubstringTrace), String> {
+    shade(scene, field_id, suns, weights, opt, true, split_halves)
 }
 
-fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions, keep_substrings: bool) -> Result<(FieldShading, SubstringTrace), String> {
+fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions, keep_substrings: bool, split_halves: bool) -> Result<(FieldShading, SubstringTrace), String> {
     let f = scene.field(field_id).ok_or_else(|| format!("no field {field_id}"))?;
     let tris = occluders(scene);
     let bvh = Bvh::from_triangles(&tris);
@@ -196,7 +202,7 @@ fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], op
     struct Acc { bypass: Vec<f64>, area: Vec<f64>, mods: Vec<(usize, f64, f64, f64)>, rays: u64 }
     let per: Vec<_> = f.modules.par_iter().enumerate().map(|(mi, m)| {
         let owner = module_owner(scene, field_id, mi);
-        let subs = substring_samples(m, f.module.bypass_diodes, opt);
+        let subs = samples(m, f.module.bypass_diodes, opt, split_halves);
         let center = add(m.center(), scale(m.normal, 0.02));
         let probes: Vec<V3> = {
             let c = m.corners; let inset = |p: V3| add(add(p, scale(sub(center, p), 0.1)), scale(m.normal, 0.02));

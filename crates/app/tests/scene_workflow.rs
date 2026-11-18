@@ -140,6 +140,15 @@ fn scene_workflow() {
     let h1 = ok("results_summary", json!({"file": fs}))["manifest"]["inputs_hash"].clone();
     ok("simulate", json!({"file": fs}));
     assert_eq!(ok("results_summary", json!({"file": fs}))["manifest"]["inputs_hash"], h1);
+    // Same geometry, but a center-split half-cell module uses parallel
+    // branch curves under the same asymmetric chimney shade.
+    ok("set_fields", json!({"file": fs, "edits": [{"pointer": "/library/modules/0/half_cell", "value": true}]}));
+    let half = ok("simulate", json!({"file": fs}));
+    let field = ok("scene_shading", json!({"file": fs}))["fields"][0].clone();
+    assert_eq!(field["half_cell"], true);
+    assert_eq!(field["nonlinear"], true);
+    assert_ne!(half["annual"]["ac_kwh"], json!(e1));
+    assert!(half["manifest"]["ledger_closure_error_kwh"].as_f64().unwrap().abs() < 1e-6);
     // The native roof placement command keeps both roof faces electrically bound.
     let multi = dir.join("multi.solarcraft");
     ok("create_project", json!({"file": multi, "name": "Multi-roof", "latitude": 4.711, "longitude": -74.072}));

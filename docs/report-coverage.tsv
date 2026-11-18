@@ -1,0 +1,139 @@
+order	reference_section	short	extended_default	planner_default	status	solarcraft_section	data_or_gap
+1	Title	yes			available	cover	Project and customer data
+2	Overview	yes			partial	production; finance	Plant KPIs, yield and finance. Avoided CO2 and the complete KPI arrangement are absent.
+3	Components	yes			partial	equipment	PV, inverter and storage quantities. Optimizer, EV, thermal and detailed mounting are absent.
+4	PV system	yes			partial	production; energy_balance	Production and annual use. Dedicated PV-use chart is absent.
+5	Consumption	yes			available	energy_balance	Annual load information and supply-source graphic when there is consumption
+6	Electric vehicle	yes			pending		EV model and travel electricity costs
+7	Battery system	yes			partial	battery	Annual battery operation and reserve data. Dedicated battery chart is absent in Short.
+8	Thermal system	yes			pending		Thermal subsystem
+9	Energy flow	yes			partial	energy_balance	Customer supply chart. Source-resolved full plant diagram is absent in Short.
+10	Economy	yes			available	finance	Financial summary and cumulative cash flow when investment is present
+1	Cover		yes	yes	available	cover	Project and customer metadata, designer, date, report title
+2	Overview		yes	yes	group		The report uses SolarCraft section groups
+3	Overview_Setup_Image3D		yes	yes	available	scene_plans	Current 3D scene, when present
+4	Overview_Setup_PVSystem		yes	yes	available	equipment	Assigned equipment, array size, orientation and string counts
+5	Overview_PVYield		yes	yes	available	production; monthly_results	Annual KPI and simulated monthly AC production
+6	Overview_ThermalSystem		yes	yes	pending		Thermal simulation and heat-pump models
+7	Overview_Profitability		yes	yes	available	finance	Current investment, bills, NPV, return and payback
+8	Overview_FootnoteDeviations		yes	yes	available	notes; run	Run-specific warnings, methods and production assumptions
+9	SystemSetup		yes	yes	group		The report uses SolarCraft section groups
+10	SystemSetup_Overview		yes	yes	group		The report uses SolarCraft section groups
+11	SystemSetup_Overview_SystemData		yes	yes	available	equipment	Assigned equipment, array size, orientation and string counts
+12	SystemSetup_Overview_SystemData_StartOfOperation		no	yes	pending		Commissioning date is not a project field
+13	SystemSetup_Overview_ClimateData		yes	yes	available	site_weather	Site, weather metadata, GHI and POA
+14	SystemSetup_Overview_Consumption		yes	yes	partial	monthly_grid	Total consumption and graph available. Named consumers and appliance schedules are absent.
+15	SystemSetup_Overview_Consumption_ConsumptionChart		yes	yes	partial	monthly_grid	Total consumption and graph available. Named consumers and appliance schedules are absent.
+16	SystemSetup_ModuleAreas		yes	yes	group		The report uses SolarCraft section groups
+17	SystemSetup_ModuleAreas_Data		yes	yes	available	equipment	Assigned equipment, array size, orientation and string counts
+18	SystemSetup_ModuleAreas_Image3D		yes	yes	available	scene_plans	Current 3D scene, when present
+19	SystemSetup_ModuleAreas_ImageRoofPlan		yes	yes	available	roof_plans	Editable roof outline, setbacks, modules and associated figures
+20	SystemSetup_ModuleAreas_ImagePhotoPlan		yes	yes	available	photo_plan	Rectified user photograph and current roof overlay, when attached
+21	SystemSetup_ModuleAreas_Shading		no	yes	available	losses; field_shading	Geometric field shading and electrical losses from the run
+22	SystemSetup_ModuleAreas_Degradation		no	yes	partial	financial_projection	Annual projection uses configured degradation. No per-module degradation history.
+23	SystemSetup_ModuleAreas_DegradationValue		no	yes	partial	financial_projection	Annual projection uses configured degradation. No per-module degradation history.
+24	SystemSetup_ModuleAreas_DegradationCharacteristicCurve		no	yes	pending		Nonlinear degradation characteristic model
+25	SystemSetup_Horizon3D		yes	yes	pending		Terrain horizon profile and panorama. Weather metadata identifies a provider-applied horizon.
+26	SystemSetup_InverterConfiguration		yes	yes	available	inverter_performance	Assigned strings, MPPT and inverter results
+27	SystemSetup_Mains		yes	yes	partial	connection_plan	Grid voltage and phases available. Protection and grid approval design are absent.
+28	SystemSetup_ThermalSystem		yes	yes	pending		Thermal simulation and heat-pump models
+29	SystemSetup_BatterySystem		yes	yes	available	battery	Selected storage, allocations and operating window
+30	SystemSetup_ElectricVehicle		yes	yes	pending		EV charging, SOC and vehicle selection in the plant model
+31	SystemSetup_Offgrid		yes	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+32	Results		yes	yes	group		The report uses SolarCraft section groups
+33	Results_PvSystem		yes	yes	group		The report uses SolarCraft section groups
+34	Results_PvSystem_EnergyFlowGraph		yes	yes	partial	energy_balance; balance_sankey	Customer supply mix and annual accounting boundary available. Source tracing through all batteries and converters is absent.
+35	Results_PvSystem_ProductionForecast		yes	yes	available	production; monthly_results	Annual KPI and simulated monthly AC production
+36	Results_PvSystem_ProductionForecastGraph		no	yes	available	production; monthly_results	Annual KPI and simulated monthly AC production
+37	Results_PvSystem_ProductionForecastTable		no	yes	available	production; monthly_results	Annual KPI and simulated monthly AC production
+38	Results_PvSystem_Surplus		yes	yes	available	monthly_grid	Stored monthly grid exchange
+39	Results_PvSystem_SurplusGraph		yes	yes	available	monthly_grid	Planner plots monthly simulated grid export.
+40	Results_PvSystem_SurplusTable		no	yes	available	monthly_grid	Stored monthly grid exchange
+41	Results_PvSystem_UseOfPVEnergy		yes	yes	partial	energy_balance	Annual PV generation, direct use and export available. Full PV destination matrix is absent.
+42	Results_PvSystem_UseOfPVEnergyGraph		yes	yes	pending	energy_balance	Dedicated PV-destination graphic. Existing chart shows customer supply.
+43	Results_PvSystem_UseOfPVEnergyTable		no	yes	partial	energy_balance	Annual PV generation, direct use and export available. Full PV destination matrix is absent.
+44	Results_PvSystem_ConsumptionCoverage		yes	yes	available	energy_balance; monthly_grid	Annual supply chart, annual energy balance and monthly served demand
+45	Results_PvSystem_ConsumptionCoverageGraph		yes	yes	available	energy_balance; monthly_grid	Annual supply chart, annual energy balance and monthly served demand
+46	Results_PvSystem_ConsumptionCoverageTable		no	yes	available	energy_balance; monthly_grid	Annual supply chart, annual energy balance and monthly served demand
+47	Results_PvSystem_TotalConsumptionCoverage		yes	yes	pending		Combined EV and thermal load accounting
+48	Results_PvSystem_TotalConsumptionCoverageGraph		yes	yes	pending		Combined EV and thermal load accounting
+49	Results_PvSystem_TotalConsumptionCoverageTable		no	yes	pending		Combined EV and thermal load accounting
+50	Results_PvSystem_ProductionForecastAllInverters		no	yes	available	inverter_performance; monthly_inverters	Annual and monthly net AC production from each simulated inverter.
+51	Results_PvSystem_ProductionForecastAllInvertersGraph		no	yes	available	monthly_inverters	Planner plots monthly output from each simulated inverter.
+52	Results_PvSystem_ProductionForecastAllInvertersTable		no	yes	available	monthly_inverters	Planner tables contain monthly net AC energy by inverter.
+53	Results_PvSystem_SystemUtilization		no	yes	available	monthly_performance	Monthly PR and specific yield derived from stored results
+54	Results_PvSystem_SystemUtilizationGraph		no	yes	available	monthly_performance	Planner plots the monthly performance ratio.
+55	Results_PvSystem_SystemUtilizationTable		no	yes	available	monthly_performance	Monthly PR and specific yield derived from stored results
+56	Results_PvSystem_RadiationPerModule		no	yes	partial	array_irradiation; field_shading	Incident and effective irradiation by array. Absolute irradiation of individual modules is absent.
+57	Results_PvSystem_RadiationPerModuleGraph		no	yes	partial	array_irradiation	Monthly incident and effective irradiation charts by array. Individual module charts are absent.
+58	Results_PvSystem_RadiationPerModuleTable		no	yes	partial	array_irradiation	Monthly incident and effective irradiation by array. Individual module rows are absent.
+59	Results_PvSystem_PvEnergyOverObservationPeriod		no	yes	available	financial_projection	Projected energy read from the finance run
+60	Results_PvSystem_PvEnergyOverObservationPeriodGraph		no	yes	available	financial_projection	Plot of annual energy from the finance projection.
+61	Results_PvSystem_PvEnergyOverObservationPeriodTable		no	yes	available	financial_projection	Projected energy read from the finance run
+62	Results_PvSystem_ModuleTemperature		no	yes	available	monthly_performance	Mean simulated module temperature in illuminated hours
+63	Results_PvSystem_ModuleTemperatureGraph		no	yes	available	monthly_performance	Planner plots the mean module temperature in illuminated hours.
+64	Results_PvSystem_ModuleTemperatureTable		no	yes	available	monthly_performance	Mean simulated module temperature in illuminated hours
+65	Results_PvSystem_SocBatterySystem		no	yes	available	monthly_storage	Charge, discharge and range of recorded SOC by month when storage exists
+66	Results_PvSystem_SocBatterySystemGraph		no	yes	available	monthly_storage	Plot of monthly recorded minimum and maximum battery SOC.
+67	Results_PvSystem_SocBatterySystemTable		no	yes	available	monthly_storage	Charge, discharge and range of recorded SOC by month when storage exists
+68	Results_PvSystem_SocElectricCar		no	yes	pending		EV charging, SOC and vehicle selection in the plant model
+69	Results_PvSystem_SocElectricCarGraph		no	yes	pending		EV charging, SOC and vehicle selection in the plant model
+70	Results_PvSystem_SocElectricCarTable		no	yes	pending		EV charging, SOC and vehicle selection in the plant model
+71	Results_PvSystem_ThermalSystem		yes	yes	pending		Thermal simulation and heat-pump models
+72	Results_PvSystem_ThermalSystemGraph		yes	yes	pending		Thermal simulation and heat-pump models
+73	Results_PvSystem_ThermalSystemTable		no	yes	pending		Thermal simulation and heat-pump models
+74	Results_PvSystem_HeatpumpCop		no	yes	pending		Thermal simulation and heat-pump models
+75	Results_PvSystem_HeatpumpCopGraph		no	yes	pending		Thermal simulation and heat-pump models
+76	Results_PvSystem_HeatpumpCopTable		no	yes	pending		Thermal simulation and heat-pump models
+77	Results_PvSystem_Offgrid		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+78	Results_PvSystem_Offgrid_Verbrauch		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+79	Results_PvSystem_Offgrid_VerbrauchGraph		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+80	Results_PvSystem_Offgrid_VerbrauchTable		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+81	Results_PvSystem_Offgrid_Cluster		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+82	Results_PvSystem_Offgrid_ClusterGraph		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+83	Results_PvSystem_Offgrid_ClusterTable		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+84	Results_PvSystem_Offgrid_Soc		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+85	Results_PvSystem_Offgrid_SocGraph		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+86	Results_PvSystem_Offgrid_SocTable		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+87	Results_PvSystem_Offgrid_PvEnergy		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+88	Results_PvSystem_Offgrid_PvEnergyGraph		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+89	Results_PvSystem_Offgrid_PvEnergyTable		no	yes	pending	outage_service	Grid-outage results exist. A standalone off-grid cluster model is absent.
+90	Results_PvSystem_Offgrid_BackupGenerator		no	yes	partial	outage_service	Generator production and unserved demand during grid outages. Full off-grid operation is absent.
+91	Results_PvSystem_Offgrid_BackupGeneratorGraph		no	yes	partial	outage_service	Monthly backup generation plot when the grid-outage run dispatches a generator. Standalone dispatch is absent.
+92	Results_PvSystem_Offgrid_BackupGeneratorTable		no	yes	partial	outage_service	Generator production and unserved demand during grid outages. Full off-grid operation is absent.
+93	Results_PvSystem_GraphsFromDiagramEditor		yes	yes	pending		Configurable diagram editor
+94	Results_PerModuleArea		no	yes	partial	equipment; array_irradiation; field_shading	Per-array inputs and irradiation with field shading diagnostics. Separate energy balance for each area is absent.
+95	Results_GEG		no	yes	pending		GEG calculation
+96	EnergyBalance		no	yes	available	balance_sankey	Annual input/output totals and balanced proportional flow diagram
+97	EnergyBalanceSankeyDiagram		no	yes	available	balance_sankey	Annual input/output totals and balanced proportional flow diagram
+98	FinancialAnalysis		yes	yes	group		The report uses SolarCraft section groups
+99	FinancialAnalysis_Overview		yes	yes	available	finance	Current investment, bills, NPV, return and payback
+100	FinancialAnalysis_Cashflow		yes	yes	available	cash_flow; finance	Stored yearly cash flow and cumulative curve
+101	FinancialAnalysis_Cashflow_Table		yes	yes	available	cash_flow; finance	Stored yearly cash flow and cumulative curve
+102	FinancialAnalysis_Cashflow_Diagrams		yes	yes	available	cash_flow; finance	Stored yearly cash flow and cumulative curve
+103	FinancialAnalysis_CashflowMinusPendingLoans_Diagram		yes	yes	available	financial_projection	Cumulative cash flow less the scheduled outstanding loan.
+104	FinancialAnalysis_ElectricityCostDevelopment_Diagram		yes	yes	available	financial_projection	Projected before and after bills using first-year costs, escalation and simulated savings.
+105	FinancialAnalysis_EnergyPriceDevelopment_Diagram		yes	yes	partial	financial_projection	Projected effective import price when there is a baseline import bill. Individual tariff price trajectories are absent.
+106	FinancialAnalysis_EnergySupplyAccount		yes	yes	available	energy_account	Before and after bill components from the run
+107	FinancialAnalysis_EnergySupplyAccount_Table		yes	yes	available	energy_account	Before and after bill components from the run
+108	FinancialAnalysis_EnergySupplyAccount_ElectricityCostSaving_Diagramm		yes	yes	available	energy_account	Year-one before and after bill totals from the run.
+109	DataSheets		no	yes	group		The report uses SolarCraft section groups
+110	DataSheetPV		no	yes	partial	datasheets	Selected electrical ratings and dimensions. Full vendor datasheet reproduction is absent.
+111	DataSheetPowerOptimizer		no	yes	pending		Selected optimizer and operating model
+112	DataSheetInv		no	yes	partial	datasheets	Selected electrical ratings and dimensions. Full vendor datasheet reproduction is absent.
+113	DataSheetBackupGenerator		no	yes	partial	storage_datasheets	Selected equipment ratings and cell information. Complete catalog-field annexes are absent.
+114	DataSheetBatteryInverter		no	yes	partial	storage_datasheets	Selected equipment ratings and cell information. Complete catalog-field annexes are absent.
+115	DataSheetBatterSystem		no	yes	partial	storage_datasheets	Selected equipment ratings and cell information. Complete catalog-field annexes are absent.
+116	DataSheetBattery		no	yes	partial	storage_datasheets	Selected equipment ratings and cell information. Complete catalog-field annexes are absent.
+117	DataSheetElectricVehicle		no	yes	pending		EV charging, SOC and vehicle selection in the plant model
+118	Plans		yes	yes	group		The report uses SolarCraft section groups
+119	PhotoOfPhotoPlan		yes	yes	available	photo_plan	Rectified user photograph and current roof overlay, when attached
+120	PlanOfRoofPlan		yes	yes	available	roof_plans	Editable roof outline, setbacks, modules and associated figures
+121	CircuitDiagram		yes	yes	partial	connection_plan	PV-to-grid overview. Detailed device, conductor and protection schematics are absent.
+122	OverviewPlan		yes	yes	available	scene_plans	Current 3D scene, when present
+123	DimensioningPlan		yes	yes	partial	roof_plans; photo_plan	Roof dimensions are in the plan data. A dedicated dimension sheet is absent.
+124	StringPlan		yes	yes	available	scene_plans	Top-down identified strings with planned modules, when routed
+125	CablePlan		yes	yes	partial	string_routes	Measured jumpers and home-run lengths. A dedicated cable route drawing is absent.
+126	Partslist		yes	yes	partial	equipment	Assigned equipment quantities. Mounting, hardware and conductor bill of materials is absent.
+127	Screenshots		yes	yes	partial	scene_plans	Generated scene views. A user-curated screenshot collection is absent.
+128	FurtherPictures		yes	yes	pending		User-selected illustration attachments

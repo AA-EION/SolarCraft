@@ -78,6 +78,7 @@
           </StackPanel>
 
           <StackPanel x:Name="RoofPage" Spacing="10" Visibility="Collapsed">
+            <Button x:Name="PhotoPlanButton" Click="OnPhotoPlan" />
             <ComboBox x:Name="RoofShapeBox" Width="260" SelectedIndex="0" SelectionChanged="OnRoofShape" />
             <NumberBox x:Name="EaveBox" Width="220" HorizontalAlignment="Left" Value="10" />
             <NumberBox x:Name="RidgeBox" Width="220" HorizontalAlignment="Left" Value="6" Visibility="Collapsed" />

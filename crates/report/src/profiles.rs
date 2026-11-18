@@ -29,26 +29,36 @@ pub struct ContentSection {
 }
 
 impl ContentSection {
-    fn new(id: &'static str, title: impl Into<String>) -> Self {
+    pub(crate) fn new(id: &'static str, title: impl Into<String>) -> Self {
         Self { id, title: title.into(), blocks: vec![] }
     }
 
-    fn text(&mut self, text: impl Into<String>) {
+    pub(crate) fn text(&mut self, text: impl Into<String>) {
         let text = text.into();
         if !text.is_empty() { self.blocks.push(ContentBlock::Text { text }); }
     }
 
-    fn table(&mut self, header: Vec<String>, rows: impl IntoIterator<Item = impl Into<Vec<String>>>) {
+    pub(crate) fn table(&mut self, header: Vec<String>, rows: impl IntoIterator<Item = impl Into<Vec<String>>>) {
         let rows: Vec<_> = rows.into_iter().map(Into::into).collect();
         if !rows.is_empty() { self.blocks.push(ContentBlock::Table { header, rows }); }
     }
 
-    fn figure(&mut self, svg: String, caption: impl Into<String>, view: &mut View) {
+    pub(crate) fn figure(&mut self, svg: String, caption: impl Into<String>, view: &mut View) {
         let index = view.figures.len();
         let file = format!("figure-{index}.svg");
         view.figures.push(svg);
         self.blocks.push(ContentBlock::Figure { file, index, caption: caption.into() });
     }
+}
+
+pub(crate) fn add_roof_photo(view: &mut View, caption: String, svg: String) {
+    let lang = crate::i18n::Lang::parse(&view.lang).unwrap_or(crate::i18n::Lang::En);
+    let index = view.contents.iter().position(|section| section.id == "photo_plan");
+    let mut section = index.map(|i| view.contents.remove(i)).unwrap_or_else(|| ContentSection::new("photo_plan",
+        tr(lang, "Calibrated roof photographs", "Fotos de cubierta calibradas", "Kalibrierte Dachfotos", "Fotos calibradas do telhado")));
+    section.figure(svg, caption, view);
+    let index = index.unwrap_or_else(|| view.contents.iter().position(|s| matches!(s.id, "notes" | "run")).unwrap_or(view.contents.len()));
+    view.contents.insert(index, section);
 }
 
 pub(crate) fn compose(view: &mut View, input: &ReportInput) {
@@ -114,6 +124,7 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
     }
 
     if !short {
+        crate::detail::results(view, input);
         let mut losses = ContentSection::new("losses", view.s["losses"]);
         losses.text(view.s["losses_intro"]);
         losses.figure(view.waterfall_svg.clone(), "", view);
@@ -147,6 +158,7 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
     }
     if view.report_type == SystemPlanner {
         view.contents.extend(planner_sections(input));
+        crate::detail::planner(view, input);
     }
     if !view.notes.is_empty() {
         let mut notes = ContentSection::new("notes", view.s["notes"]);

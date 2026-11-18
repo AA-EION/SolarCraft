@@ -119,6 +119,14 @@ pub struct RoofLayout {
     pub inputs_key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoofPhoto {
+    pub array_id: String,
+    pub source_hash: String,
+    pub rectified_hash: String,
+    pub control: solarcraft_geometry::photo::Control,
+}
+
 /// Loss assumptions in percent of energy at that stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Losses {
@@ -201,6 +209,8 @@ pub struct Project {
     /// 3D scene: buildings, obstacles, terrain, module fields and strings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<solarcraft_scene::Scene>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roof_photos: Vec<RoofPhoto>,
 }
 
 impl Project {
@@ -237,7 +247,7 @@ impl Project {
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None,
-            tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None,
+            tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None, roof_photos: vec![],
         };
         derive::derive(&mut p);
         p

@@ -3,5 +3,6 @@
 /// Polygon triangulation ported from IngeTrazo `core/triangulate.py` (see crates/ingetrazo).
 pub use solarcraft_ingetrazo::core::triangulate as earcut;
 pub mod layout;
+pub mod photo;
 pub mod poly;
 pub mod roof3d;

@@ -69,6 +69,12 @@ fn each_report_uses_distinct_sections_in_both_formats() {
         assert!(v.contents.iter().any(|s| s.id == "production"));
         assert_eq!(v.contents.iter().any(|s| s.id == "monthly_results"), kind != ReportType::CustomerShort);
         assert_eq!(v.contents.iter().any(|s| s.id == "datasheets"), kind == ReportType::SystemPlanner);
+        for planner in ["balance_sankey", "connection_plan"] {
+            assert_eq!(v.contents.iter().any(|s| s.id == planner), kind == ReportType::SystemPlanner);
+        }
+        for extended in ["monthly_grid", "monthly_performance", "energy_account", "financial_projection"] {
+            assert_eq!(v.contents.iter().any(|s| s.id == extended), kind != ReportType::CustomerShort);
+        }
         section_counts.push(v.contents.len());
         assert!(pdf::render(&v, input.date).unwrap().starts_with(b"%PDF-"));
         assert!(docx::render(&v).unwrap().starts_with(b"PK"));

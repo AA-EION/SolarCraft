@@ -29,7 +29,7 @@ fn v<T: serde::Serialize>(x: &T) -> Value { serde_json::to_value(x).unwrap_or(Va
 pub const METHODS: &[&str] = &[
     "scene_get", "scene_edit", "scene_place_roof", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
-    "use_demo_weather", "set_roof", "add_module", "simulate", "explain", "export_report", "undo", "history",
+    "use_demo_weather", "set_roof", "photo_source", "photo_layout", "add_module", "simulate", "explain", "export_report", "undo", "history",
     "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
     "report_preview", "catalog_audit", "catalog_import", "catalog_search", "catalog_details", "catalog_history", "catalog_pin", "catalog_apply_tariff", "catalog_coverage", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import", "library_import_workbook", "library_count",
@@ -95,6 +95,11 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             Ok(json!({"modules_fit": a.roof.as_ref().map(|r| r.modules.len()), "orientation": a.roof.as_ref().map(|r| r.orientation), "target_kwp": a.target_kwp.value, "strings": a.strings.value, "modules_per_string": a.modules_per_string.value, "issues": solarcraft_model::validate::validate(&p)}))
         }
         "use_demo_weather" => Ok(v(&app::use_demo_weather(&path(params, "file")?)?)),
+        "photo_source" => app::photo::source(&path(params, "source")?),
+        "photo_layout" => {
+            let options = serde_json::from_value(arg(params, "options")?.clone()).map_err(|error| app::e("INVALID_ARGUMENT", error))?;
+            app::photo::layout(&path(params, "file")?, &path(params, "source")?, options, params.get("preview").and_then(Value::as_bool).unwrap_or(true))
+        }
         "add_module" => {
             let m: app::ModuleInput = serde_json::from_value(arg(params, "module")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("module: {e}") })?;
             Ok(v(&app::add_module(&path(params, "file")?, m)?))

@@ -87,20 +87,58 @@ impl IvCurve {
     pub(crate) fn substrings(levels: &[(DiodeParams, u32)], count_per_module: u32, forward_v: f64) -> Option<Self> {
         let count_per_module = f64::from(count_per_module);
         let knees: Vec<_> = levels.iter().map(|(p, _)| p.current(-forward_v * count_per_module)).collect();
+        Self::series(&knees, |i| levels.iter().zip(&knees).map(|((p, count), knee)| {
+            let v = if i >= *knee { -forward_v } else { (p.voltage(i) / count_per_module).max(-forward_v) };
+            v * f64::from(*count)
+        }).sum())
+    }
+
+    /// Each half-cell bypass group connects two opposing substrings in
+    /// parallel at the same voltage. Their currents are added before applying
+    /// the shared diode clamp. The groups then connect in series.
+    pub(crate) fn parallel_substrings(levels: &[(DiodeParams, Option<DiodeParams>, u32)], groups: u32, forward_v: f64) -> Option<Self> {
+        let groups = f64::from(groups);
+        let clamp = -forward_v * groups;
+        let pairs: Vec<_> = levels.iter().map(|(first, second, count)| {
+            let knot_table = second.map(|second| {
+                let upper = first.voc().max(second.voc());
+                let mut voltages: Vec<_> = (0..=72).map(|k| clamp + (upper - clamp) * f64::from(k) / 72.0).collect();
+                voltages.extend([first.voc(), second.voc(), first.mpp().0, second.mpp().0]);
+                voltages.sort_unstable_by(f64::total_cmp);
+                voltages.dedup();
+                voltages.into_iter().map(|v| (0.5 * (first.current(v) + second.current(v)), v)).collect::<Vec<_>>()
+            });
+            let knee = knot_table.as_ref().map_or_else(|| first.current(clamp), |knots| knots[0].0);
+            (first, knot_table, knee, *count)
+        }).collect();
+        let knees: Vec<_> = pairs.iter().map(|p| p.2).collect();
+        Self::series(&knees, |i| pairs.iter().map(|(first, table, knee, count)| {
+            let v = if i >= *knee {
+                clamp
+            } else if let Some(knots) = table {
+                let next = knots.partition_point(|&(current, _)| current > i).clamp(1, knots.len() - 1);
+                let (a, v_a) = knots[next - 1];
+                let (b, v_b) = knots[next];
+                v_a + (v_b - v_a) * ((a - i) / (a - b).max(1e-12)).clamp(0.0, 1.0)
+            } else {
+                first.voltage(i)
+            };
+            v * f64::from(*count) / groups
+        }).sum())
+    }
+
+    fn series(knees: &[f64], at_current: impl Fn(f64) -> f64) -> Option<Self> {
         let largest = knees.iter().copied().fold(0.0, f64::max);
         if largest <= 1e-9 { return None; }
         let mut currents: Vec<_> = (0..=40).map(|k| largest * f64::from(k) / 40.0).collect();
-        for knee in &knees {
+        for knee in knees {
             currents.extend([0.995 * knee, *knee, 1.005 * knee]);
         }
         currents.sort_unstable_by(f64::total_cmp);
         currents.dedup();
         let mut knots: Vec<(f64, f64)> = vec![];
         for i in currents {
-            let v: f64 = levels.iter().zip(&knees).map(|((p, count), knee)| {
-                let v = if i >= *knee { -forward_v } else { (p.voltage(i) / count_per_module).max(-forward_v) };
-                v * f64::from(*count)
-            }).sum();
+            let v = at_current(i);
             if v <= 0.0 {
                 let &(previous_v, previous_i) = knots.last()?;
                 knots.push((0.0, previous_i + (i - previous_i) * previous_v / (previous_v - v)));
@@ -250,5 +288,23 @@ mod tests {
         assert!(unrestricted.p_operating < average.p_operating * 0.96);
         let limited = operate_curves(&curves, 0.0, 800.0, 5.0, f64::INFINITY);
         assert!(limited.p_operating < unrestricted.p_operating && limited.window_limited);
+    }
+
+    #[test]
+    fn half_cell_pair_keeps_the_unshaded_parallel_branch() {
+        let bright = params(1000.0);
+        let dark = params(100.0);
+        let pair = |levels: &[(DiodeParams, Option<DiodeParams>, u32)]|
+            IvCurve::parallel_substrings(levels, 3, 0.5).unwrap();
+        let power = |curve| operate_curves(&[(curve, 1.0)], 0.0, 600.0, 30.0, f64::INFINITY).p_operating;
+        let uniform = power(pair(&[(bright, None, 30)]));
+        let shaded = power(pair(&[(bright, Some(dark), 30)]));
+        let reversed = power(pair(&[(dark, Some(bright), 30)]));
+        let full = power(IvCurve::substrings(&[(bright, 30)], 3, 0.5).unwrap());
+        assert!((uniform - full).abs() < 1e-10);
+        assert!((shaded - reversed).abs() < 1e-10);
+        assert!((0.48..0.59).contains(&(shaded / uniform)), "{shaded} / {uniform}");
+        let one_shared_group = power(pair(&[(bright, None, 20), (bright, Some(dark), 10)]));
+        assert!((0.59..0.72).contains(&(one_shared_group / uniform)), "{one_shared_group} / {uniform}");
     }
 }

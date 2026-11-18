@@ -21,7 +21,7 @@ pub mod finance;
 pub mod loads;
 mod partial_shading;
 
-pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 3)");
+pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 4)");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step { pub key: String, pub label: String, pub value: f64, pub delta: f64, pub delta_pct: f64 }
@@ -57,6 +57,10 @@ pub struct SimResult {
     /// Per inverter and MPPT: stringing and simulated energy.
     #[serde(default)]
     pub electrical: Vec<UnitResult>,
+    /// Irradiation incident on the plane and effective at the module cells,
+    /// averaged across each assigned array.
+    #[serde(default)]
+    pub array_irradiation: Vec<ArrayIrradiation>,
     /// Hourly energy flows (PV, consumption, battery, grid).
     #[serde(default)]
     pub flows: energy::Flows,
@@ -91,13 +95,29 @@ pub struct FieldShade {
     pub modules: Vec<solarcraft_scene::shade::ModuleShade>,
     #[serde(default)]
     pub nonlinear: bool,
+    #[serde(default)]
+    pub half_cell: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArrayIrradiation {
+    pub array_id: String,
+    pub name: String,
+    pub poa_kwh_m2: [f64; 12],
+    pub effective_kwh_m2: [f64; 12],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MpptResult { pub index: u32, pub strings: String, pub stc_kw: f64, pub dc_kwh: f64, pub limited_hours: u32, pub mismatch_kwh: f64, pub limit_loss_kwh: f64 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UnitResult { pub id: String, pub name: String, pub inverter_id: String, pub stc_kw: f64, pub ac_kw: f64, pub dc_ac_ratio: f64, pub dc_kwh: f64, pub ac_kwh: f64, pub clipped_kwh: f64, pub mppts: Vec<MpptResult> }
+pub struct UnitResult {
+    pub id: String, pub name: String, pub inverter_id: String, pub stc_kw: f64, pub ac_kw: f64, pub dc_ac_ratio: f64,
+    pub dc_kwh: f64, pub ac_kwh: f64, pub clipped_kwh: f64, pub mppts: Vec<MpptResult>,
+    /// Signed AC energy after wiring, availability and night consumption.
+    #[serde(default)]
+    pub monthly_net_ac_kwh: [f64; 12],
+}
 
 #[derive(Debug)]
 pub struct SimError(pub String);
@@ -156,6 +176,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     let mut hourly = Hourly { unix_mid: w.hours.iter().map(|h| h.unix_mid).collect(), poa_w_m2: vec![0.0; n], t_cell_c: vec![0.0; n], dc_w: vec![0.0; n], ac_w: vec![0.0; n] };
     let mut warnings: Vec<Note> = vec![];
     let mut module_shading: Vec<FieldShade> = vec![];
+    let mut array_irradiation = vec![];
     if w.horizon_applied { warnings.push(Note { code: "HORIZON_IN_WEATHER".into(), subject: String::new(), value: 0.0, text: "Weather beam irradiance already includes far-horizon shading; no additional horizon applied.".into() }); }
     let sun: Vec<spa::SolarPosition> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, spa::delta_t_estimate(2025.0))).collect();
 
@@ -167,6 +188,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         let module = p.library.module(&a.module_id.value).ok_or_else(|| SimError("module missing".into()))?;
         let n_mod = assigned.get(&a.id).copied().unwrap_or(0) as f64;
         if n_mod == 0.0 { continue; }
+        let mut irradiation = ArrayIrradiation { array_id: a.id.clone(), name: a.name.value.clone(), ..Default::default() };
         use partial_shading::ModuleCurve;
         let module_curve = match p.simulation.pv_model {
             solarcraft_model::PvModel::SingleDiode => ModuleCurve::Single(module.desoto().ok_or_else(|| SimError("module not fitted".into()))?),
@@ -183,13 +205,14 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None };
         let shade = if let Some((scene, field)) = bound_field(p, a)? {
             let routes = partial_shading::routes(field, module, &elec, &a.id);
-            let (summary, diagnostic, trace) = trace_field(scene, field, a, &sun, w, routes.is_ok())?;
+            let (summary, diagnostic, trace) = trace_field(scene, field, a, &sun, w, routes.is_ok(), module.half_cell)?;
             match (routes, trace) {
                 (Ok(routes), Some(trace)) => {
                     ah.shaded = Some(partial_shading::ShadedArray {
                         trace, routes, module: module_curve, hours: vec![partial_shading::Light::default(); n],
                         diodes: field.module.bypass_diodes,
                         forward_v: module.bypass_diode_voltage_v.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.5),
+                        half_cell: module.half_cell,
                     });
                 }
                 (Err(reason), _) => warnings.push(Note { code: "SCENE_SHADING_APPROXIMATION".into(), subject: a.name.value.clone(),
@@ -234,12 +257,18 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             }
             monthly[month_of[k]].ghi_kwh_m2 += ghi * area / 1000.0;
             monthly[month_of[k]].poa_kwh_m2 += poa.global * area / 1000.0;
+            irradiation.poa_kwh_m2[month_of[k]] += poa.global / 1000.0;
+            irradiation.effective_kwh_m2[month_of[k]] += e_eff / 1000.0;
             hourly.poa_w_m2[k] += (poa.global * area) as f32;
             hourly.t_cell_c[k] += (tc * area) as f32;
         }
         if let Some(sh) = &shade {
             let text = if sh.scene {
-                let treatment = if ah.shaded.is_some() { "string I–V curves with explicit bypass diodes" } else { "field-average electrical approximation" };
+                let treatment = match &ah.shaded {
+                    Some(shaded) if shaded.half_cell => "parallel half-cell substrings with shared bypass diodes",
+                    Some(_) => "string I–V curves with explicit bypass diodes",
+                    None => "field-average electrical approximation",
+                };
                 format!("{}: near shading from the 3D scene ({} occluding objects, {} substrings per module, diffuse sky-view factor {:.3}). Electrical treatment: {treatment}.", a.name.value, sh.obstacles, sh.diodes, sh.diffuse_factor)
             } else {
                 format!("{}: near shading from {} roof obstacle(s) included (beam ray-traced hourly, diffuse sky-view factor {:.3}); bypass-diode effects of partial shading are modelled only for 3D-scene fields.", a.name.value, sh.obstacles, sh.diffuse_factor)
@@ -247,6 +276,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             warnings.push(Note { code: if sh.scene { "SCENE_SHADING".into() } else { "NEAR_SHADING".into() }, subject: a.name.value.clone(), value: sh.obstacles as f64, text });
         }
         arr_hours.insert(a.id.clone(), ah);
+        array_irradiation.push(irradiation);
     }
     if area_tot <= 0.0 { return Err(SimError("no modules assigned to inverters".into())); }
 
@@ -346,6 +376,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
             ur.dc_kwh += dcw / 1000.0; ur.ac_kwh += avail.max(0.0) / 1000.0; ur.clipped_kwh += (unclipped - clipped) / 1000.0;
             monthly[month_of[k]].dc_kwh += dcw / 1000.0;
             monthly[month_of[k]].ac_kwh += avail / 1000.0;
+            ur.monthly_net_ac_kwh[month_of[k]] += avail / 1000.0;
             hourly.dc_w[k] += dcw as f32;
             hourly.ac_w[k] += avail as f32;
         }
@@ -412,7 +443,7 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     Ok(SimResult {
         manifest: RunManifest { inputs_hash, engine: ENGINE_VERSION.into(), weather_hash: weather_hash.into(), weather_provider: w.provenance.provider.clone(), transposition: format!("{:?}", p.simulation.transposition.value), pv_model: p.simulation.pv_model, hours: n, ledger_closure_error_kwh: closure },
         annual: Annual { dc_kwp, ac_kw, ghi_kwh_m2: irradiance_ledger[0].value, poa_kwh_m2: poa, ac_kwh, specific_yield_kwh_kwp: ac_kwh / dc_kwp, performance_ratio: ac_kwh / (poa * dc_kwp) },
-        electrical: unit_results, flows: en.flows, balance: en.balance, finance: Some(fin), local_hour,
+        electrical: unit_results, array_irradiation, flows: en.flows, balance: en.balance, finance: Some(fin), local_hour,
         irradiance_ledger, energy_ledger, monthly, hourly, warnings, module_shading,
     })
 }
@@ -488,7 +519,7 @@ pub fn near_shading(a: &solarcraft_model::Array, sun: &[spa::SolarPosition]) -> 
 /// bypass-diode substring, every scene object and module as occluder).
 pub fn scene_shading(p: &Project, a: &solarcraft_model::Array, sun: &[spa::SolarPosition], w: &Weather) -> Result<Option<(NearShading, FieldShade)>, SimError> {
     let Some((scene, field)) = bound_field(p, a)? else { return Ok(None) };
-    let (summary, diagnostic, _) = trace_field(scene, field, a, sun, w, false)?;
+    let (summary, diagnostic, _) = trace_field(scene, field, a, sun, w, false, false)?;
     Ok(Some((summary, diagnostic)))
 }
 
@@ -503,7 +534,7 @@ fn bound_field<'a>(p: &'a Project, a: &solarcraft_model::Array) -> Result<Option
 }
 
 fn trace_field(sc: &solarcraft_scene::Scene, f: &solarcraft_scene::place::ModuleField, a: &solarcraft_model::Array,
-    sun: &[spa::SolarPosition], w: &Weather, nonlinear: bool)
+    sun: &[spa::SolarPosition], w: &Weather, nonlinear: bool, half_cell: bool)
     -> Result<(NearShading, FieldShade, Option<solarcraft_scene::shade::SubstringTrace>), SimError>
 {
     use solarcraft_scene::shade::{shade_field, shade_field_substrings, ShadeOptions};
@@ -511,13 +542,13 @@ fn trace_field(sc: &solarcraft_scene::Scene, f: &solarcraft_scene::place::Module
     let weights: Vec<f64> = w.hours.iter().map(|h| h.dni.max(0.0)).collect();
     let opts = ShadeOptions::default();
     let (fs, trace) = if nonlinear {
-        shade_field_substrings(sc, &f.id, &suns, &weights, &opts).map(|(summary, trace)| (summary, Some(trace)))
+        shade_field_substrings(sc, &f.id, &suns, &weights, &opts, half_cell).map(|(summary, trace)| (summary, Some(trace)))
     } else {
         shade_field(sc, &f.id, &suns, &weights, &opts).map(|summary| (summary, None))
     }.map_err(|err| SimError(format!("Shading field {}: {err}", f.id)))?;
     let wsum: f64 = weights.iter().sum::<f64>().max(1e-9);
     let loss = |v: &[f32]| v.iter().zip(&weights).map(|(x, w)| (1.0 - *x as f64) * w).sum::<f64>() / wsum * 100.0;
     let obstacles = sc.objects.iter().filter(|o| !o.hidden).count();
-    let field = FieldShade { field: f.id.clone(), array_id: a.id.clone(), diffuse_factor: fs.diffuse_factor, beam_loss_pct: loss(&fs.beam_bypass), beam_area_loss_pct: loss(&fs.beam_area), traced_directions: fs.traced_directions, modules: fs.modules, nonlinear };
+    let field = FieldShade { field: f.id.clone(), array_id: a.id.clone(), diffuse_factor: fs.diffuse_factor, beam_loss_pct: loss(&fs.beam_bypass), beam_area_loss_pct: loss(&fs.beam_area), traced_directions: fs.traced_directions, modules: fs.modules, nonlinear, half_cell: nonlinear && half_cell };
     Ok((NearShading { beam_shaded: fs.beam_bypass.iter().map(|x| 1.0 - x).collect(), beam_area_shaded: fs.beam_area.iter().map(|x| 1.0 - x).collect(), diffuse_factor: fs.diffuse_factor, obstacles, scene: true, diodes: f.module.bypass_diodes }, field, trace))
 }
