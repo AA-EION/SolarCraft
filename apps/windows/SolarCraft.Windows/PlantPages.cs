@@ -770,10 +770,11 @@ public sealed partial class MainWindow
             _compareRows = Arr(Api.Invoke("compare_variants", new { file })?["variants"]);
             _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en", report_type = SelectedReportType(), include_figures = true })?["contents"]);
             BuildPlantPages();
-            async Task Capture(NavigationViewItem item, string filename)
+            async Task Capture(NavigationViewItem item, string filename, Action? prepare = null)
             {
                 Nav.SelectedItem = item;
                 await Task.Delay(420);
+                if (prepare is not null) { prepare(); await Task.Delay(420); }
                 Content.UpdateLayout();
                 var rtb = new RenderTargetBitmap();
                 await rtb.RenderAsync(Content);
@@ -915,6 +916,22 @@ public sealed partial class MainWindow
                 throw new InvalidOperationException("Protection editor round-trip failed.");
             await Capture(NavIsland, "25-island-clusters.png");
             await Capture(NavCables, "26-routed-cables.png");
+            var initial = Api.Invoke("network_faults", new { file });
+            var savedStudy = Api.Invoke("network_faults", new { file, mode = "save", studies = initial?["example"]?.DeepClone() });
+            if (S(savedStudy?["results"]?[0]?["faults"]?[0], "status") != "pass")
+                throw new InvalidOperationException("The DC network study did not pass its synthetic duty checks.");
+            Reload();
+            await Capture(NavCables, "27-network-faults.png", () =>
+            {
+                var network = CablesPage.Children.OfType<Expander>().Single(x => x.Name == "NetworkFaultSection");
+                network.IsExpanded = true;
+                var contents = (StackPanel)network.Content;
+                var fault = contents.Children.OfType<Expander>().Single();
+                fault.IsExpanded = true;
+                ((StackPanel)fault.Content).Children.OfType<Expander>().Single().IsExpanded = true;
+                Content.UpdateLayout();
+                network.StartBringIntoView(new BringIntoViewOptions { VerticalAlignmentRatio = 0.0 });
+            });
         }
         catch (Exception ex) { ok = false; File.WriteAllText(IOPath.Combine(dir, "error.txt"), ex.ToString()); }
         Application.Current.Exit();

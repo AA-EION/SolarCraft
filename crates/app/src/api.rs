@@ -37,7 +37,7 @@ pub const METHODS: &[&str] = &[
     "scene_get", "scene_edit", "scene_place_roof", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
     "use_demo_weather", "set_roof", "photo_source", "photo_saved", "photo_layout", "add_module", "simulate", "explain", "export_report", "undo", "history",
-    "workflow_get", "workflow_set", "add_array", "cable_plan", "design_schedule", "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
+    "workflow_get", "workflow_set", "add_array", "cable_plan", "network_faults", "design_schedule", "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
     "report_preview", "catalog_audit", "catalog_import", "catalog_search", "catalog_details", "catalog_history", "catalog_pin", "catalog_apply_tariff", "catalog_coverage", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import", "library_import_workbook", "library_count",
 ];
@@ -134,6 +134,17 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let mode = params.get("mode").and_then(Value::as_str).unwrap_or("preview");
             if !matches!(mode, "preview" | "import_routes" | "save" | "apply" | "apply_hourly" | "apply_routed") { return Err(bad("unknown cable plan mode")); }
             app::planning::cable_plan(&path(params, "file")?, circuits, mode)
+        }
+        "network_faults" => {
+            let studies = params.get("studies").map(|value| serde_json::from_value(value.clone())).transpose()
+                .map_err(|error| bad(format!("studies: {error}")))?;
+            let save = match params.get("mode") {
+                None => false,
+                Some(Value::String(mode)) if mode == "preview" => false,
+                Some(Value::String(mode)) if mode == "save" => true,
+                _ => return Err(bad("use preview or save for a fault study")),
+            };
+            app::planning::network_faults(&path(params, "file")?, studies, save)
         }
         "design_schedule" => {
             let project = app::get_project(&path(params, "file")?)?;

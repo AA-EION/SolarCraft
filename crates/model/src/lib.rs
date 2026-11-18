@@ -14,6 +14,7 @@ pub mod workflow;
 pub mod cable;
 pub mod protection;
 pub mod fault;
+pub mod fault_network;
 pub mod local_cable;
 pub mod demand;
 
@@ -210,6 +211,8 @@ pub struct Project {
     pub workflow: workflow::Workflow,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cable_plan: Vec<cable::Circuit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub network_fault_studies: Vec<fault_network::Study>,
     /// Applied hourly design-point loss ratios (%); omitted sides keep fixed percentages.
     #[serde(default)]
     pub hourly_cables: cable::HourlyLosses,
@@ -271,7 +274,7 @@ impl Project {
             simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
-            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
+            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
             tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None, roof_photos: vec![],
         };
         derive::derive(&mut p);
@@ -305,6 +308,9 @@ impl Project {
     /// `/arrays/0/strings`). The field becomes user-owned, derived values are
     /// recomputed, and Easy-mode sizing rules are applied. Used by CLI, MCP and shells.
     pub fn set_by_pointer(&mut self, pointer: &str, value: serde_json::Value) -> Result<(), String> {
+        if pointer.split('/').nth(1) == Some("network_fault_studies") {
+            return Err("Use network fault studies to validate and save these inputs.".into());
+        }
         let mut doc = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
         let target = doc.pointer_mut(pointer).ok_or_else(|| format!("no such field: {pointer}"))?;
         let is_field = target.as_object().is_some_and(|o| o.contains_key("value") && o.contains_key("origin"));

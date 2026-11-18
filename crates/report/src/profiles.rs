@@ -309,6 +309,7 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
             }));
         if !local.blocks.is_empty() { out.push(local); }
     }
+    if !p.network_fault_studies.is_empty() { out.push(network_fault_section(input)); }
     if let Some(scene) = &p.scene {
         let mut routing = ContentSection::new("string_routes", tr(l, "String cable routes", "Rutas de cableado de cadenas", "String-Kabelwege", "Rotas de cabos das strings"));
         routing.table(vec![
@@ -360,4 +361,64 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
         out.push(modules);
     }
     out
+}
+
+fn network_fault_section(input: &ReportInput) -> ContentSection {
+    use solarcraft_model::{fault_network::Domain, protection::Status};
+    let l = input.lang;
+    let n = |value, digits| l.num(value, digits);
+    let mut section = ContentSection::new("network_fault_study", tr(l, "Network fault studies",
+        "Estudios de fallas de red", "Netzfehlerstudien", "Estudos de faltas na rede"));
+    let status = |value| match value {
+        Status::Pass => tr(l, "Pass", "Cumple", "Bestanden", "Aprovado"),
+        Status::Fail => tr(l, "Fail", "Falla", "Fehlgeschlagen", "Falha"),
+        Status::Incomplete => tr(l, "Incomplete", "Incompleto", "Unvollständig", "Incompleto"),
+    };
+    let fmt = |value: Option<f64>| value.map_or("–".into(), |value| n(value, 3));
+    let bus = tr(l, "Fault bus", "Bus de falla", "Fehlerknoten", "Barramento da falta");
+    let low = tr(l, "Minimum (kA)", "Mínima (kA)", "Minimum (kA)", "Mínima (kA)");
+    let high = tr(l, "Maximum (kA)", "Máxima (kA)", "Maximum (kA)", "Máxima (kA)");
+    let outcome = tr(l, "Status", "Estado", "Status", "Estado");
+    for study in &input.project.network_fault_studies {
+        let domain = match study.domain { Domain::AcThreePhase => "AC 3φ RMS", Domain::AcLoop => "AC loop RMS", Domain::DcPoleToPole => "DC +/−" };
+        section.text(format!("{} · {domain} · {}", study.name, study.reference));
+        let Ok(result) = study.assess() else {
+            section.text(status(Status::Incomplete));
+            continue;
+        };
+        section.table(vec![bus.clone(), low.clone(), high.clone(), outcome.clone()], result.faults.iter()
+            .map(|f| [f.bus.clone(), n(f.minimum_ka, 3), n(f.maximum_ka, 3), status(f.status)]));
+        section.table(vec![bus.clone(), tr(l, "Source terminal", "Terminal de fuente", "Quellenanschluss", "Terminal da fonte"),
+            tr(l, "Minimum case (kA)", "Caso mínimo (kA)", "Minimalfall (kA)", "Cenário mínimo (kA)"),
+            tr(l, "Maximum case (kA)", "Caso máximo (kA)", "Maximalfall (kA)", "Cenário máximo (kA)")],
+            result.faults.iter().flat_map(|f| f.sources.iter().map(|s|
+                [f.bus.clone(), format!("{} · {}", s.name, s.bus), fmt(s.minimum_state_ka), fmt(s.maximum_state_ka)])));
+        section.table(vec![bus.clone(), tr(l, "Device", "Protección", "Schutzgerät", "Dispositivo"), high.clone(),
+            tr(l, "Peak (kA)", "Pico (kA)", "Scheitel (kA)", "Pico (kA)"), outcome.clone()],
+            result.faults.iter().flat_map(|f| f.devices.iter().map(|d|
+                [f.bus.clone(), format!("{} · {}", d.link, d.model), n(d.maximum_ka, 3), fmt(d.peak_ka), status(d.status)])));
+        section.table(vec![bus.clone(), tr(l, "Backup → primary", "Respaldo → primaria", "Reserve → Hauptschutz", "Retaguarda → primário"),
+            tr(l, "Time ratio", "Relación", "Zeitverhältnis", "Relação"),
+            tr(l, "Required", "Requerida", "Erforderlich", "Exigida"), outcome.clone()],
+            result.faults.iter().flat_map(|f| f.coordination.iter().map(|p|
+                [f.bus.clone(), format!("{} → {}", p.backup_link, p.primary_link), fmt(p.time_ratio), n(p.minimum_time_ratio, 3), status(p.status)])));
+        for fault in &result.faults {
+            if !fault.outside_source_envelope.is_empty() {
+                section.text(format!("{} · {} · {}", fault.bus,
+                    tr(l, "Outside source envelope", "Fuera de límites de la fuente", "Außerhalb der Quellenkennwerte", "Fora dos limites da fonte"),
+                    fault.outside_source_envelope.join(", ")));
+            }
+            if !fault.source_paths_without_device.is_empty() {
+                section.text(format!("{} · {} · {}", fault.bus,
+                    tr(l, "Source path without protection", "Ruta de fuente sin protección", "Quellenpfad ohne Schutz", "Caminho da fonte sem proteção"),
+                    fault.source_paths_without_device.join(", ")));
+            }
+            if fault.staged_clearing_required {
+                section.text(format!("{} · {}", fault.bus, tr(l, "Review remaining feeds after the first primary device operates.",
+                    "Revise las fuentes restantes tras la primera actuación.", "Verbleibende Einspeisungen nach der ersten Abschaltung prüfen.",
+                    "Revise as fontes restantes após a primeira atuação.")));
+            }
+        }
+    }
+    section
 }

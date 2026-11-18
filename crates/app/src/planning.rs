@@ -74,6 +74,46 @@ pub fn set_roof(path: &Path, index: usize, value: Value) -> Result<Project> {
     Ok(project)
 }
 
+pub fn network_faults(path: &Path, edits: Option<Vec<solarcraft_model::fault_network::Study>>, commit: bool) -> Result<Value> {
+    let (mut store, project) = open(path)?;
+    if commit && edits.is_none() { return Err(e("FAULT_STUDY", "Provide the studies to save.")); }
+    let studies = edits.unwrap_or(project.network_fault_studies);
+    let mut names = std::collections::HashSet::new();
+    if studies.len() > 8 || studies.iter().any(|s| !names.insert(&s.name)) {
+        return Err(e("FAULT_STUDY", "Use at most eight uniquely named fault studies per project."));
+    }
+    let results = studies.iter().map(|study| study.assess().map_err(|error| e("FAULT_STUDY", format!("{}: {error}", study.name))))
+        .collect::<Result<Vec<_>>>()?;
+    let response = json!({"studies": studies, "results": results, "example": network_fault_example()});
+    if commit {
+        store.update("save network fault studies", |current| current.network_fault_studies = studies)
+            .map_err(|error| e("PROJECT_SAVE", error))?;
+    }
+    Ok(response)
+}
+
+fn network_fault_example() -> Value {
+    json!([{
+        "name": "Example DC bus", "reference": "Synthetic example · replace with project and manufacturer data",
+        "domain": "dc_pole_to_pole", "maximum_voltage_v": 54, "buses": ["Battery terminals", "Distribution bus"],
+        "links": [{
+            "id": "DC feeder", "from": "Battery terminals", "to": "Distribution bus",
+            "minimum_duty": {"r_mohm": 20}, "maximum_duty": {"r_mohm": 15},
+            "device": {"model": "Example DC fuse", "reference": "Synthetic 60 V DC fuse example", "rating": "dc",
+                "rated_voltage_v": 60, "breaking_ka": 5, "making_peak_ka": 6, "documented_peak_ka": 3,
+                "peak_reference": "Synthetic device-terminal envelope", "direct_curve_max_ka": 2,
+                "maximum_clearing": {"kind": "fuse", "model": "Example DC fuse",
+                    "reference": "Synthetic maximum clearing curve", "points": [[400, 0.15], [2000, 0.05]]}}
+        }],
+        "sources": [{
+            "bus": "Battery terminals", "name": "Battery bank", "reference": "Synthetic battery DC envelope",
+            "minimum": {"type":"voltage","volts": 42, "impedance": {"r_mohm": 50}},
+            "maximum": {"type":"voltage","volts": 54, "impedance": {"r_mohm": 25}}
+        }],
+        "faults": [{"bus": "Distribution bus", "maximum_clear_seconds": 0.2, "minimum_time_ratio": 2}]
+    }])
+}
+
 pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Result<Value> {
     let (mut store, mut project) = open(path)?;
     let mut circuits = edits.unwrap_or_else(|| project.cable_plan.clone());

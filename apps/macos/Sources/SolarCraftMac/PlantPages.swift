@@ -705,6 +705,7 @@ struct CablesPage: View {
                 }.disabled(!(0..<100).contains(dc) || !(0..<100).contains(ac))
             }
             CablePlannerSection()
+            NetworkFaultPlanner()
             let routes = dicts(m.designSchedule?["routes"])
             if routes.isEmpty {
                 Text(m.t("workflow_no_routes")).foregroundStyle(.secondary)

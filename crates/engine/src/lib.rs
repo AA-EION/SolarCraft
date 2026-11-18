@@ -613,6 +613,7 @@ pub fn inputs_hash(p: &Project, weather_hash: &str) -> String {
     let mut design = p.design_snapshot();
     if let Some(fields) = design.as_object_mut() {
         fields.remove("cable_plan"); // The simulation reads only applied loss percentages.
+        fields.remove("network_fault_studies"); // Independent design study, reported with the current cable plan.
         if p.workflow.system == solarcraft_model::workflow::SystemType::Custom {
             fields.remove("workflow");
         } else if let Some(workflow) = fields.get_mut("workflow").and_then(serde_json::Value::as_object_mut) {

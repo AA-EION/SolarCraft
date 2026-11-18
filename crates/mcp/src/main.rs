@@ -30,6 +30,18 @@ struct FileArg {
     file: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct NetworkFaultArgs {
+    /// Project file within the MCP workspace.
+    file: String,
+    /// Study objects. Omit to inspect saved studies and get a synthetic example.
+    /// See docs/cable-protection.md for impedance, voltage and curve units.
+    studies: Option<Vec<Value>>,
+    /// Persist the supplied study list as one undoable project edit.
+    #[serde(default)]
+    save: bool,
+}
+
 #[derive(Deserialize, serde::Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum Section { Grid, Loads, Storage, Tariff, Economics, Electrical, Losses, Simulation, Customer, Site }
@@ -649,6 +661,14 @@ impl SolarCraftMcp {
         let f = self.path(&a.file, true, true)?;
         let src = self.path(&a.source, false, true)?;
         self.api("scene_import", json!({"file": f, "source": src, "options": a.options.unwrap_or(json!({})), "preview": a.preview}))
+    }
+
+    #[tool(description = "Preview, load, or save radial AC/DC fault studies, device duty and upstream/downstream coordination using explicit source, conductor and device inputs.")]
+    async fn network_faults(&self, Parameters(a): Parameters<NetworkFaultArgs>) -> Result<CallToolResult, ErrorData> {
+        let file = self.path(&a.file, true, true)?;
+        let mut request = json!({"file": file, "mode": if a.save { "save" } else { "preview" }});
+        if let Some(studies) = a.studies { request["studies"] = json!(studies); }
+        self.api("network_faults", request)
     }
 
     #[tool(description = "Undo the last saved change to the project.")]

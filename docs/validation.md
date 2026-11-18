@@ -5,7 +5,7 @@ This file keeps two claims separate:
 - **Independent engineering validation.** SolarCraft is checked against published methods, open implementations and conservation laws.
 - **Reference parity.** SolarCraft's methods are compared with the behaviour recovered statically from PV\*SOL premium 2026 R4.
 
-No PV\*SOL result fixture has been run, so this file makes **no numerical parity claim** against PV\*SOL. The reference bundle states that the application was never executed, and owner-authorised saved projects with results are still outstanding.
+The private reference contains saved PV\*SOL results. The archived Rexplorer sample's hourly and monthly totals reconcile for four channels. A matched SolarCraft annual replay and accepted per-metric tolerances remain open. An isolated 60-cell module comparison found SolarCraft maximum-power differences of −0.032% at 1,000 W/m² and 25 °C, +3.062% at 200 W/m² and 25 °C, and +0.637% at 800 W/m² and 50 °C, measured against the offline reconstruction of the reference fit.
 
 ## 1. Independent validation (passing in CI)
 
@@ -46,7 +46,7 @@ The reference findings below come from the private bundle. Evidence keys resolve
 | Beam projection gate | Beam ratio set to 0 when cos(incidence) < 0.01 or sin(elevation) < 0.035 (≈ 2°) | pvlib-compatible: no elevation gate, beam where incidence < 90° | **Model choice / default.** Affects only the lowest sun hours, typically ≪ 0.5 % of annual POA | Hourly POA from a PV\*SOL run |
 | Perez 1990 | Same 8 bins and coefficients; F2 clamped at ≥ 0; brightness uses air mass min(20, 1/sin elevation) and 1367 W/m² | Same bins and coefficients (pvlib); F2 not clamped; Kasten–Young air mass and day-of-year extraterrestrial irradiance | **Model detail.** F2 clamp matters for negative-F2 bins (very clear, high sun on steep tilts); air mass differs near the horizon | Hourly POA |
 | Hay–Davies / Reindl anisotropy | Clear-sky-based index; separate diffuse output reports the isotropic share only | Extraterrestrial-based index (pvlib) | **Model choice.** Hay–Davies differs in the anisotropy index definition | Hourly POA |
-| Module model | Low-light anchor fit, optional two-diode model | CEC six-parameter single diode | **Model choice.** Two-diode not implemented | Module curves at 200/1000 W/m² |
+| Module model | Low-light anchor fit, optional two-diode model with a preferred and compatibility fit | CEC single diode and selectable two-diode fit | **Model choice.** The two-diode fit includes the terminal series drop in the MPP derivative and selects a different series-resistance solution. Independent module tests pass, with measured low-light differences. | Broader same-input catalog sample, model-selection behavior, curve and power tolerances |
 | MPP tracking | Tracker scans the curve with voltage window, current and power ceilings, prefers the high-voltage side | Combined curve search inside the window and below the current limit | **Same physics**, different search. Power-ceiling tracking is replaced by AC clipping | Hourly DC power with window-limited hours |
 | Inverter efficiency | 8 load knots 0–100 % with a logarithmic low-load segment | User curve (knots of load fraction) linearly interpolated, or PVWatts | **Implementation detail.** The low-load ramp differs; affects < 5 % load hours | Datasheet curve + PV\*SOL hourly AC |
 | Battery dispatch | Charge request positive; charge modes Float/Boost/Full/Equal; SOC floor max(5 %, SOCmin); Li-ion voltage model with ageing | Self-consumption dispatch with allocations; SOC window; simple or detailed (taper, part-load converter) | **Model choice.** PV\*SOL has no reserve-allocation concept (SolarCraft upgrade); no charge modes or cell-voltage model in SolarCraft | AC/DC battery projects with hourly SOC |
@@ -59,7 +59,7 @@ The reference findings below come from the private bundle. Evidence keys resolve
 
 | Need | Why | Who |
 |---|---|---|
-| PV\*SOL saved projects with results (any of formats 15–24) | Numerical reference parity for yield, battery and cash flow | Owner (authorised files) |
+| Matched SolarCraft replays of authorised PV\*SOL projects, including identical equipment, weather, geometry and tariffs | Per-channel numerical parity for yield, battery and cash flow | Saved fixtures and versioned import or audited input transcription |
 | Receiving CAD applications (SketchUp, Revit, AutoCAD) | Round-trip tests once exchange exists | Owner licences |
 | Target hardware: Windows 11 x64/ARM64 laptops, Apple silicon and Intel Macs | Interactive UI checks beyond CI self-tests and screenshots | Owner |
 | Metered consumption series and real tariff tables | Replace synthetic profiles in validation scenarios | Owner / customers |

@@ -158,6 +158,7 @@ public sealed partial class MainWindow
         }
 
         Render();
+        if (file is not null) BuildNetworkFaultPlanner(panel, file);
     }
 
     private async Task<JsonObject?> EditCable(JsonNode? original)

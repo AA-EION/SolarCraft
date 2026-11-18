@@ -98,14 +98,14 @@ pub struct Curve {
 }
 
 impl Curve {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         let named = |name: &str| !name.trim().is_empty() && name.len() <= 256;
         named(&self.model) && named(&self.reference) && (2..=256).contains(&self.points.len())
             && self.points.iter().all(|p| (0.01..=1e8).contains(&p[0]) && (1e-7..=1e7).contains(&p[1]))
             && self.points.windows(2).all(|p| p[1][0] > p[0][0] && p[1][1] <= p[0][1])
     }
 
-    fn seconds(&self, amps: f64) -> Option<f64> {
+    pub(crate) fn seconds(&self, amps: f64) -> Option<f64> {
         let i = self.points.partition_point(|[current, _]| *current < amps);
         if self.points.get(i).is_some_and(|p| p[0] == amps) { return Some(self.points[i][1]); }
         if i == 0 || i == self.points.len() { return None; }

@@ -3,7 +3,7 @@
 //! `synchronous=FULL` (see docs/spikes/F-project-store.md). Every save is a
 //! transaction that also appends to the change log, so autosave is implicit
 //! and history/undo survive restarts.
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use solarcraft_model::Project;
 use std::path::Path;
@@ -96,12 +96,28 @@ impl Store {
     pub fn save(&mut self, project: &Project, op: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         let before: String = tx.query_row("SELECT body FROM project WHERE id=1", [], |r| r.get(0))?;
+        Self::save_change(&tx, project, op, before)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Edit fields of the current revision within the same transaction as the write.
+    pub fn update(&mut self, op: &str, edit: impl FnOnce(&mut Project)) -> Result<()> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before: String = tx.query_row("SELECT body FROM project WHERE id=1", [], |r| r.get(0))?;
+        let mut project = Self::decode(&before)?;
+        edit(&mut project);
+        Self::save_change(&tx, &project, op, before)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn save_change(tx: &Transaction<'_>, project: &Project, op: &str, before: String) -> Result<()> {
         let after = serde_json::to_string(project)?;
         if before != after {
             tx.execute("UPDATE project SET body=?1, rev=rev+1 WHERE id=1", [&after])?;
             tx.execute("INSERT INTO changes(at_unix, op, before) VALUES(?1, ?2, ?3)", params![now(), op, before])?;
         }
-        tx.commit()?;
         Ok(())
     }
 
