@@ -52,6 +52,8 @@ public sealed partial class MainWindow : Window
         ModeRadios.Header = T("mode"); EasyRadio.Content = T("easy"); DetailedRadio.Content = T("detailed"); ModeHint.Text = T("mode_hint");
         KwpBox.Header = T("target_kwp"); TiltBox.Header = T("tilt"); AzimuthBox.Header = T("azimuth"); MountingBox.Header = T("mounting");
         MountingBox.ItemsSource = new[] { T("open_rack"), T("roof_mounted"), T("integrated") };
+        PvModelBox.Header = T("pv_model");
+        PvModelBox.ItemsSource = new[] { T("single_diode"), T("two_diode") };
         MpsBox.Header = T("modules_per_string"); StringsBox.Header = T("strings"); IssuesHeader.Text = T("issues");
         NoResults.Text = T("no_results"); MonthlyHeader.Text = T("monthly_energy"); LossesHeader.Text = T("losses");
         RoofShapeBox.Header = T("roof_shape");
@@ -61,6 +63,8 @@ public sealed partial class MainWindow : Window
         ClickHint.Text = T("click_to_add"); UndoPointButton.Content = T("undo_point"); ClearPointsButton.Content = T("clear_points");
         RoofHint.Text = T("roof_hint"); ApplyRoofButton.Content = T("apply_roof");
         LangBox.Header = T("language"); FormatBox.Header = T("format"); DesignerBox.Header = T("designer"); ExportButton.Content = T("export_report");
+        ReportTypeBox.Header = T("report_type");
+        foreach (ComboBoxItem option in ReportTypeBox.Items) option.Content = T((string)option.Tag);
         var two = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
         LangBox.SelectedIndex = two switch { "es" => 1, "de" => 2, "pt" => 3, _ => 0 };
     }
@@ -133,6 +137,7 @@ public sealed partial class MainWindow : Window
         ModeRadios.SelectedIndex = detailed ? 1 : 0;
         KwpBox.Value = Api.Num(a["target_kwp"]); TiltBox.Value = Api.Num(a["tilt"]); AzimuthBox.Value = Api.Num(a["azimuth"]);
         MountingBox.SelectedIndex = Api.Str(p["simulation"]!["mounting"]) switch { "open_rack" => 0, "integrated" => 2, _ => 1 };
+        PvModelBox.SelectedIndex = p["simulation"]!["pv_model"]?.GetValue<string>() == "two_diode" ? 1 : 0;
         MpsBox.Value = Api.Num(a["modules_per_string"]); StringsBox.Value = Api.Num(a["strings"]);
         MpsBox.IsEnabled = detailed; StringsBox.IsEnabled = detailed;
         foreach (var (box, key) in new[] { (KwpBox, "target_kwp"), (TiltBox, "tilt"), (AzimuthBox, "azimuth"), (MpsBox, "modules_per_string"), (StringsBox, "strings") })
@@ -375,6 +380,10 @@ public sealed partial class MainWindow : Window
     {
         if (MountingBox.SelectedIndex >= 0) Set("/simulation/mounting", MountingBox.SelectedIndex switch { 0 => "open_rack", 2 => "integrated", _ => "roof_mounted" });
     }
+    private void OnPvModelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PvModelBox.SelectedIndex >= 0) Set("/simulation/pv_model", PvModelBox.SelectedIndex == 1 ? "two_diode" : "single_diode");
+    }
     private void OnMode(object sender, SelectionChangedEventArgs e)
     {
         if (_loading || _file is null || ModeRadios.SelectedIndex < 0) return;
@@ -433,7 +442,8 @@ public sealed partial class MainWindow : Window
         var designer = DesignerBox.Text;
         try
         {
-            await Task.Run(() => Api.Invoke("export_report", new { file = _file, output = f.Path, format = fmt, lang, designer }));
+            var report_type = SelectedReportType();
+            await Task.Run(() => Api.Invoke("export_report", new { file = _file, output = f.Path, format = fmt, lang, designer, report_type }));
             ShowInfo($"{T("report_saved")}: {f.Path}");
             await Windows.System.Launcher.LaunchFileAsync(f);
         }

@@ -22,6 +22,42 @@ fn nice_step(max: f64) -> f64 {
 
 fn esc(s: &str) -> String { s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;") }
 
+/// The requested load and its sources, with unserved energy as a separate segment.
+pub fn load_supply(series: &[(String, f64); 5], demand: f64, lang: Lang) -> String {
+    let colors = ["#0f766e", "#6d28d9", "#2563eb", "#92400e", "#a3a3a3"];
+    let shown = series.iter().zip(colors).filter(|((_, value), _)| *value > 1e-6);
+    let height = 48 + 21 * shown.clone().count();
+    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="{height}" viewBox="0 0 640 {height}" font-family="{FONT_CSS}">"#);
+    let mut x = 12.0;
+    for (row, ((label, value), color)) in shown.enumerate() {
+        let width = 616.0 * (value / demand).clamp(0.0, 1.0);
+        let y = 49 + 21 * row;
+        let _ = write!(svg, r#"<rect x="{x:.2}" y="5" width="{width:.2}" height="23" fill="{color}"/><rect x="12" y="{}" width="10" height="10" rx="2" fill="{color}"/><text x="29" y="{y}" font-size="13" fill="{INK}">{}</text><text x="628" y="{y}" text-anchor="end" font-size="13" fill="{INK}">{} kWh</text>"#, y - 10, esc(label), esc(&lang.num(*value, 1)));
+        x += width;
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// Cumulative cash flow. Include year zero and draw the zero crossing at the actual value.
+pub fn cash_flow(series: &[(u32, f64)], currency: &str, lang: Lang) -> String {
+    let last = series.last().map_or(1, |point| point.0.max(1));
+    let lo = series.iter().map(|point| point.1).fold(0.0, f64::min);
+    let hi = series.iter().map(|point| point.1).fold(0.0, f64::max);
+    let x = |year| 115.0 + 500.0 * f64::from(year) / f64::from(last);
+    let y = |amount| 20.0 + 155.0 * (hi - amount) / (hi - lo).max(1.0);
+    let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="210" viewBox="0 0 640 210" font-family="{FONT_CSS}">"#);
+    for level in [lo, hi].into_iter().filter(|&value| value != 0.0).chain([0.0]) {
+        let yy = y(level);
+        let _ = write!(svg, r#"<line x1="115" x2="615" y1="{yy:.1}" y2="{yy:.1}" stroke="{GRID}"/><text x="108" y="{:.1}" text-anchor="end" font-size="11" fill="{MUTED}">{}</text>"#, yy + 4.0, esc(&lang.num(level, 0)));
+    }
+    let end_label = esc(currency);
+    let _ = write!(svg, r#"<line x1="115" x2="615" y1="{0:.1}" y2="{0:.1}" stroke="{MUTED}"/><text x="115" y="196" font-size="11" fill="{INK}">0</text><text x="615" y="196" text-anchor="end" font-size="11" fill="{INK}">{last}</text><text x="109" y="196" text-anchor="end" font-size="10" fill="{MUTED}">{end_label}</text><polyline fill="none" stroke="{BAR}" stroke-width="2" points=""#, y(0.0));
+    for (year, value) in series { let _ = write!(svg, "{:.1},{:.1} ", x(*year), y(*value)); }
+    svg.push_str("\"/></svg>");
+    svg
+}
+
 /// Monthly bar chart. `values` in kWh.
 pub fn monthly_bars(values: &[f64; 12], labels: [&str; 12], unit: &str, lang: Lang) -> String {
     let (w, h, l, r, t, b) = (640.0, 260.0, 56.0, 12.0, 16.0, 30.0);

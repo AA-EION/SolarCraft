@@ -535,13 +535,36 @@ public sealed partial class MainWindow
         p.Children.Add(Btn(T("report_preview"), () =>
         {
             var lang = (LangBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "en";
-            if (Try(() => _previewSections = Arr(Api.Invoke("report_preview", new { file = _file, lang })?["sections"]))) BuildPreview();
+            if (Try(() => _previewSections = Arr(Api.Invoke("report_preview", new { file = _file, lang, report_type = SelectedReportType() })?["contents"]))) BuildPreview();
         }));
         foreach (var s in _previewSections ?? new JsonArray())
         {
             p.Children.Add(new TextBlock { Text = S(s, "title"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
-            p.Children.Add(Table(Arr(s?["header"]).Select(h => h!.GetValue<string>()).ToList(), Arr(s?["rows"]).Select(r => (IList<string>)Arr(r).Select(c => c!.GetValue<string>()).ToList()).ToList(), 12));
+            foreach (var block in Arr(s?["blocks"]))
+            {
+                switch (S(block, "kind"))
+                {
+                    case "table":
+                        p.Children.Add(Table(Arr(block?["header"]).Select(h => h!.GetValue<string>()).ToList(),
+                            Arr(block?["rows"]).Select(r => (IList<string>)Arr(r).Select(c => c!.GetValue<string>()).ToList()).ToList(), 12));
+                        break;
+                    case "text":
+                        p.Children.Add(Note(S(block, "text")));
+                        break;
+                    case "figure" when S(block, "caption").Length > 0:
+                        p.Children.Add(Note(S(block, "caption")));
+                        break;
+                }
+            }
         }
+    }
+
+    private string SelectedReportType() => (ReportTypeBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "customer_extended";
+
+    private void OnReportTypeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _previewSections = null;
+        if (PreviewPanel is not null) BuildPreview();
     }
 
     // ---- --screenshots: every page of a simulated demo project ----
@@ -556,7 +579,7 @@ public sealed partial class MainWindow
             Open(file);
             _dayRows = Arr(Api.Invoke("results_hours", new { file, day_of_year = 172 })?["hours"]);
             _compareRows = Arr(Api.Invoke("compare_variants", new { file })?["variants"]);
-            _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en" })?["sections"]);
+            _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en", report_type = SelectedReportType() })?["contents"]);
             BuildPlantPages();
             var items = new[] { NavProject, NavSite, NavDesign, NavRoof, NavScene, NavElectrical, NavStorage, NavResults, NavEconomics, NavReport };
             for (int i = 0; i < items.Length; i++)

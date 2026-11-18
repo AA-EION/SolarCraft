@@ -42,7 +42,7 @@ struct ProjectDoc: Decodable {
         let params: Params
         let modules: [ModuleRect]
     }
-    struct Simulation: Decodable { let mounting: Field<String> }
+    struct Simulation: Decodable { let mounting: Field<String>; let pv_model: String }
     struct WeatherRef: Decodable { let provider: String; let summary: String }
     struct Module: Decodable { let id: String; let manufacturer: String; let model: String }
     struct Inverter: Decodable { let id: String; let manufacturer: String; let model: String }

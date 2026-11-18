@@ -40,11 +40,8 @@ pub fn render(view: &View, date: (i32, u8, u8)) -> Result<Vec<u8>, String> {
         book: LazyHash::new(FontBook::from_fonts(&fonts)),
         fonts,
         main: id("main.typ"),
-        files: view.roof_svgs.iter().enumerate().map(|(i, svg)| (id(&format!("roof-{i}.svg")), Bytes::new(svg.clone().into_bytes()))).chain(vec![
-            (id("data.json"), Bytes::new(data)),
-            (id("monthly.svg"), Bytes::new(view.monthly_svg.clone().into_bytes())),
-            (id("waterfall.svg"), Bytes::new(view.waterfall_svg.clone().into_bytes())),
-        ]).collect(),
+        files: view.figures.iter().enumerate().map(|(i, svg)| (id(&format!("figure-{i}.svg")), Bytes::new(svg.clone().into_bytes())))
+            .chain([(id("data.json"), Bytes::new(data))]).collect(),
         today: Datetime::from_ymd(date.0, date.1, date.2).ok_or("invalid date")?,
     };
     let doc: PagedDocument = typst::compile(&world).output.map_err(|errs| errs.iter().map(|e| e.message.to_string()).collect::<Vec<_>>().join("; "))?;

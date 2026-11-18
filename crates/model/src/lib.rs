@@ -78,6 +78,14 @@ impl Site {
 #[serde(rename_all = "snake_case")]
 pub enum TranspositionModel { Isotropic, HayDavies, Klucher, Reindl, Perez }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PvModel {
+    #[default]
+    SingleDiode,
+    TwoDiode,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Array {
     pub id: String,
@@ -147,6 +155,8 @@ impl Mounting {
 pub struct SimulationSettings {
     pub mounting: Field<Mounting>,
     pub transposition: Field<TranspositionModel>,
+    #[serde(default)]
+    pub pv_model: PvModel,
     /// Faiman U0 (W/m²K) and U1 (W·s/m³K).
     pub faiman_u0: Field<f64>,
     pub faiman_u1: Field<f64>,
@@ -223,7 +233,7 @@ impl Project {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),
                 mismatch_pct: Field::default(1.0), dc_wiring_pct: Field::default(1.5), ac_wiring_pct: Field::default(0.5), availability_pct: Field::default(0.0),
             },
-            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
+            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None,

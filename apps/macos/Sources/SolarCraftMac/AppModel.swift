@@ -136,6 +136,15 @@ final class AppModel: ObservableObject {
 
     func loadPreview(_ lang: String) { run { previewSections = (try Core.invokeJSON("report_preview", ["file": file, "lang": lang])["sections"] as? [JSONDict]) ?? [] } }
 
+    func reportContents(lang: String, reportType: String) -> [String] {
+        var titles: [String] = []
+        run {
+            let report = try Core.invokeJSON("report_preview", ["file": file, "lang": lang, "report_type": reportType])
+            titles = (report["contents"] as? [JSONDict] ?? []).compactMap { $0["title"] as? String }
+        }
+        return titles
+    }
+
     func newProject() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [Self.projectType]
@@ -224,13 +233,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func exportReport(lang: String, format: String, designer: String) {
+    func exportReport(lang: String, format: String, designer: String, reportType: String) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [format == "pdf" ? .pdf : (UTType(filenameExtension: "docx") ?? .data)]
         panel.nameFieldStringValue = (project?.name.value ?? "Report") + "." + format
         guard panel.runModal() == .OK, let u = panel.url else { return }
         run {
-            let r = try Core.invoke("export_report", ["file": file, "output": u.path, "format": format, "lang": lang, "designer": designer], as: ReportOutput.self)
+            let r = try Core.invoke("export_report", ["file": file, "output": u.path, "format": format, "lang": lang, "designer": designer, "report_type": reportType], as: ReportOutput.self)
             notice = "\(t("report_saved")): \(r.path)"
             NSWorkspace.shared.open(u)
         }

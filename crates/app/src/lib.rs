@@ -16,6 +16,7 @@ use std::path::Path;
 
 pub mod api;
 pub mod catalog_ops;
+mod load_import;
 pub mod plant_ops;
 pub mod scene_ops;
 pub mod ui_strings;
@@ -182,9 +183,10 @@ pub use solarcraft_engine::SimResult as SimResultExt;
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReportFormat { Pdf, Docx }
+pub use solarcraft_report::ReportType;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ReportOutput { pub path: String, pub bytes: usize, pub format: ReportFormat, pub lang: String }
+pub struct ReportOutput { pub path: String, pub bytes: usize, pub format: ReportFormat, pub lang: String, pub report_type: ReportType }
 
 fn today_utc() -> (i32, u8, u8) {
     let days = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86400).unwrap_or(0);
@@ -194,31 +196,31 @@ fn today_utc() -> (i32, u8, u8) {
 
 /// The report's view model (every value as printed), for previews and traceability checks.
 pub fn report_view(path: &Path, lang: &str) -> Result<solarcraft_report::View> {
+    report_view_for(path, lang, ReportType::default(), "")
+}
+
+pub fn report_view_for(path: &Path, lang: &str, report_type: ReportType, designer: &str) -> Result<solarcraft_report::View> {
     let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}'")))?;
     let (s, p) = open(path)?;
     let r = current_results(&s, &p)?.ok_or_else(|| e("NO_RESULTS", "Run the simulation for the current design first."))?;
     let (w, _) = load_weather(&s, &p)?;
-    let input = solarcraft_report::ReportInput { project: &p, result: &r, lang: l, date: today_utc(), designer: String::new(),
+    let input = solarcraft_report::ReportInput { project: &p, result: &r, lang: l, date: today_utc(), designer: designer.into(),
         weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied } };
-    Ok(solarcraft_report::build_view(&input))
+    Ok(solarcraft_report::build_view_for(&input, report_type))
 }
 
 /// Generate the customer report from the latest stored results.
 /// `lang`: en, es, de or pt-BR.
 pub fn generate_report(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str) -> Result<ReportOutput> {
-    let l = solarcraft_report::i18n::Lang::parse(lang).ok_or_else(|| e("INVALID_ARGUMENT", format!("unsupported report language '{lang}' (use en, es, de, pt-BR)")))?;
-    let (s, p) = open(path)?;
-    let r = current_results(&s, &p)?.ok_or_else(|| e("NO_RESULTS", "Run the simulation for the current design first."))?;
-    let (w, _) = load_weather(&s, &p)?;
-    let input = solarcraft_report::ReportInput {
-        project: &p, result: &r, lang: l, date: today_utc(), designer: designer.to_string(),
-        weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied },
-    };
-    let view = solarcraft_report::build_view(&input);
+    generate_report_for(path, out, format, lang, designer, ReportType::default())
+}
+
+pub fn generate_report_for(path: &Path, out: &Path, format: ReportFormat, lang: &str, designer: &str, report_type: ReportType) -> Result<ReportOutput> {
+    let view = report_view_for(path, lang, report_type, designer)?;
     let bytes = match format {
-        ReportFormat::Pdf => solarcraft_report::pdf::render(&view, input.date),
+        ReportFormat::Pdf => solarcraft_report::pdf::render(&view, today_utc()),
         ReportFormat::Docx => solarcraft_report::docx::render(&view),
     }.map_err(|x| e("REPORT", x))?;
     std::fs::write(out, &bytes).map_err(|x| e("FILE_WRITE", format!("{}: {x}", out.display())))?;
-    Ok(ReportOutput { path: out.display().to_string(), bytes: bytes.len(), format, lang: l.tag().into() })
+    Ok(ReportOutput { path: out.display().to_string(), bytes: bytes.len(), format, lang: view.lang, report_type })
 }

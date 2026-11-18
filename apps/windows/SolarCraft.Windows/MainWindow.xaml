@@ -69,6 +69,7 @@
             <NumberBox x:Name="TiltBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/tilt" ValueChanged="OnNumber" />
             <NumberBox x:Name="AzimuthBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/azimuth" ValueChanged="OnNumber" />
             <ComboBox x:Name="MountingBox" Width="220" SelectionChanged="OnMounting" />
+            <ComboBox x:Name="PvModelBox" Width="220" SelectionChanged="OnPvModelChanged" />
             <NumberBox x:Name="MpsBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/modules_per_string" ValueChanged="OnNumber" SpinButtonPlacementMode="Inline" Minimum="1" />
             <NumberBox x:Name="StringsBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/strings" ValueChanged="OnNumber" SpinButtonPlacementMode="Inline" Minimum="1" />
             <TextBlock x:Name="EquipmentText" TextWrapping="Wrap" />
@@ -114,6 +115,11 @@
           </StackPanel>
 
           <StackPanel x:Name="ReportPage" Spacing="10" Visibility="Collapsed">
+            <ComboBox x:Name="ReportTypeBox" Width="240" SelectedIndex="1" SelectionChanged="OnReportTypeChanged">
+              <ComboBoxItem Tag="customer_short" />
+              <ComboBoxItem Tag="customer_extended" />
+              <ComboBoxItem Tag="system_planner" />
+            </ComboBox>
             <ComboBox x:Name="LangBox" Width="220">
               <ComboBoxItem Content="English" Tag="en" />
               <ComboBoxItem Content="Español" Tag="es" />

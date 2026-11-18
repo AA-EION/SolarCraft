@@ -61,6 +61,12 @@ pub struct Flows {
     pub load: Vec<f32>,
     pub load_served: Vec<f32>,
     pub pv_to_load: Vec<f32>,
+    #[serde(default)]
+    pub battery_to_load: Vec<f32>,
+    #[serde(default)]
+    pub grid_to_load: Vec<f32>,
+    #[serde(default)]
+    pub generator_to_load: Vec<f32>,
     pub batt_charge: Vec<f32>,
     pub batt_charge_grid: Vec<f32>,
     pub batt_discharge: Vec<f32>,
@@ -99,6 +105,12 @@ pub struct Balance {
     pub load_kwh: f64,
     pub load_served_kwh: f64,
     pub pv_to_load_kwh: f64,
+    #[serde(default)]
+    pub battery_to_load_kwh: f64,
+    #[serde(default)]
+    pub grid_to_load_kwh: f64,
+    #[serde(default)]
+    pub generator_to_load_kwh: f64,
     pub batt_charge_kwh: f64,
     pub batt_charge_grid_kwh: f64,
     pub batt_discharge_kwh: f64,
@@ -118,7 +130,8 @@ pub struct Balance {
     pub outage_hours: u32,
     /// Share of PV AC energy used on site (directly or via the battery).
     pub self_consumption_rate: f64,
-    /// Share of consumption not supplied by the grid.
+    /// Share of requested customer load supplied with no immediate grid import.
+    /// Battery discharge is classified at use and can include previously grid-charged energy.
     pub autarky: f64,
     pub battery_full_cycles: f64,
     /// Remaining capacity after this year's throughput, % (detailed model).
@@ -346,7 +359,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
             hybrid_dc_used = dc_used;
             supply += ac * f_ac;
             // PV share of the hybrid output (battery discharge is not PV).
-            let pv_share = if dc_in > 0.0 { ((pv_h - pv_to_batt_dc - clip_h).max(0.0) / dc_in).min(1.0) } else { 0.0 };
+            let pv_share = if dc_used > 0.0 { (pv_h - pv_to_batt_dc).clamp(0.0, dc_used) / dc_used } else { 0.0 };
             pv_ac_h += ac * f_ac * pv_share;
         }
 
@@ -452,8 +465,15 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
         let ac_wiring = ac_inv_out * (1.0 - f_ac);
         // Stored energy change counts cell energy; conversion losses are booked separately.
         let resid = (pv_dc + import + gen_out) - (served + standby + export + curtailed + clipped + inv_loss + ac_wiring + conv_loss + (e_after - e_before) + sd);
-        let pv_to_load = if full_feed_in { 0.0 } else { pv_ac_h.min(served + standby) };
+        // Split customer service from standby and charging. Assign external
+        // supply to the customer first; any remaining supply covers standby.
+        let grid_to_load = (import - ch_grid).clamp(0.0, served);
+        let generator_to_load = gen_out.clamp(0.0, served - grid_to_load);
+        let on_site_to_load = (served - grid_to_load - generator_to_load).max(0.0);
+        let pv_to_load = pv_ac_h.min(on_site_to_load);
+        let battery_to_load = on_site_to_load - pv_to_load;
         for (v, x) in [(&mut f.pv_dc, pv_dc), (&mut f.pv_ac, pv_ac_h), (&mut f.clipped, clipped), (&mut f.load, load), (&mut f.load_served, served), (&mut f.pv_to_load, pv_to_load),
+                       (&mut f.grid_to_load, grid_to_load), (&mut f.generator_to_load, generator_to_load), (&mut f.battery_to_load, battery_to_load),
                        (&mut f.batt_charge, ch_in + ch_grid), (&mut f.batt_charge_grid, ch_grid), (&mut f.batt_discharge, dis_out), (&mut f.batt_to_grid, to_grid), (&mut f.import, import), (&mut f.export, export),
                        (&mut f.curtailed, curtailed), (&mut f.unserved, unserved), (&mut f.generator, gen_out), (&mut f.residual, resid)] { push(v, x); }
         match batt.as_ref() {
@@ -464,6 +484,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
         let kw = 1e-3;
         b.pv_dc_kwh += pv_dc * kw; b.pv_ac_kwh += pv_ac_h * kw; b.pv_to_battery_dc_kwh += pv_dc_to_batt * kw; b.clipped_kwh += clipped * kw; b.curtailed_kwh += curtailed * kw; b.inverter_loss_kwh += inv_loss * kw;
         b.ac_wiring_loss_kwh += ac_wiring * kw; b.standby_kwh += standby * kw; b.load_kwh += load * kw; b.load_served_kwh += served * kw; b.pv_to_load_kwh += pv_to_load * kw;
+        b.grid_to_load_kwh += grid_to_load * kw; b.generator_to_load_kwh += generator_to_load * kw; b.battery_to_load_kwh += battery_to_load * kw;
         b.batt_charge_kwh += (ch_in + ch_grid) * kw; b.batt_charge_grid_kwh += ch_grid * kw; b.batt_discharge_kwh += dis_out * kw; b.batt_to_grid_kwh += to_grid * kw;
         b.batt_conversion_loss_kwh += conv_loss * kw; b.self_discharge_kwh += sd * kw; b.stored_delta_kwh += (e_after - e_before) * kw;
         b.import_kwh += import * kw; b.export_kwh += export * kw; b.unserved_kwh += unserved * kw; b.generator_kwh += gen_out * kw; b.shed_noncritical_kwh += shed * kw;
@@ -473,7 +494,7 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
     b.pv_generation_kwh = b.pv_ac_kwh + b.pv_to_battery_dc_kwh;
     let pv_exported = (b.export_kwh - b.batt_to_grid_kwh).max(0.0);
     b.self_consumption_rate = if b.pv_generation_kwh > 0.0 { ((b.pv_generation_kwh - pv_exported - b.curtailed_kwh).max(0.0) / b.pv_generation_kwh).min(1.0) } else { 0.0 };
-    b.autarky = if b.load_kwh > 0.0 { ((b.load_served_kwh - b.import_kwh) / b.load_kwh).clamp(0.0, 1.0) } else { 0.0 };
+    b.autarky = if b.load_kwh > 0.0 { ((b.load_served_kwh - b.grid_to_load_kwh) / b.load_kwh).clamp(0.0, 1.0) } else { 0.0 };
     if let Some(bt) = &batt {
         let usable: f64 = bt.acc.cap.iter().sum();
         b.battery_full_cycles = if usable > 0.0 { bt.throughput / usable } else { 0.0 };

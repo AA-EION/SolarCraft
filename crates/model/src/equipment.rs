@@ -360,7 +360,7 @@ impl GeneratorSpec {
         let x = p_w / self.rated_va;
         let k = &self.fuel_curve;
         if k.is_empty() { return 0.0; }
-        if x <= k[0][0] { return k[0][1]; }
+        if k.len() == 1 || x <= k[0][0] { return k[0][1]; }
         for w in k.windows(2) { if x <= w[1][0] { let t = (x - w[0][0]) / (w[1][0] - w[0][0]); return w[0][1] + t * (w[1][1] - w[0][1]); } }
         let n = k.len(); let (a, b) = (k[n - 2], k[n - 1]);
         b[1] + (x - b[0]) * (b[1] - a[1]) / (b[0] - a[0]).max(1e-9)

@@ -6,6 +6,8 @@ pub mod charts;
 pub mod docx;
 pub mod i18n;
 pub mod pdf;
+mod profiles;
+pub use profiles::{ContentBlock, ContentSection, ReportType};
 
 use i18n::Lang;
 use serde::Serialize;
@@ -35,7 +37,7 @@ pub struct ArrayView { pub name: String, pub rows: Vec<[String; 2]> }
 
 /// A generic table section (plant design, energy balance, battery, economics).
 #[derive(Debug, Clone, Serialize)]
-pub struct Section { pub title: String, pub intro: String, pub header: Vec<String>, pub rows: Vec<Vec<String>> }
+pub struct Section { pub id: &'static str, pub title: String, pub intro: String, pub header: Vec<String>, pub rows: Vec<Vec<String>> }
 
 /// Pick the phrase for the report language (en, es, de, pt-BR).
 fn tr(l: Lang, en: &str, es: &str, de: &str, pt: &str) -> String { match l { Lang::En => en, Lang::Es => es, Lang::De => de, _ => pt }.to_string() }
@@ -77,9 +79,18 @@ pub struct View {
     pub roof_count: usize,
     /// Plant sections built from the run (empty when not applicable).
     pub sections: Vec<Section>,
+    pub report_type: ReportType,
+    /// Ordered sections shared by the preview, PDF and DOCX.
+    pub contents: Vec<ContentSection>,
+    #[serde(skip)]
+    pub(crate) figures: Vec<String>,
 }
 
 pub fn build_view(inp: &ReportInput) -> View {
+    build_view_for(inp, ReportType::default())
+}
+
+pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
     let l = inp.lang;
     let s = i18n::table(l);
     let p = inp.project;
@@ -165,11 +176,16 @@ pub fn build_view(inp: &ReportInput) -> View {
         let cap = format!("{} — {}", a.name.value, s["roof_caption"].replace("%N%", &r.modules.len().to_string()).replace("%S%", &n(r.params.setback, 2)));
         charts::roof_plan(&r.face, &r.modules, &cap, l)
     })).filter(|svg| !svg.is_empty()).collect();
-    View {
+    let mut view = View {
         lang: l.tag().into(), title: s["title"].into(), project_name: p.name.value.clone(), designer: inp.designer.clone(),
         customer: CustomerView { name: if p.customer.name.is_empty() { "—".into() } else { p.customer.name.clone() }, address: p.customer.address.clone() },
         date, kpis, arrays, site_rows,
-        weather_notes: { let mut v = vec![format!("{} — {}", s["weather_tmy"], inp.weather.dataset)]; if inp.weather.horizon_applied { v.push(s["note_horizon"].into()); } v },
+        weather_notes: {
+            let mut notes = vec![];
+            if inp.weather.dataset.starts_with("TMY") { notes.push(s["weather_tmy"].into()); }
+            if inp.weather.horizon_applied { notes.push(s["note_horizon"].into()); }
+            notes
+        },
         licence: inp.weather.licence.clone(), loss_rows,
         irr_rows: r.irradiance_ledger.iter().map(|st| {
             let key = format!("irr_{}", st.key);
@@ -179,7 +195,10 @@ pub fn build_view(inp: &ReportInput) -> View {
         monthly_header: [s["month"].into(), "GHI kWh/m²".into(), "POA kWh/m²".into(), format!("{} kWh", s["energy"])],
         monthly_rows,
         assumption_rows: vec![[s["soiling"].into(), pct(lo.soiling_pct.value)], [s["lid"].into(), pct(lo.lid_pct.value)], [s["mismatch"].into(), pct(lo.mismatch_pct.value)], [s["dc_wiring"].into(), pct(lo.dc_wiring_pct.value)], [s["ac_wiring"].into(), pct(lo.ac_wiring_pct.value)], [s["availability"].into(), pct(lo.availability_pct.value)], ["Albedo".into(), n(p.site.albedo.value, 2)]],
-        models_text: s["models_text"].replace("%MODEL%", &model_name),
+        models_text: s["models_text"].replace("%MODEL%", &model_name).replace("%PV_MODEL%", match r.manifest.pv_model {
+            solarcraft_model::PvModel::SingleDiode => s["single_diode"],
+            solarcraft_model::PvModel::TwoDiode => s["two_diode"],
+        }),
         notes: r.warnings.iter().filter(|w| w.code != "HORIZON_IN_WEATHER").map(|w| match w.code.as_str() {
             "NEAR_SHADING" => s["note_shading"].replace("%S%", &w.subject),
             "MPP_WINDOW_HOURS" => s["note_mpp"].replace("%S%", &w.subject).replace("%N%", &n(w.value, 0)),
@@ -196,8 +215,13 @@ pub fn build_view(inp: &ReportInput) -> View {
         roof_svgs: roof_svgs.clone(),
         roof_count: roof_svgs.len(),
         sections: plant_sections(inp),
+        report_type,
+        contents: vec![],
+        figures: vec![],
         s,
-    }
+    };
+    profiles::compose(&mut view, inp);
+    view
 }
 
 /// Plant sections: every value is read from the stored run (traceable via the run's inputs hash).
@@ -216,7 +240,7 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
                                format!("{} / {} kWh · {} h", n(m.mismatch_kwh, 0), n(m.limit_loss_kwh, 0), m.limited_hours)]);
             }
         }
-        out.push(Section { title: tr(l, "Inverters and string configuration", "Inversores y configuración de cadenas", "Wechselrichter und Stringverschaltung", "Inversores e configuração de strings"),
+        out.push(Section { id: "inverter_performance", title: tr(l, "Inverters and string configuration", "Inversores y configuración de cadenas", "Wechselrichter und Stringverschaltung", "Inversores e configuração de strings"),
             intro: tr(l, "Simulated per MPP tracker: parallel-string mismatch and tracker-limit (voltage window, input current) losses are shown in the last column.", "Simulado por seguidor MPP: la última columna muestra las pérdidas por desajuste de cadenas en paralelo y por límites del seguidor (ventana de tensión, corriente de entrada).", "Je MPP-Tracker simuliert: Die letzte Spalte zeigt Fehlanpassung paralleler Strings und Tracker-Grenzen (Spannungsfenster, Eingangsstrom).", "Simulado por rastreador MPP: a última coluna mostra perdas por descasamento de strings em paralelo e por limites do rastreador (janela de tensão, corrente de entrada)."),
             header: vec![tr(l, "Inverter / MPPT", "Inversor / MPPT", "Wechselrichter / MPPT", "Inversor / MPPT"), tr(l, "Rating", "Potencia", "Leistung", "Potência"), "DC kWh".into(), "AC kWh".into(), tr(l, "Clipping · mismatch / limits", "Recorte · desajuste / límites", "Abregelung · Fehlanpassung / Grenzen", "Corte · descasamento / limites")], rows });
     }
@@ -226,6 +250,7 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
         let mut rows = vec![
             vec![tr(l, "PV generation used or exported", "Generación FV aprovechada o exportada", "Genutzte oder eingespeiste PV-Erzeugung", "Geração FV aproveitada ou exportada"), kwh(b.pv_generation_kwh)],
             vec![tr(l, "Consumption", "Consumo", "Verbrauch", "Consumo"), kwh(b.load_kwh)],
+            vec![tr(l, "Consumption served", "Consumo atendido", "Versorgter Verbrauch", "Consumo atendido"), kwh(b.load_served_kwh)],
             vec![tr(l, "PV used directly", "FV usada directamente", "PV-Direktverbrauch", "FV usada diretamente"), kwh(b.pv_to_load_kwh)],
             vec![tr(l, "Grid import", "Importación de la red", "Netzbezug", "Importação da rede"), kwh(b.import_kwh)],
             vec![tr(l, "Grid export", "Exportación a la red", "Netzeinspeisung", "Exportação para a rede"), kwh(b.export_kwh)],
@@ -234,7 +259,7 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             vec![tr(l, "Autarky (self-sufficiency)", "Autarquía (autosuficiencia)", "Autarkiegrad", "Autossuficiência"), format!("{} %", n(b.autarky * 100.0, 1))],
         ];
         if b.outage_hours > 0 { rows.push(vec![tr(l, "Outage hours · unserved critical load", "Horas de corte · carga crítica no atendida", "Ausfallstunden · nicht versorgte kritische Last", "Horas de interrupção · carga crítica não atendida"), format!("{} h · {}", b.outage_hours, kwh(b.unserved_kwh))]); }
-        out.push(Section { title: tr(l, "Energy balance", "Balance energético", "Energiebilanz", "Balanço energético"), intro: tr(l, "Hourly simulation for one year; the balance closes every hour.", "Simulación horaria de un año; el balance cierra en cada hora.", "Stündliche Jahressimulation; die Bilanz ist in jeder Stunde geschlossen.", "Simulação horária de um ano; o balanço fecha em cada hora."), header: vec![], rows });
+        out.push(Section { id: "energy_balance", title: tr(l, "Energy balance", "Balance energético", "Energiebilanz", "Balanço energético"), intro: tr(l, "Hourly simulation for one year; the balance closes in every hour.", "Simulación horaria de un año; el balance cierra en cada hora.", "Stündliche Jahressimulation; die Bilanz ist in jeder Stunde geschlossen.", "Simulação horária de um ano; o balanço fecha em cada hora."), header: vec![], rows });
     }
     if let (Some(st), Some(bat)) = (&p.storage, p.storage.as_ref().and_then(|st| p.library.battery(&st.battery_id))) {
         let coupling = match &st.coupling { solarcraft_model::plant::Coupling::DcHybrid { unit_id } => format!("{} ({unit_id})", tr(l, "DC, hybrid inverter port", "CC, puerto del inversor híbrido", "DC, Hybrid-Wechselrichter", "CC, porta do inversor híbrido")),
@@ -248,7 +273,7 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             vec![tr(l, "Charged · discharged", "Cargada · descargada", "Geladen · entladen", "Carregada · descarregada"), format!("{} · {} kWh", n(b.batt_charge_kwh, 0), n(b.batt_discharge_kwh, 0))],
             vec![tr(l, "Full cycles per year", "Ciclos completos por año", "Vollzyklen pro Jahr", "Ciclos completos por ano"), n(b.battery_full_cycles, 0)],
         ];
-        out.push(Section { title: tr(l, "Battery storage", "Almacenamiento en batería", "Batteriespeicher", "Armazenamento em bateria"), intro: String::new(), header: vec![], rows });
+        out.push(Section { id: "battery", title: tr(l, "Battery storage", "Almacenamiento en batería", "Batteriespeicher", "Armazenamento em bateria"), intro: String::new(), header: vec![], rows });
     }
     if let Some(f) = &r.finance {
         if f.investment > 0.0 {
@@ -264,9 +289,9 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
                 vec!["LCOE".into(), format!("{} {c}/kWh", n(f.lcoe_per_kwh, 3))],
             ];
             rows.retain(|r| !r[1].is_empty());
-            out.push(Section { title: tr(l, "Financial analysis", "Análisis financiero", "Wirtschaftlichkeit", "Análise financeira"), intro: format!("{} {}", p.tariff.name, tr(l, "tariff; cash flow below.", "— tarifa; flujo de caja a continuación.", "— Tarif; Cashflow unten.", "— tarifa; fluxo de caixa abaixo.")), header: vec![], rows });
+            out.push(Section { id: "finance", title: tr(l, "Financial analysis", "Análisis financiero", "Wirtschaftlichkeit", "Análise financeira"), intro: p.tariff.name.clone(), header: vec![], rows });
             let years: Vec<Vec<String>> = f.years.iter().map(|y| vec![y.year.to_string(), n(y.savings + y.export_revenue, 0), n(-(y.om + y.replacements + y.loan), 0), n(y.cash_flow, 0), n(y.cumulative, 0)]).collect();
-            out.push(Section { title: tr(l, "Cash flow", "Flujo de caja", "Cashflow", "Fluxo de caixa"), intro: c.clone(),
+            out.push(Section { id: "cash_flow", title: tr(l, "Cash flow", "Flujo de caja", "Cashflow", "Fluxo de caixa"), intro: c.clone(),
                 header: vec![tr(l, "Year", "Año", "Jahr", "Ano"), tr(l, "Savings + export", "Ahorro + exportación", "Ersparnis + Einspeisung", "Economia + exportação"), tr(l, "Costs", "Costes", "Kosten", "Custos"), tr(l, "Cash flow", "Flujo", "Cashflow", "Fluxo"), tr(l, "Cumulative", "Acumulado", "Kumuliert", "Acumulado")], rows: years });
         }
     }

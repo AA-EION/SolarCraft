@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Single-diode module model. De Soto, Klein & Beckman (2006), Solar Energy
+//! One- and two-diode module models. De Soto, Klein & Beckman (2006), Solar Energy
 //! 80(1):78-88, parameter translation; the implicit diode equation is solved
 //! by safeguarded Newton iteration on current, and the MPP by golden-section
 //! search refined with Newton on dP/dV.
@@ -21,7 +21,15 @@ pub struct DeSotoRef {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct DiodeParams { pub i_l: f64, pub i_0: f64, pub r_s: f64, pub r_sh: f64, pub n_ns_vth: f64 }
+pub struct DiodeParams {
+    pub i_l: f64,
+    pub i_0: f64,
+    /// Recombination saturation current with ideality 2; zero for the CEC model.
+    pub i_02: f64,
+    pub r_s: f64,
+    pub r_sh: f64,
+    pub n_ns_vth: f64,
+}
 
 const K_EV: f64 = 8.617333262e-5;
 
@@ -34,16 +42,46 @@ pub fn calcparams_desoto(s: f64, tc: f64, p: &DeSotoRef) -> DiodeParams {
     let i_l = s / 1000.0 * (p.i_l_ref + p.alpha_sc * (1.0 - p.adjust / 100.0) * (tck - tref));
     let i_0 = p.i_o_ref * (tck / tref).powi(3) * (p.eg_ref / (K_EV * tref) - e_g / (K_EV * tck)).exp();
     let r_sh = if s > 0.0 { p.r_sh_ref * (1000.0 / s) } else { f64::INFINITY };
-    DiodeParams { i_l, i_0, r_s: p.r_s, r_sh, n_ns_vth }
+    DiodeParams { i_l, i_0, i_02: 0.0, r_s: p.r_s, r_sh, n_ns_vth }
 }
 
 impl DiodeParams {
-    fn residual(&self, v: f64, i: f64) -> (f64, f64) {
-        let x = (v + i * self.r_s) / self.n_ns_vth;
+    fn junction(&self, voltage: f64) -> (f64, f64) {
+        let x = voltage / self.n_ns_vth;
         let ex = x.exp();
-        let f = self.i_l - self.i_0 * (ex - 1.0) - (v + i * self.r_s) / self.r_sh - i;
-        let df = -self.i_0 * ex * self.r_s / self.n_ns_vth - self.r_s / self.r_sh - 1.0;
-        (f, df)
+        let mut current = self.i_l - self.i_0 * (ex - 1.0) - voltage / self.r_sh;
+        let mut slope = -self.i_0 * ex / self.n_ns_vth - self.r_sh.recip();
+        if self.i_02 > 0.0 {
+            let ex2 = ex.sqrt();
+            current -= self.i_02 * (ex2 - 1.0);
+            slope -= self.i_02 * ex2 / (2.0 * self.n_ns_vth);
+        }
+        (current, slope)
+    }
+
+    fn residual(&self, v: f64, i: f64) -> (f64, f64) {
+        let (current, slope) = self.junction(v + i * self.r_s);
+        (current - i, slope * self.r_s - 1.0)
+    }
+
+    /// Terminal voltage at current, including reverse voltages before bypass clamping.
+    pub fn voltage(&self, current: f64) -> f64 {
+        let available = self.i_l - current;
+        let (mut lo, mut hi) = if available >= 0.0 {
+            (0.0, self.n_ns_vth * (available / self.i_0).ln_1p())
+        } else {
+            (available * self.r_sh, 0.0)
+        };
+        let mut v = hi;
+        for _ in 0..45 {
+            let (junction_current, slope) = self.junction(v);
+            let f = junction_current - current;
+            if f.abs() <= 1e-11 * (1.0 + current.abs()) { break; }
+            if f > 0.0 { lo = v; } else { hi = v; }
+            let next = v - f / slope;
+            v = if next.is_finite() && next > lo && next < hi { next } else { (lo + hi) / 2.0 };
+        }
+        v - current * self.r_s
     }
 
     /// Current at terminal voltage `v` (A).
@@ -67,6 +105,7 @@ impl DiodeParams {
     /// Open-circuit voltage (V).
     pub fn voc(&self) -> f64 {
         if self.i_l <= 0.0 { return 0.0; }
+        if self.i_02 > 0.0 { return self.voltage(0.0); }
         let (mut lo, mut hi) = (0.0, self.n_ns_vth * ((self.i_l / self.i_0) + 1.0).ln() * 1.5 + 1.0);
         for _ in 0..200 {
             let m = 0.5 * (lo + hi);
@@ -108,6 +147,73 @@ pub struct Datasheet {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FitError { NoConvergence, InvalidDatasheet }
+
+const T_REF: f64 = 298.15;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TwoDiodeRef {
+    at_stc: DiodeParams,
+    alpha_sc: f64,
+}
+
+impl TwoDiodeRef {
+    /// Irradiance-scaled photocurrent, low-light shunt correction and saturation
+    /// current temperature translation for the diffusion and recombination branches.
+    pub fn at(&self, irradiance: f64, tc: f64) -> DiodeParams {
+        let base = self.at_stc;
+        let t = tc + 273.15;
+        let ratio = t / T_REF;
+        let eg = 1.17 - 0.000473 * T_REF * T_REF / (636.0 + T_REF);
+        let exponent = eg / K_EV * (T_REF.recip() - t.recip());
+        let g = (irradiance / 1000.0).max(1e-9);
+        DiodeParams {
+            i_l: g * (base.i_l + self.alpha_sc * (t - T_REF)).max(0.0),
+            i_0: base.i_0 * ratio.powi(3) * exponent.exp(),
+            i_02: base.i_02 * ratio.powf(2.5) * (exponent / 2.0).exp(),
+            r_s: base.r_s,
+            r_sh: base.r_sh * (0.5 + 0.5 / g),
+            n_ns_vth: base.n_ns_vth * ratio,
+        }
+    }
+}
+
+/// Fit a physical two-diode circuit to the STC short-circuit, open-circuit
+/// and MPP anchors. Fix idealities at 1 and 2. Because these anchors do not
+/// uniquely determine Rs, prefer a solution with 10% of diode current at
+/// the MPP in the recombination branch. Temperatures and voltages are in SI.
+pub fn fit_two_diode(d: &Datasheet) -> Result<TwoDiodeRef, FitError> {
+    let (voc, isc, vmp, imp) = (d.v_oc, d.i_sc, d.v_mp, d.i_mp);
+    if d.cells_in_series == 0 || ![voc, isc, vmp, imp, d.alpha_sc].iter().all(|x| x.is_finite())
+        || !(voc > vmp && vmp > 0.0 && isc > imp && imp > 0.0) {
+        return Err(FitError::InvalidDatasheet);
+    }
+    let thermal = f64::from(d.cells_in_series) * K_EV * T_REF;
+    let activation = |v: f64, n: f64| (v / (n * thermal)).exp_m1();
+    let (e1, e2) = (activation(voc, 1.0), activation(voc, 2.0));
+    if !e1.is_finite() || !e2.is_finite() { return Err(FitError::InvalidDatasheet); }
+    let max_series = ((voc - vmp) / imp).min(vmp / imp);
+    let mut best: Option<(f64, DiodeParams)> = None;
+    for sample in 0..=1024 {
+        let rs = max_series * (sample as f64 / 1025.0);
+        let xsc = isc * rs;
+        let xmp = vmp + imp * rs;
+        let (s1, s2) = (activation(xsc, 1.0) / e1, activation(xsc, 2.0) / e2);
+        let (m1, m2) = (activation(xmp, 1.0) / e1, activation(xmp, 2.0) / e2);
+        let matrix = [
+            [1.0 - s1, 1.0 - s2, voc - xsc],
+            [1.0 - m1, 1.0 - m2, voc - xmp],
+            [(m1 + e1.recip()) / thermal, (m2 + e2.recip()) / (2.0 * thermal), 1.0],
+        ];
+        // dP/dV = 0 with the series drop included in the terminal derivative.
+        let Some([j1, j2, shunt]) = solve_n(matrix, [isc, imp, imp / (vmp - imp * rs)]) else { continue };
+        if ![j1, j2, shunt].iter().all(|x| x.is_finite() && *x > 0.0) { continue; }
+        let score = ((j2 * m2) / (j1 * m1 + j2 * m2) - 0.1).abs();
+        let p = DiodeParams { i_l: j1 + j2 + voc * shunt, i_0: j1 / e1, i_02: j2 / e2, r_s: rs, r_sh: shunt.recip(), n_ns_vth: thermal };
+        if best.is_none_or(|(old, _)| score < old) { best = Some((score, p)); }
+    }
+    let (_, at_stc) = best.ok_or(FitError::NoConvergence)?;
+    Ok(TwoDiodeRef { at_stc, alpha_sc: d.alpha_sc })
+}
 
 /// Fit De Soto reference parameters to datasheet values by solving the five
 /// equations of De Soto et al. (2006) (short circuit, open circuit, MPP,
@@ -374,6 +480,27 @@ fn solve5(mut m: [[f64; 6]; 5]) -> Option<[f64; 5]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_diode_fits_stc_and_remains_monotone_at_low_irradiance() {
+        let d = Datasheet { v_oc: 36.1, i_sc: 7.7, v_mp: 28.3, i_mp: 7.07, alpha_sc: 0.0026,
+            beta_voc: -0.12, cells_in_series: 60, gamma_pmp: -0.4 };
+        let reference = fit_two_diode(&d).unwrap();
+        let stc = reference.at(1000.0, 25.0);
+        let (v, i, _) = stc.mpp();
+        assert!(stc.i_02 > 0.0);
+        assert!((stc.voc() - d.v_oc).abs() < 1e-8);
+        assert!((stc.current(0.0) - d.i_sc).abs() < 1e-8);
+        assert!((v - d.v_mp).abs() < 1e-5 && (i - d.i_mp).abs() < 1e-5);
+        let hot = reference.at(1000.0, 60.0);
+        assert!(hot.voc() < stc.voc() && hot.mpp().2 < stc.mpp().2);
+        let dim = reference.at(150.0, 25.0);
+        assert!(dim.voc() < stc.voc());
+        let curve: Vec<_> = (0..=20).map(|step| dim.current(dim.voc() * step as f64 / 20.0)).collect();
+        assert!(curve.windows(2).all(|pair| pair[0] > pair[1]));
+        assert!((dim.voltage(dim.current(20.0)) - 20.0).abs() < 1e-8);
+    }
+
     #[test]
     fn fit_reproduces_datasheet_point() {
         // Generic 72-cell mono module (illustrative values).

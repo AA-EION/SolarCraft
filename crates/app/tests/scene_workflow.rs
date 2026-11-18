@@ -67,12 +67,18 @@ fn scene_workflow() {
 
     // 3. Simulate: per-module shading with bypass diodes, and the ledger shows it.
     ok("simulate", json!({"file": fs}));
+    let report = ok("report_preview", json!({"file": fs, "report_type": "system_planner"}));
+    let contents = report["contents"].as_array().unwrap();
+    assert!(contents.iter().any(|section| section["id"] == "string_routes"));
+    assert!(contents.iter().any(|section| section["id"] == "field_shading"));
     let ex = ok("explain", json!({"file": fs}));
+    assert!(ex["energy_kwh"].as_array().unwrap().iter().any(|s| s["key"] == "substring_shading"));
     let e1 = ex["annual"]["ac_kwh"].as_f64().unwrap();
     assert!(ex["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "SCENE_SHADING"), "{}", ex["warnings"]);
     let steps: Vec<&str> = ex["irradiance_kwh_m2"].as_array().unwrap().iter().map(|s| s["key"].as_str().unwrap()).collect();
     assert_eq!(steps, vec!["ghi", "poa", "shading", "bypass", "iam", "soiling", "effective"]);
     let sh = ok("scene_shading", json!({"file": fs}));
+    assert_eq!(sh["fields"][0]["nonlinear"], true);
     let mods = sh["fields"][0]["modules"].as_array().unwrap();
     assert_eq!(mods.len() as u64, strings * mps as u64);
     let worst = mods.iter().map(|m| m["beam_loss_pct"].as_f64().unwrap()).fold(0.0, f64::max);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use solarcraft_model::Project;
 use solarcraft_pv::{irradiance as irr, spa};
-use solarcraft_report::{build_view, docx, i18n::Lang, pdf, ReportInput, WeatherInfo};
+use solarcraft_report::{build_view, build_view_for, docx, i18n::Lang, pdf, ReportInput, ReportType, WeatherInfo};
 use solarcraft_weather::{Hour, Provenance, Weather};
 
 fn fixture() -> (Project, solarcraft_engine::SimResult) {
@@ -56,4 +56,22 @@ fn customer_text_is_escaped_in_view() {
     assert_eq!(v.customer.name, "Cliente Ñandú & Hijos <S.A.>");
     assert_eq!(v.date, "02/01/2026");
     assert!(pdf::render(&v, input.date).is_ok());
+}
+
+#[test]
+fn each_report_uses_distinct_sections_in_both_formats() {
+    let (p, r) = fixture();
+    let input = ReportInput { project: &p, result: &r, weather: WeatherInfo { provider: "test".into(), dataset: "synthetic".into(), licence: "fixture".into(), horizon_applied: false }, lang: Lang::En, date: (2026, 1, 2), designer: String::new() };
+    let mut section_counts = vec![];
+    for kind in [ReportType::CustomerShort, ReportType::CustomerExtended, ReportType::SystemPlanner] {
+        let v = build_view_for(&input, kind);
+        assert_eq!(v.report_type, kind);
+        assert!(v.contents.iter().any(|s| s.id == "production"));
+        assert_eq!(v.contents.iter().any(|s| s.id == "monthly_results"), kind != ReportType::CustomerShort);
+        assert_eq!(v.contents.iter().any(|s| s.id == "datasheets"), kind == ReportType::SystemPlanner);
+        section_counts.push(v.contents.len());
+        assert!(pdf::render(&v, input.date).unwrap().starts_with(b"%PDF-"));
+        assert!(docx::render(&v).unwrap().starts_with(b"PK"));
+    }
+    assert!(section_counts.windows(2).all(|pair| pair[0] < pair[1]));
 }

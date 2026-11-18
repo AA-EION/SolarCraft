@@ -7,6 +7,13 @@ use crate::{self as app, AppError, ReportFormat};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+fn report_type(params: &Value) -> app::Result<app::ReportType> {
+    match params.get("report_type") {
+        Some(value) => serde_json::from_value(value.clone()).map_err(|error| app::e("INVALID_ARGUMENT", format!("report_type: {error}"))),
+        None => Ok(app::ReportType::default()),
+    }
+}
+
 fn arg<'a>(p: &'a Value, k: &str) -> Result<&'a Value, AppError> {
     p.get(k).ok_or_else(|| AppError { code: "INVALID_ARGUMENT", message: format!("missing parameter '{k}'") })
 }
@@ -137,7 +144,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             let fmt: ReportFormat = serde_json::from_value(arg(params, "format")?.clone()).map_err(|e| AppError { code: "INVALID_ARGUMENT", message: format!("format: {e}") })?;
             let lang = params.get("lang").and_then(Value::as_str).unwrap_or("en");
             let designer = params.get("designer").and_then(Value::as_str).unwrap_or("");
-            Ok(v(&app::generate_report(&path(params, "file")?, &path(params, "output")?, fmt, lang, designer)?))
+            Ok(v(&app::generate_report_for(&path(params, "file")?, &path(params, "output")?, fmt, lang, designer, report_type(params)?)?))
         }
         "catalog_audit" => app::catalog_ops::audit(&path(params, "source")?),
         "catalog_import" => app::catalog_ops::import(&path(params, "source")?, &cat_path(params)),
@@ -150,7 +157,8 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
             app::catalog_ops::apply_tariff(&cat_path(params), &path(params, "file")?, i.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)), x.as_ref().map(|(a, b, c)| (a.as_str(), b.as_str(), *c)))
         }
         "catalog_coverage" => app::catalog_ops::coverage(&path(params, "tsv")?, params.get("catalog").and_then(Value::as_str).map(std::path::Path::new), params.get("output").and_then(Value::as_str).map(std::path::Path::new)),
-        "report_preview" => Ok(v(&app::report_view(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"))?)),
+        "report_preview" => Ok(v(&app::report_view_for(&path(params, "file")?, params.get("lang").and_then(Value::as_str).unwrap_or("en"),
+            report_type(params)?, params.get("designer").and_then(Value::as_str).unwrap_or(""))?)),
         "scene_get" => app::scene_ops::get(&path(params, "file")?),
         "scene_edit" => app::scene_ops::edit(&path(params, "file")?, arg(params, "edits")?, params.get("preview").and_then(Value::as_bool).unwrap_or(false)),
         "scene_place_roof" => app::scene_ops::place_roof(&path(params, "file")?, &s(params, "face")?),
@@ -223,6 +231,15 @@ mod tests {
         let rep = call("export_report", json!({"file": fs, "output": out.to_str().unwrap(), "format": "pdf", "lang": "es"}));
         assert_eq!(rep["ok"], json!(true), "{rep}");
         assert!(std::fs::read(&out).unwrap().starts_with(b"%PDF"));
+        assert_eq!(rep["result"]["report_type"], "customer_extended");
+        assert_eq!(call("report_preview", json!({"file": fs, "report_type": "customer_short"}))["result"]["report_type"], "customer_short");
+        assert_eq!(call("report_preview", json!({"file": fs, "report_type": "unknown"}))["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(call("set_fields", json!({"file": fs, "edits": [{"pointer": "/simulation/pv_model", "value": "two_diode"}]}))["ok"], true);
+        assert_eq!(call("results_summary", json!({"file": fs}))["error"]["code"], "NO_RESULTS");
+        let two = call("simulate", json!({"file": fs}));
+        assert_eq!(two["ok"], true, "{two}");
+        assert_eq!(two["result"]["manifest"]["pv_model"], "two_diode");
+        assert_ne!(r["result"]["annual"]["ac_kwh"], two["result"]["annual"]["ac_kwh"]);
         assert_eq!(call("nope", json!({}))["error"]["code"], json!("UNKNOWN_METHOD"));
         assert_eq!(serde_json::from_str::<Value>(&invoke_json("{bad", &mut |_| true)).unwrap()["error"]["code"], json!("INVALID_REQUEST"));
         std::fs::remove_dir_all(&dir).ok();

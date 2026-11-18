@@ -100,7 +100,14 @@ pub enum LoadProfile {
     /// SolarCraft's own parametric daily/weekly/seasonal shape scaled to the annual total.
     Synthetic { profile: SyntheticProfile },
     /// Imported interval series stored as a project blob (kWh per interval, local standard time).
-    Series { blob: String, name: String, step_minutes: u32, values: usize },
+    Series {
+        blob: String,
+        name: String,
+        step_minutes: u32,
+        values: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_year: Option<i32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

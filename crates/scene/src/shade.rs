@@ -68,6 +68,27 @@ pub struct FieldShading {
     pub rays: u64,
 }
 
+/// Spatially resolved direct-beam transmittance, quantized to 1/255. An
+/// omitted module/direction pair is fully illuminated. Night has no direction.
+#[derive(Debug, Default)]
+pub struct SubstringTrace {
+    directions: Vec<Option<usize>>,
+    modules: Vec<Vec<(usize, Box<[u8]>)>>,
+    shaded: Vec<bool>,
+}
+
+impl SubstringTrace {
+    pub fn shaded_at(&self, hour: usize) -> bool {
+        self.directions[hour].is_some_and(|bin| self.shaded[bin])
+    }
+
+    pub fn transmission(&self, hour: usize, module: usize) -> Option<&[u8]> {
+        let bin = self.directions[hour]?;
+        let rows = &self.modules[module];
+        rows.binary_search_by_key(&bin, |row| row.0).ok().map(|index| rows[index].1.as_ref())
+    }
+}
+
 const MODULE_OWNER: u32 = 1 << 24;
 
 /// Triangles of everything that can cast shade.
@@ -140,6 +161,14 @@ pub fn sun_dir(elev: f64, az: f64) -> V3 { solarcraft_shading::sun_dir(elev, az)
 /// Shade one field for a list of sun positions (`(apparent elevation, azimuth)`, degrees)
 /// with per-position weights (beam irradiance, for the per-module loss figures).
 pub fn shade_field(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions) -> Result<FieldShading, String> {
+    shade(scene, field_id, suns, weights, opt, false).map(|(summary, _)| summary)
+}
+
+pub fn shade_field_substrings(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions) -> Result<(FieldShading, SubstringTrace), String> {
+    shade(scene, field_id, suns, weights, opt, true)
+}
+
+fn shade(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: &[f64], opt: &ShadeOptions, keep_substrings: bool) -> Result<(FieldShading, SubstringTrace), String> {
     let f = scene.field(field_id).ok_or_else(|| format!("no field {field_id}"))?;
     let tris = occluders(scene);
     let bvh = Bvh::from_triangles(&tris);
@@ -165,7 +194,7 @@ pub fn shade_field(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: 
     let wsum: f64 = wbin.iter().sum();
     let sky_dirs = |n: V3| hemisphere(n, opt.sky_rings, opt.sky_sectors);
     struct Acc { bypass: Vec<f64>, area: Vec<f64>, mods: Vec<(usize, f64, f64, f64)>, rays: u64 }
-    let per: Vec<(usize, Vec<f32>, Vec<f32>, f64, f64, f64, u64)> = f.modules.par_iter().enumerate().map(|(mi, m)| {
+    let per: Vec<_> = f.modules.par_iter().enumerate().map(|(mi, m)| {
         let owner = module_owner(scene, field_id, mi);
         let subs = substring_samples(m, f.module.bypass_diodes, opt);
         let center = add(m.center(), scale(m.normal, 0.02));
@@ -175,19 +204,26 @@ pub fn shade_field(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: 
         };
         let mut rays = 0u64;
         let (mut fb, mut fa) = (vec![1.0f32; dirs.len()], vec![1.0f32; dirs.len()]);
+        let mut striped = Vec::new();
+        let mut row = Vec::with_capacity(subs.len());
         for (b, d) in dirs.iter().enumerate() {
             if dot(*d, m.normal) <= 0.0 { continue; } // sun behind the module: no beam to lose
-            rays += probes.len() as u64;
-            if probes.iter().all(|p| bvh.transmittance(*p, *d, owner) >= 1.0) { continue; }
+            if !keep_substrings {
+                rays += probes.len() as u64;
+                if probes.iter().all(|p| bvh.transmittance(*p, *d, owner) >= 1.0) { continue; }
+            }
             let mut sum_sub = 0.0; let mut sum_all = 0.0; let mut n_all = 0usize;
+            row.clear();
             for s in &subs {
                 let mut worst = 1.0f64;
                 for p in s { let t = bvh.transmittance(*p, *d, owner); worst = worst.min(t); sum_all += t; n_all += 1; }
                 rays += s.len() as u64;
                 sum_sub += worst;
+                if keep_substrings { row.push((255.0 * worst).round() as u8); }
             }
             fb[b] = (sum_sub / subs.len() as f64) as f32;
             fa[b] = (sum_all / n_all.max(1) as f64) as f32;
+            if row.iter().any(|&t| t < 255) { striped.push((b, row.clone().into_boxed_slice())); }
         }
         let hs = sky_dirs(m.normal);
         let (mut vis, mut cnt) = (0.0, 0usize);
@@ -197,18 +233,24 @@ pub fn shade_field(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: 
         let (lb, la) = if wsum > 0.0 {
             (wbin.iter().zip(&fb).map(|(w, x)| w * (1.0 - *x as f64)).sum::<f64>() / wsum * 100.0, wbin.iter().zip(&fa).map(|(w, x)| w * (1.0 - *x as f64)).sum::<f64>() / wsum * 100.0)
         } else { (0.0, 0.0) };
-        (mi, fb, fa, lb, la, svf, rays)
+        (mi, fb, fa, lb, la, svf, rays, striped)
     }).collect();
     let nm = f.modules.len().max(1) as f64;
     let mut acc = Acc { bypass: vec![0.0; dirs.len()], area: vec![0.0; dirs.len()], mods: vec![], rays: 0 };
-    for (mi, fb, fa, lb, la, svf, rays) in per {
+    let mut trace = SubstringTrace::default();
+    if keep_substrings { trace.shaded.resize(dirs.len(), false); }
+    for (mi, fb, fa, lb, la, svf, rays, striped) in per {
         for b in 0..dirs.len() { acc.bypass[b] += fb[b] as f64 / nm; acc.area[b] += fa[b] as f64 / nm; }
         acc.mods.push((mi, lb, la, svf));
         acc.rays += rays;
+        if keep_substrings {
+            for (bin, _) in &striped { trace.shaded[*bin] = true; }
+            trace.modules.push(striped);
+        }
     }
     let to_sun = |v: &[f64]| of_sun.iter().map(|b| b.map_or(1.0, |b| if f.modules.is_empty() { 1.0 } else { v[b] as f32 })).collect::<Vec<f32>>();
     let diffuse_factor = if f.modules.is_empty() { 1.0 } else { acc.mods.iter().map(|m| m.3).sum::<f64>() / nm };
-    Ok(FieldShading {
+    let summary = FieldShading {
         field: field_id.into(),
         beam_bypass: to_sun(&acc.bypass),
         beam_area: to_sun(&acc.area),
@@ -218,5 +260,7 @@ pub fn shade_field(scene: &Scene, field_id: &str, suns: &[(f64, f64)], weights: 
         traced_directions: dirs.len(),
         occluder_triangles: tris.len(),
         rays: acc.rays,
-    })
+    };
+    if keep_substrings { trace.directions = of_sun; }
+    Ok((summary, trace))
 }

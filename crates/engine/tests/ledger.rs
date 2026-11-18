@@ -165,3 +165,31 @@ fn integrated_converter_keeps_its_charge_rating() {
     assert_eq!(result.flows.export[0], 3000.0);
     assert!(result.balance.max_abs_residual_wh < 1e-6);
 }
+
+#[test]
+fn customer_load_sources_and_unserved_demand_reconcile() {
+    use solarcraft_engine::energy::dispatch;
+    use solarcraft_model::equipment::{GeneratorSpec, Provenance};
+    use solarcraft_model::plant::{Coupling, GridService, Outage};
+    let mut project = dispatch_fixture(Coupling::Integrated);
+    let generator = GeneratorSpec { id: "generator".into(), manufacturer: "Fixture".into(), model: "750 W".into(), provenance: Provenance::User,
+        rated_va: 750.0, max_va: 750.0, phases: 1, voltage_v: 230.0, fuel_curve: vec![[0.0, 0.0], [1.0, 0.5]],
+        fuel_unit: "L".into(), catalog_ref: None, datasheet_ref: String::new() };
+    let storage = project.storage.as_mut().unwrap();
+    storage.initial_soc_pct = storage.soc_min_pct;
+    storage.grid_service = GridService::None;
+    storage.generator_id = Some(generator.id.clone());
+    storage.outages = vec![Outage { start_hour: 1, hours: 1 }];
+    project.library.generators.push(generator);
+    project.loads.critical_fraction = 0.5;
+    let result = dispatch(&project, &[], &[2000.0, 800.0], &[1, 2], 1.0).unwrap();
+    let b = result.balance;
+    assert_eq!(result.flows.generator_to_load, [750.0, 0.0]);
+    assert_eq!(result.flows.grid_to_load, [0.0, 800.0]);
+    assert_eq!(result.flows.battery_to_load, [0.0, 0.0]);
+    let demand = b.pv_to_load_kwh + b.battery_to_load_kwh + b.grid_to_load_kwh + b.generator_to_load_kwh
+        + b.unserved_kwh + b.shed_noncritical_kwh;
+    assert!((demand - b.load_kwh).abs() < 1e-12);
+    assert!((b.autarky - 750.0 / 2800.0).abs() < 1e-12);
+    assert!(b.max_abs_residual_wh < 1e-6);
+}

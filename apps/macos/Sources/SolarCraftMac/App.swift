@@ -196,6 +196,10 @@ struct DesignPage: View {
                 Picker(m.t("mounting"), selection: Binding(get: { p.simulation.mounting.value }, set: { m.set("/simulation/mounting", $0) })) {
                     Text(m.t("open_rack")).tag("open_rack"); Text(m.t("roof_mounted")).tag("roof_mounted"); Text(m.t("integrated")).tag("integrated")
                 }
+                Picker(m.t("pv_model"), selection: Binding(get: { p.simulation.pv_model }, set: { m.set("/simulation/pv_model", $0) })) {
+                    Text(m.t("single_diode")).tag("single_diode")
+                    Text(m.t("two_diode")).tag("two_diode")
+                }
                 if p.mode == "detailed" {
                     IntRow(label: m.t("modules_per_string"), field: a.modules_per_string, pointer: "/arrays/0/modules_per_string")
                     IntRow(label: m.t("strings"), field: a.strings, pointer: "/arrays/0/strings")
@@ -271,15 +275,30 @@ struct ReportPage: View {
     @EnvironmentObject var m: AppModel
     @State private var lang = String((Locale.preferredLanguages.first ?? "en").prefix(2))
     @State private var format = "pdf"
+    @State private var reportType = "customer_extended"
     @State private var designer = ""
+    @State private var contents: [String] = []
     var body: some View {
         Form {
+            Picker(m.t("report_type"), selection: $reportType) {
+                Text(m.t("customer_short")).tag("customer_short")
+                Text(m.t("customer_extended")).tag("customer_extended")
+                Text(m.t("system_planner")).tag("system_planner")
+            }
             Picker(m.t("language"), selection: $lang) { Text("English").tag("en"); Text("Español").tag("es"); Text("Deutsch").tag("de"); Text("Português (BR)").tag("pt") }
             Picker(m.t("format"), selection: $format) { Text("PDF").tag("pdf"); Text("DOCX").tag("docx") }.pickerStyle(.segmented)
             TextField(m.t("designer"), text: $designer)
-            Button(m.t("export_report")) { m.exportReport(lang: lang, format: format, designer: designer) }.disabled(m.results == nil)
-            if m.results == nil { Text(m.t("no_results")).foregroundStyle(.secondary) }
+            Button(m.t("export_report")) { m.exportReport(lang: lang, format: format, designer: designer, reportType: reportType) }.disabled(m.results == nil)
+            if m.results == nil {
+                Text(m.t("no_results")).foregroundStyle(.secondary)
+            } else {
+                Button(m.t("report_preview")) { contents = m.reportContents(lang: lang, reportType: reportType) }
+                ForEach(contents.indices, id: \.self) { index in Text(contents[index]) }
+            }
         }
+        .onChange(of: reportType) { contents.removeAll() }
+        .onChange(of: lang) { contents.removeAll() }
+        .onChange(of: m.url) { contents.removeAll() }
     }
 }
 

@@ -20,11 +20,13 @@
     #d.footer #h(1fr) #s.page #counter(page).display() / #counter(page).final().first()
   ])
 #set par(justify: false, leading: 0.6em)
-#show heading.where(level: 1): it => block(above: 1.4em, below: 0.7em)[#text(size: 14pt, weight: "semibold", fill: teal, it.body)]
+#show heading.where(level: 1): it => block(sticky: true, above: 1.4em, below: 0.7em)[#text(size: 14pt, weight: "semibold", fill: teal, it.body)]
 
 #let grid-table(rows, widths: (1fr, auto), header: none, align-cols: (left, right)) = {
   let cells = ()
-  if header != none { for h in header { cells.push(text(weight: "semibold", size: 9pt, fill: muted, h)) } }
+  if header != none {
+    cells.push(table.header(..header.map(h => text(weight: "semibold", size: 9pt, fill: muted, h))))
+  }
   for r in rows { for c in r { cells.push(c) } }
   table(columns: widths, stroke: (x, y) => (bottom: if y == 0 and header != none { 0.8pt + teal } else { 0.4pt + rule }),
     inset: (x: 4pt, y: 4.5pt), align: (x, y) => align-cols.at(x, default: right), ..cells)
@@ -47,58 +49,25 @@
   #text(size: 17pt, weight: "bold", fill: teal, k.value) #text(size: 9pt, fill: muted, k.unit)
 ]))
 #v(10pt)
-#text(weight: "semibold", s.monthly_chart)
-#image("monthly.svg", width: 100%)
-#pagebreak()
-
-= #s.system
-#for a in d.arrays [
-  #text(weight: "semibold", a.name)
-  #grid-table(a.rows)
-]
-
-#if d.roof_count > 0 [
-  #block(breakable: false)[
-    #text(weight: "semibold", s.roof_plan)
-    #for i in range(d.roof_count) [#image("roof-" + str(i) + ".svg", width: 100%)]
+#for sec in d.contents [
+  #if sec.id == "equipment" and d.report_type != "customer_short" { pagebreak(weak: true) }
+  = #sec.title
+  #for (i, b) in sec.blocks.enumerate() [
+    #if b.kind == "text" [
+      #let next = sec.blocks.at(i + 1, default: none)
+      #block(sticky: next != none and next.kind != "text")[#text(size: 9.5pt)[#b.text]]
+    ] else if b.kind == "table" [
+      #let n = b.rows.first().len()
+      #let widths = if n == 2 { (0.44fr, 0.56fr) } else { (1.8fr,) + range(n - 1).map(_ => 1fr) }
+      #block(breakable: not ("assumptions", "run").contains(sec.id))[
+        #grid-table(b.rows, widths: widths, header: if b.header.len() > 0 { b.header } else { none },
+          align-cols: (left,) + range(n - 1).map(_ => right))
+      ]
+    ] else if b.kind == "figure" [
+      #block(breakable: false)[
+        #if b.caption != "" [#text(weight: "semibold")[#b.caption] #v(3pt)]
+        #image(b.file, width: 100%)
+      ]
+    ]
   ]
 ]
-
-= #s.site_weather
-#grid-table(d.site_rows)
-#v(4pt)
-#text(size: 8.5pt, fill: muted)[#d.weather_notes.join(" · ") \ #d.licence]
-
-#block(breakable: false)[
-  = #s.losses
-  #text(size: 9pt, fill: muted, s.losses_intro)
-  #image("waterfall.svg", width: 100%)
-]
-#grid-table(d.irr_rows, widths: (1fr, auto, auto), header: (s.irradiation, "kWh/m²", s.change), align-cols: (left, right, right))
-#v(6pt)
-#grid-table(d.loss_rows, widths: (1fr, auto, auto), header: (s.step, s.energy + " (kWh)", s.change), align-cols: (left, right, right))
-
-= #s.monthly_table
-#grid-table(d.monthly_rows, widths: (1fr, auto, auto, auto), header: d.monthly_header, align-cols: (left, right, right, right))
-
-= #s.assumptions
-#grid-table(d.assumption_rows)
-#v(4pt)
-#text(size: 9pt)[*#s.models.* #d.models_text]
-
-#for sec in d.sections [
-  = #sec.title
-  #if sec.intro != "" [#text(size: 9pt, fill: muted, sec.intro)]
-  #let ncol = if sec.rows.len() > 0 { sec.rows.at(0).len() } else { 2 }
-  #grid-table(sec.rows, widths: (1fr,) + range(ncol - 1).map(_ => auto), header: if sec.header.len() > 0 { sec.header } else { none }, align-cols: (left,) + range(ncol - 1).map(_ => right))
-]
-
-#if d.notes.len() > 0 [
-  = #s.notes
-  #for n in d.notes [- #n]
-]
-
-#v(10pt)
-#block(stroke: (left: 2pt + teal), inset: (left: 8pt, y: 4pt))[#text(size: 9pt, d.disclaimer)]
-#v(8pt)
-#text(size: 8pt, fill: muted)[*#s.run_info:* #d.run_rows.map(r => r.at(0) + " " + r.at(1)).join(" · ")]

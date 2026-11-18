@@ -212,6 +212,9 @@ struct ReportArgs {
     output: String,
     /// "pdf" or "docx".
     format: app::ReportFormat,
+    /// Customer short, customer extended (default), or system planner.
+    #[serde(default)]
+    report_type: app::ReportType,
     /// Report language: en, es, de or pt-BR.
     #[serde(default = "default_lang")]
     lang: String,
@@ -452,7 +455,7 @@ impl SolarCraftMcp {
         if !a.output.ends_with(&format!(".{ext}")) { return Err(ErrorData::invalid_params(format!("output must end in .{ext}"), None)); }
         let out = self.path(&a.output, false, false)?;
         if out.exists() && !a.overwrite { return Err(ErrorData::invalid_params("output exists; set overwrite=true to replace it", None)); }
-        match tokio::task::spawn_blocking(move || app::generate_report(&f, &out, a.format, &a.lang, &a.designer)).await {
+        match tokio::task::spawn_blocking(move || app::generate_report_for(&f, &out, a.format, &a.lang, &a.designer, a.report_type)).await {
             Ok(Ok(r)) => ok(to_value(&r)), Ok(Err(e)) => app_err(e), Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }

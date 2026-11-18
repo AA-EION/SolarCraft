@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Editable DOCX export (docx-rs) from the same view model as the PDF.
 //! Charts are rasterised from the same SVGs with resvg.
-use crate::View;
+use crate::{ContentBlock, View};
 use docx_rs::*;
 
 fn svg_to_png(svg: &str) -> Result<(Vec<u8>, u32, u32), String> {
@@ -25,7 +25,10 @@ const MUTED: &str = "6B7280";
 const DOC_FONT: &str = "Calibri";
 fn text(t: &str) -> Run { Run::new().add_text(t).fonts(RunFonts::new().ascii(DOC_FONT).hi_ansi(DOC_FONT).cs(DOC_FONT)) }
 fn para(t: &str) -> Paragraph { Paragraph::new().add_run(text(t).size(20)) }
-fn heading(t: &str) -> Paragraph { Paragraph::new().add_run(text(t).size(28).bold().color(TEAL)).line_spacing(LineSpacing::new().before(280).after(100)) }
+fn heading(t: &str) -> Paragraph {
+    Paragraph::new().add_run(text(t).size(28).bold().color(TEAL))
+        .line_spacing(LineSpacing::new().before(280).after(100)).keep_next(true).keep_lines(true)
+}
 
 fn table_of<const N: usize>(header: Option<&[String; N]>, rows: &[[String; N]]) -> Table {
     let widths: Vec<usize> = match N { 2 => vec![5600, 4000], 3 => vec![5600, 2000, 2000], 4 => vec![3600, 2000, 2000, 2000], _ => vec![9600 / N; N] };
@@ -35,7 +38,7 @@ fn table_of<const N: usize>(header: Option<&[String; N]>, rows: &[[String; N]]) 
         let mut p = Paragraph::new().add_run(r);
         if i > 0 { p = p.align(AlignmentType::Right); }
         TableCell::new().add_paragraph(p).width(widths[i], WidthType::Dxa)
-    }).collect());
+    }).collect()).cant_split();
     let mut rows_v = vec![];
     if let Some(h) = header { rows_v.push(mk_row(h, true)); }
     rows_v.extend(rows.iter().map(|r| mk_row(r, false)));
@@ -60,7 +63,7 @@ fn table_dyn(header: Option<&Vec<String>>, rows: &[Vec<String>]) -> Table {
         let mut p = Paragraph::new().add_run(r);
         if i > 0 { p = p.align(AlignmentType::Right); }
         TableCell::new().add_paragraph(p).width(widths[i.min(n - 1)], WidthType::Dxa)
-    }).collect());
+    }).collect()).cant_split();
     let mut t: Vec<TableRow> = vec![];
     if let Some(h) = header { t.push(mk_row(h, true)); }
     for r in rows { t.push(mk_row(r, false)); }
@@ -77,41 +80,22 @@ pub fn render(v: &View) -> Result<Vec<u8>, String> {
         .add_paragraph(para(&format!("{}: {} — {}", s["prepared_for"], v.customer.name, v.customer.address)))
         .add_paragraph(para(&format!("{}: {} · {}", s["date"], v.date, v.designer)));
     let kpis: Vec<[String; 2]> = v.kpis.iter().map(|k| [k.label.clone(), format!("{} {}", k.value, k.unit)]).collect();
-    doc = doc.add_table(table_of(None, &kpis))
-        .add_paragraph(Paragraph::new().add_run(text(s["monthly_chart"]).bold().size(20)))
-        .add_paragraph(image_para(&v.monthly_svg, width)?)
-        .add_paragraph(heading(s["system"]));
-    for a in &v.arrays { doc = doc.add_paragraph(Paragraph::new().add_run(text(&a.name).bold().size(20))).add_table(table_of(None, &a.rows)); }
-    if !v.roof_svgs.is_empty() {
-        doc = doc.add_paragraph(Paragraph::new().add_run(text(s["roof_plan"]).bold().size(20)));
-        for svg in &v.roof_svgs { doc = doc.add_paragraph(image_para(svg, width)?); }
+    doc = doc.add_table(table_of(None, &kpis));
+    for section in &v.contents {
+        doc = doc.add_paragraph(heading(&section.title));
+        for block in &section.blocks {
+            doc = match block {
+                ContentBlock::Text { text } => doc.add_paragraph(para(text)),
+                ContentBlock::Table { header, rows } =>
+                    doc.add_table(table_dyn((!header.is_empty()).then_some(header), rows)),
+                ContentBlock::Figure { index, caption, .. } => {
+                    if !caption.is_empty() { doc = doc.add_paragraph(para(caption).keep_next(true)); }
+                    doc.add_paragraph(image_para(v.figures.get(*index).ok_or("missing report figure")?, width)?)
+                }
+            };
+        }
     }
-    doc = doc.add_paragraph(heading(s["site_weather"])).add_table(table_of(None, &v.site_rows))
-        .add_paragraph(Paragraph::new().add_run(text(&v.weather_notes.join(" · ")).size(17).color(MUTED)))
-        .add_paragraph(Paragraph::new().add_run(text(&v.licence).size(17).color(MUTED)))
-        .add_paragraph(heading(s["losses"]))
-        .add_paragraph(Paragraph::new().add_run(text(s["losses_intro"]).size(18).color(MUTED)))
-        .add_paragraph(image_para(&v.waterfall_svg, width)?)
-        .add_table(table_of(Some(&[s["irradiation"].to_string(), "kWh/m²".to_string(), s["change"].to_string()]), &v.irr_rows))
-        .add_paragraph(para(""))
-        .add_table(table_of(Some(&[s["step"].to_string(), format!("{} (kWh)", s["energy"]), s["change"].to_string()]), &v.loss_rows))
-        .add_paragraph(heading(s["monthly_table"]))
-        .add_table(table_of(Some(&v.monthly_header), &v.monthly_rows))
-        .add_paragraph(heading(s["assumptions"]))
-        .add_table(table_of(None, &v.assumption_rows))
-        .add_paragraph(Paragraph::new().add_run(text(&format!("{}: ", s["models"])).bold().size(19)).add_run(text(&v.models_text).size(19)));
-    for sec in &v.sections {
-        doc = doc.add_paragraph(heading(&sec.title));
-        if !sec.intro.is_empty() { doc = doc.add_paragraph(Paragraph::new().add_run(text(&sec.intro).size(18).color(MUTED))); }
-        doc = doc.add_table(table_dyn(if sec.header.is_empty() { None } else { Some(&sec.header) }, &sec.rows));
-    }
-    if !v.notes.is_empty() {
-        doc = doc.add_paragraph(heading(s["notes"]));
-        for n in &v.notes { doc = doc.add_paragraph(para(&format!("• {n}"))); }
-    }
-    doc = doc.add_paragraph(Paragraph::new().add_run(text(&v.disclaimer).size(18).italic()))
-        .add_paragraph(Paragraph::new().add_run(text(&format!("{}: {}", s["run_info"], v.run_rows.iter().map(|r| format!("{} {}", r[0], r[1])).collect::<Vec<_>>().join(" · "))).size(16).color(MUTED)))
-        .add_paragraph(Paragraph::new().add_run(text(&v.footer).size(16).color(MUTED)));
+    doc = doc.add_paragraph(Paragraph::new().add_run(text(&v.footer).size(16).color(MUTED)));
     let mut buf = std::io::Cursor::new(Vec::new());
     doc.build().pack(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf.into_inner())

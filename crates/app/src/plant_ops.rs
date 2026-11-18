@@ -114,32 +114,21 @@ pub fn add_generic_storage_equipment(path: &Path) -> Result<Vec<String>> {
 }
 
 /// Import a metered consumption series: one value per line (kWh per interval, or kW
-/// average with `unit = "kw"`), optionally `timestamp,value`. 8760/17520/35040/105120/525600 rows.
+/// average with `unit = "kw"`), optionally `timestamp,value`. Timestamped data
+/// is verified against the project's local standard time before storing a profile.
 pub fn import_load_series(path: &Path, file: &Path, unit: &str) -> Result<Value> {
     let text = std::fs::read_to_string(file).map_err(|x| e("FILE_READ", format!("{}: {x}", file.display())))?;
-    let mut vals = vec![];
-    for (i, line) in text.lines().enumerate() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') { continue; }
-        let last = t.rsplit([',', ';', '\t']).next().unwrap_or(t).trim();
-        match last.replace(',', ".").parse::<f64>() {
-            Ok(v) if v.is_finite() && v >= 0.0 => vals.push(v),
-            Ok(_) => return Err(e("LOAD_PARSE", format!("line {}: negative or invalid value", i + 1))),
-            Err(_) if vals.is_empty() => continue, // header
-            Err(_) => return Err(e("LOAD_PARSE", format!("line {}: '{last}' is not a number", i + 1))),
-        }
-    }
-    let per_hour = match vals.len() { 8760 => 1.0, 17520 => 2.0, 35040 => 4.0, 105120 => 12.0, 525600 => 60.0, n => return Err(e("LOAD_PARSE", format!("{n} values; expected one 365-day year at 60/30/15/5/1-minute steps"))) };
-    if unit.eq_ignore_ascii_case("kw") { for v in &mut vals { *v /= per_hour; } }
-    let total: f64 = vals.iter().sum();
     let (mut s, mut p) = open(path)?;
-    let bytes = serde_json::to_vec(&vals).map_err(|x| e("ENCODE", x))?;
+    let series = crate::load_import::parse(&text, unit, p.site.utc_offset())?;
+    let total: f64 = series.values.iter().sum();
+    if !total.is_finite() { return Err(e("LOAD_PARSE", "Annual consumption exceeds the supported numeric range.")); }
+    let bytes = serde_json::to_vec(&series.values).map_err(|x| e("ENCODE", x))?;
     let hash = s.put_blob("load", "application/vnd.solarcraft.load+json", &bytes).map_err(|x| e("PROJECT_SAVE", x))?;
     let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    p.loads.profile = LoadProfile::Series { blob: hash, name: name.clone(), step_minutes: (60.0 / per_hour) as u32, values: vals.len() };
+    p.loads.profile = LoadProfile::Series { blob: hash, name: name.clone(), step_minutes: series.step_minutes, values: series.values.len(), local_year: series.local_year };
     p.loads.annual_kwh = total;
     save(&mut s, &p, &format!("load series {name}"))?;
-    Ok(serde_json::json!({"name": name, "values": vals.len(), "step_minutes": 60.0 / per_hour, "annual_kwh": total}))
+    Ok(serde_json::json!({"name": name, "values": series.values.len(), "step_minutes": series.step_minutes, "annual_kwh": total, "local_year": series.local_year}))
 }
 
 pub(crate) fn load_series(s: &Store, p: &Project) -> Result<Option<Vec<f64>>> {
