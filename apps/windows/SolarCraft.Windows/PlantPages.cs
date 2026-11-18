@@ -879,15 +879,40 @@ public sealed partial class MainWindow
                     area_mm2 = 10, temperature_c = 50, voltage_v = 230, current_a = 1, circuits = 1, target_drop_pct = 3,
                     ampacity_a = 55, derating = .85, sizing_factor = 1.25, protection_a = 40,
                     binding = new { kind = "inverter_ac", unit_id = unitIds[0] },
+                    local_rule = new { rule = "retie_inverter_ac", other_segments_pct = 1.1 },
                     code_protection = new { standard = "iec60364", maximum_circuit_v = 250, device_rated_v = 275, device_dc_rated = false,
-                        prospective_fault_ka = 3, breaking_capacity_ka = 6, conventional_trip_a = 52, conductor_k = 115, device_let_through_a2s = 200000 } },
+                        breaking_capacity_ka = 10, conventional_trip_a = 52, conductor_k = 115, device_let_through_a2s = 200000,
+                        fault_study = new {
+                            strong = new { path = "line_neutral", r_mohm = 38, x_mohm = 0, voltage_factor = 1.0 },
+                            weak = new { path = "line_earth", r_mohm = 40, x_mohm = 0, voltage_factor = 0.95 },
+                            remote_temperature_c = 70, path_x_mohm_per_m = 0.05, return_area_mm2 = 10,
+                        },
+                        coordination = new { minimum_ratio = 1.15, curve_limit_ka = 8, maximum_clear_seconds = 0.4,
+                            upstream = new { kind = "fuse", model = "Fusible sintético", reference = "Curva sintética de prueba",
+                                points = new[] { new[] { 1000.0,0.5 }, new[] { 3000.0,0.14 }, new[] { 8000.0,0.04 } } },
+                            downstream = new { kind = "breaker", model = "Interruptor sintético", reference = "Curva sintética de prueba",
+                                points = new[] { new[] { 1000.0,0.18 }, new[] { 3000.0,0.048 }, new[] { 8000.0,0.01 } } },
+                        },
+                    } },
             } });
             Api.Invoke("simulate", new { file });
             Reload();
             if (Arr(_summary?["clusters"]).Count != 2 || Arr(_summary?["routed_cables"]).Count != 1 ||
                 S(linked?["estimates"]?[0]?["code_checks"], "status") != "pass" ||
+                S(linked?["estimates"]?[0]?["local_checks"], "status") != "pass" ||
+                N(linked?["estimates"]?[0]?["code_checks"]?["fault_duty"], "near_ka") <= 6 ||
                 N(_summary?["clusters"]?[1]?["balance"], "load_kwh") != 730)
                 throw new InvalidOperationException("Island profile or protection results did not load.");
+            var draft = linked?["circuits"]?[0]?.DeepClone().AsObject() ??
+                throw new InvalidOperationException("Linked circuit did not round-trip.");
+            var editor = new StackPanel();
+            var code = draft["code_protection"]!.AsObject();
+            code["fault_study"] = FaultEditor(editor, code["fault_study"])();
+            code["coordination"] = CoordinationEditor(editor, code["coordination"])();
+            draft["local_rule"] = LocalCableEditor(editor, draft["local_rule"])();
+            var roundTrip = Api.Invoke("cable_plan", new { file, circuits = new[] { draft } })?["estimates"]?[0];
+            if (S(roundTrip?["code_checks"],"status") != "pass" || S(roundTrip?["local_checks"],"status") != "pass")
+                throw new InvalidOperationException("Protection editor round-trip failed.");
             await Capture(NavIsland, "25-island-clusters.png");
             await Capture(NavCables, "26-routed-cables.png");
         }

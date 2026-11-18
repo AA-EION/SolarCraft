@@ -133,7 +133,7 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 122	OverviewPlan		yes	yes	available	scene_plans	Current 3D scene, when present
 123	DimensioningPlan		yes	yes	partial	roof_plans; photo_plan	Roof dimensions are in the plan data. A dedicated dimension sheet is absent.
 124	StringPlan		yes	yes	available	scene_plans	Top-down identified strings with planned modules, when routed
-125	CablePlan		yes	yes	partial	string_routes; specified_cables; hourly_wiring; protection_checks	Routed lengths and circuit sizing. Links to MPPTs and inverter feeders drive per-circuit hourly losses. Selected NEC and IEC protection checks are included. Installer diagrams and full coordination are pending.
+125	CablePlan		yes	yes	partial	string_routes; specified_cables; hourly_wiring; protection_checks; fault_coordination; local_cable_checks	Routed lengths and circuit sizing. Links to MPPTs and inverter feeders drive per-circuit hourly losses. Selected NEC and IEC checks, radial AC fault and device-pair coordination, and RETIE path checks are included. Installer diagrams and network-wide coordination are pending.
 126	Partslist		yes	yes	partial	equipment	Assigned module, inverter, battery, battery inverter and generator quantities. Mounting, hardware and conductor bill of materials is absent.
 127	Screenshots		yes	yes	partial	scene_plans	Generated scene views. A user-curated screenshot collection is absent.
 128	FurtherPictures		yes	yes	pending		User-selected illustration attachments

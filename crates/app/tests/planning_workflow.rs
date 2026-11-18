@@ -419,3 +419,63 @@ fn code_checks_distinguish_failed_missing_and_passing_inputs() {
     assert!(app::api::dispatch("cable_plan", &json!({"file":file,"mode":"apply_hourly","circuits":[iec]}), &mut |_| true).is_err());
     std::fs::remove_file(file).ok();
 }
+
+#[test]
+fn fault_study_coordinates_a_radial_device_pair_and_checks_the_local_path() {
+    let file = fixture("fault-coordination");
+    let mut row = json!({
+        "label":"Inverter feeder","kind":"ac_single","metal":"copper","length_m":30,
+        "area_mm2":10,"temperature_c":20,"voltage_v":230,"current_a":20,"circuits":1,
+        "target_drop_pct":3,"ampacity_a":50,"derating":0.8,"protection_a":25,
+        "local_rule":{"rule":"retie_inverter_ac","other_segments_pct":1},
+        "code_protection":{"standard":"iec60364","maximum_circuit_v":250,"device_rated_v":275,
+            "device_dc_rated":false,"breaking_capacity_ka":16,"conventional_trip_a":36.25,
+            "conductor_k":115,"device_let_through_a2s":100000,
+            "fault_study":{
+                "strong":{"path":"line_neutral","r_mohm":20,"x_mohm":0,"voltage_factor":1},
+                "weak":{"path":"line_earth","r_mohm":30,"x_mohm":0,"voltage_factor":0.9},
+                "remote_temperature_c":20,"path_x_mohm_per_m":0,"return_area_mm2":10
+            },
+            "coordination":{
+                "upstream":{"kind":"fuse","model":"Fixture upstream","reference":"Synthetic min-melt",
+                    "points":[[1000,0.4],[2500,0.16],[12000,0.02]]},
+                "downstream":{"kind":"breaker","model":"Fixture downstream","reference":"Synthetic maximum clearing",
+                    "points":[[1000,0.2],[2500,0.08],[12000,0.01]]},
+                "minimum_ratio":1.2,"curve_limit_ka":12,"maximum_clear_seconds":0.4
+            }
+        }
+    });
+    let preview = |r: &Value| call("cable_plan", json!({"file":file,"circuits":[r]}))["estimates"][0].clone();
+    let e = preview(&row);
+    assert_eq!(e["code_checks"]["status"], "pass");
+    assert_eq!(e["code_checks"]["fault_duty"]["near_ka"], 11.5);
+    let far = e["code_checks"]["fault_duty"]["remote_ka"].as_f64().unwrap();
+    assert!((far - 207.0 / 133.446).abs() < 1e-9);
+    assert_eq!(e["code_checks"]["coordination"]["basis"], "curves");
+    assert!((e["code_checks"]["coordination"]["worst_ratio"].as_f64().unwrap() - 2.0).abs() < 1e-10);
+    assert_eq!(e["local_checks"]["status"], "pass");
+
+    row["code_protection"]["coordination"]["curve_limit_ka"] = json!(3);
+    assert_eq!(preview(&row)["code_checks"]["status"], "incomplete");
+    row["code_protection"]["coordination"]["manufacturer"] = json!({
+        "maximum_ka":16,"voltage_v":275,"reference":"Synthetic pair table, 275 V"
+    });
+    assert_eq!(preview(&row)["code_checks"]["coordination"]["basis"], "manufacturer_pair");
+    row["code_protection"]["coordination"]["upstream"]["points"][1][1] = json!(0.05);
+    assert_eq!(preview(&row)["code_checks"]["coordination"]["selective"], false);
+    row["code_protection"]["coordination"]["upstream"]["points"][1][1] = json!(0.16);
+
+    row["local_rule"]["other_segments_pct"] = json!(2.95);
+    assert_eq!(preview(&row)["local_checks"]["status"], "fail");
+    assert!(app::api::dispatch("cable_plan", &json!({"file":file,"mode":"apply_hourly","circuits":[row]}), &mut |_| true).is_err());
+    row["local_rule"]["other_segments_pct"] = Value::Null;
+    assert_eq!(preview(&row)["local_checks"]["status"], "incomplete");
+
+    row["local_rule"]["other_segments_pct"] = json!(1);
+    call("cable_plan", json!({"file":file,"mode":"apply_hourly","circuits":[row]}));
+    call("use_demo_weather", json!({"file":file}));
+    app::simulate(&file, |_| true).unwrap();
+    let report = call("report_preview", json!({"file":file,"report_type":"system_planner"})).to_string();
+    assert!(report.contains("Fault duty and device coordination") && report.contains("RETIE 3.17.21(d)"));
+    std::fs::remove_file(file).ok();
+}

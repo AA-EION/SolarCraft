@@ -92,15 +92,27 @@ public sealed partial class MainWindow
                 {
                     protection.Children.Clear();
                     var index = picker.SelectedIndex;
-                    if (index < 0 || estimates.ElementAtOrDefault(index)?["code_checks"] is not JsonNode assessment) return;
-                    var standard = S(assessment, "standard") == "nec2023_pv" ? "NEC 2023 PV DC" : "IEC 60364-4-43";
-                    var state = T("code_" + S(assessment,"status"));
-                    var table = Table([T("code_rule_set"), T("status"), T("code_actual"), T("code_threshold")],
-                        Arr(assessment["checks"]).Select(c => (IList<string>)new[] {
-                            T("check_" + S(c,"id")), T("code_" + S(c,"status")),
-                            c?["actual"] is null ? "—" : F(N(c,"actual"),2), c?["limit"] is null ? "—" : F(N(c,"limit"),2),
-                        }));
-                    protection.Children.Add(new Expander { Header = $"{standard} · {state}", Content = table });
+                    if (index < 0) return;
+                    var estimate = estimates.ElementAtOrDefault(index);
+                    string Format(JsonNode? row, string key) => row?[key] is null ? "—" : F(N(row,key),3);
+                    void Display(string title, JsonNode assessment)
+                    {
+                        var state = T("code_" + S(assessment,"status"));
+                        var details = new StackPanel { Spacing = 6 };
+                        if (assessment["fault_duty"] is JsonNode duty)
+                            protection.Children.Add(Note($"{T("fault_near_ka")} {Format(duty,"near_ka")} · {T("fault_remote_ka")} {Format(duty,"remote_ka")}"));
+                        if (assessment["coordination"] is JsonNode pair)
+                            details.Children.Add(Note($"{S(pair,"upstream_model")} → {S(pair,"downstream_model")} · {T("fault_clearing")} {Format(pair,"remote_clear_seconds")}"));
+                        details.Children.Add(Table([T("code_protection"), T("workflow_results"), T("code_actual"), T("code_threshold")],
+                            Arr(assessment["checks"]).Select(c => (IList<string>)new[] {
+                                T("check_" + S(c,"id")), T("code_" + S(c,"status")), Format(c,"actual"), Format(c,"limit"),
+                            })));
+                        protection.Children.Add(new Expander { Header = $"{title} · {state}", Content = details });
+                    }
+                    if (estimate?["code_checks"] is JsonNode code)
+                        Display(S(code,"standard") == "nec2023_pv" ? "NEC 2023 PV DC" : "IEC 60364-4-43", code);
+                    if (estimate?["local_checks"] is JsonNode local)
+                        Display(S(local,"reference").Length > 0 ? S(local,"reference") : T("local_cable"), local);
                 }
                 picker.SelectionChanged += (_, _) => ShowProtection();
                 ShowProtection();
@@ -239,10 +251,16 @@ public sealed partial class MainWindow
         }.Select(field => (key: field.Item1, standard: field.Item2, input: Num(T("code_" + field.Item1),
             N(code,field.Item1,double.NaN), 295))).ToArray();
         foreach (var field in codeFields) codeDetails.Children.Add(field.input);
+        var studyPanel = new StackPanel { Spacing = 7 };
+        codeDetails.Children.Add(studyPanel);
+        var fault = FaultEditor(studyPanel, code?["fault_study"]);
+        var coordination = CoordinationEditor(studyPanel, code?["coordination"]);
+        var local = LocalCableEditor(form, original?["local_rule"]);
         void ShowCode()
         {
             var selected = Sel(rules);
             codeDetails.Visibility = selected.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            studyPanel.Visibility = selected == "iec60364" ? Visibility.Visible : Visibility.Collapsed;
             foreach (var entry in codeFields)
                 entry.input.Visibility = entry.standard.Length == 0 || entry.standard == selected ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -280,8 +298,14 @@ public sealed partial class MainWindow
                     foreach (var item in codeFields)
                         if (item.input.Visibility == Visibility.Visible && double.IsFinite(item.input.Value))
                             protectionSpec[item.key] = item.input.Value;
+                    if (Sel(rules) == "iec60364")
+                    {
+                        protectionSpec["fault_study"] = fault();
+                        protectionSpec["coordination"] = coordination();
+                    }
                     result["code_protection"] = protectionSpec;
                 }
+                result["local_rule"] = local();
                 var sizes = new JsonArray();
                 foreach (var entry in candidates.Text.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
                 {

@@ -110,7 +110,7 @@ pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Resul
     let ac_pct = fraction(ac_loss, ac_w);
     if mode == "apply_hourly" {
         if circuits.is_empty() || rows.iter().flatten().any(|r| r.ampacity_ok == Some(false) || r.protection_ok == Some(false)) {
-            return Err(e("CABLE_PLAN", "Add at least one circuit and resolve known ampacity shortfalls before applying."));
+            return Err(e("CABLE_PLAN", "Add at least one circuit and resolve conductor ratings and protection checks before applying."));
         }
         let choose = |present: bool, pct: Option<f64>| -> Result<Option<f64>> {
             if !present { return Ok(None); }
@@ -139,7 +139,7 @@ pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Resul
                 Ok(())
             };
             if circuits.is_empty() || rows.iter().flatten().any(|r| r.ampacity_ok == Some(false) || r.protection_ok == Some(false)) {
-                return Err(e("CABLE_PLAN", "Add at least one circuit and resolve known ampacity shortfalls before applying."));
+                return Err(e("CABLE_PLAN", "Add at least one circuit and resolve conductor ratings and protection checks before applying."));
             }
             project.hourly_cables = Default::default();
             if circuits.iter().any(Circuit::is_dc) { apply(&mut project.losses.dc_wiring_pct, dc_pct)?; }
@@ -167,7 +167,7 @@ fn import_routes(project: &Project, circuits: &mut Vec<Circuit>) {
             circuits.push(Circuit { label: label[..max].into(), kind: Kind::DcString, metal: Metal::Copper,
                 length_m: route.home_run_m / 2.0, extra_m: route.jumper_m, area_mm2: 4.0, temperature_c: 60.0,
                 voltage_v: route.modules.len() as f64 * module.v_mp, current_a: module.i_mp, circuits: 1,
-                target_drop_pct: 1.5, source_route: Some(route.id.clone()), ampacity_a: None, derating: 1.0, candidates: vec![], binding: None, sizing_factor: 1.0, protection_a: None, design_current_a: None, code_protection: None });
+                target_drop_pct: 1.5, source_route: Some(route.id.clone()), ampacity_a: None, derating: 1.0, candidates: vec![], binding: None, sizing_factor: 1.0, protection_a: None, design_current_a: None, code_protection: None, local_rule: None });
         }
     }
 }

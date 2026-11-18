@@ -13,6 +13,8 @@ pub mod validate;
 pub mod workflow;
 pub mod cable;
 pub mod protection;
+pub mod fault;
+pub mod local_cable;
 pub mod demand;
 
 use serde::{Deserialize, Serialize};

@@ -53,6 +53,7 @@ private struct CableDraft: Identifiable {
     var standard: String
     var ratingType: String
     var protectionValues: [String:String]
+    var options: FaultOptions
     var link: String
     var candidates: String
     let source: String?
@@ -75,6 +76,7 @@ private struct CableDraft: Identifiable {
         derating = num(v, "derating", 1)
         sizingFactor = num(v, "sizing_factor", 1)
         protection = (v["protection_a"] as? NSNumber)?.stringValue ?? ""
+        options = FaultOptions(v)
         let code = v["code_protection"] as? JSONDict ?? [:]
         standard = str(code,"standard")
         ratingType = (code["device_dc_rated"] as? Bool).map { $0 ? "dc" : "ac" } ?? ""
@@ -122,8 +124,15 @@ private struct CableDraft: Identifiable {
                 guard let number = Double(text.replacingOccurrences(of:",",with:".")), number.isFinite else { return nil }
                 code[key] = number
             }
+            if standard == "iec60364" {
+                do {
+                    code["fault_study"] = try options.study()
+                    code["coordination"] = try options.pair()
+                } catch { return nil }
+            }
             value["code_protection"] = code
         }
+        do { value["local_rule"] = try options.local() } catch { return nil }
         value["candidates"] = sizes
         if let source { value["source_route"] = source }
         return value
@@ -174,11 +183,28 @@ struct CablePlannerSection: View {
                     if estimates.indices.contains(selected), let result = estimates[selected]["code_checks"] as? JSONDict {
                         let label = str(result,"standard") == "nec2023_pv" ? "NEC 2023 PV DC" : "IEC 60364-4-43"
                         DisclosureGroup(label + " · " + m.t("code_" + str(result,"status"))) {
+                            if let duty = result["fault_duty"] as? JSONDict {
+                                LabeledContent(m.t("fault_near_ka")) { Text(fmt(num(duty,"near_ka"),3)) }
+                                LabeledContent(m.t("fault_remote_ka")) { Text(fmt(num(duty,"remote_ka"),3)) }
+                            }
+                            if let pair = result["coordination"] as? JSONDict, pair["remote_clear_seconds"] is NSNumber {
+                                LabeledContent(m.t("fault_clearing")) { Text(fmt(num(pair,"remote_clear_seconds"),3)) }
+                            }
                             SimpleTable(header: [m.t("code_rule_set"), m.t("status"), m.t("code_actual"), m.t("code_threshold")],
                                 rows: dicts(result["checks"]).map { row in [
                                     m.t("check_" + str(row,"id")), m.t("code_" + str(row,"status")),
                                     (row["actual"] as? NSNumber).map { fmt($0.doubleValue,2) } ?? "–",
                                     (row["limit"] as? NSNumber).map { fmt($0.doubleValue,2) } ?? "–",
+                                ] })
+                        }
+                    }
+                    if estimates.indices.contains(selected), let local = estimates[selected]["local_checks"] as? JSONDict {
+                        DisclosureGroup(str(local,"reference") + " · " + m.t("code_" + str(local,"status"))) {
+                            SimpleTable(header:[m.t("local_cable"),m.t("workflow_results"),m.t("code_actual"),m.t("code_threshold")],
+                                rows:dicts(local["checks"]).map { row in [
+                                    m.t("check_" + str(row,"id")), m.t("code_" + str(row,"status")),
+                                    (row["actual"] as? NSNumber).map { fmt($0.doubleValue,3) } ?? "–",
+                                    (row["limit"] as? NSNumber).map { fmt($0.doubleValue,3) } ?? "–",
                                 ] })
                         }
                     }
@@ -214,7 +240,7 @@ struct CablePlannerSection: View {
         .onAppear { if let state = m.cablePlan(mode: "preview") { data = state } }
         .sheet(item: $draft) { start in
             CableEditor(value: start) { value in
-                guard let encoded = value.encoded else { m.error = m.t("cable_candidates"); return false }
+                guard let encoded = value.encoded else { m.error = m.t("issues"); return false }
                 guard let check = m.cablePlan(mode: "preview", circuits: [encoded]) else { return false }
                 if let issue = (check["row_errors"] as? [Any])?.first as? String { m.error = issue; return false }
                 var rows = circuits
@@ -301,6 +327,7 @@ private struct CableEditor: View {
                         }
                     }
                 }
+                FaultForms(options:$value.options, showStudy:value.standard == "iec60364")
                 TextField(m.t("cable_candidates"), text: $value.candidates)
             }
             if !error.isEmpty { Text(error).foregroundStyle(.red) }

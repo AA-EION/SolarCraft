@@ -10,6 +10,13 @@ pub enum Kind { DcString, DcMain, AcSingle, AcThree }
 #[serde(rename_all = "snake_case")]
 pub enum Metal { Copper, Aluminium }
 
+impl Metal {
+    pub(crate) fn resistivity(self, temperature_c: f64) -> f64 {
+        let (rho, alpha) = match self { Self::Copper => (0.017241, 0.00393), Self::Aluminium => (0.028264, 0.00403) };
+        rho * (1.0 + alpha * (temperature_c - 20.0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Circuit {
     pub label: String,
@@ -50,6 +57,8 @@ pub struct Circuit {
     pub design_current_a: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_protection: Option<crate::protection::Protection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_rule: Option<crate::local_cable::LocalRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -88,6 +97,7 @@ pub struct Estimate {
     pub ampacity_ok: Option<bool>,
     pub protection_ok: Option<bool>,
     pub code_checks: Option<crate::protection::Assessment>,
+    pub local_checks: Option<crate::local_cable::Assessment>,
     pub drop_ok: bool,
     pub suggested: Option<Conductor>,
 }
@@ -104,14 +114,14 @@ impl Circuit {
             || self.candidates.len() > 100 || self.candidates.iter().any(|s| !(0.01..=2_000.0).contains(&s.area_mm2) || !(0.01..=20_000.0).contains(&s.ampacity_a))
             || !(1.0..=3.0).contains(&self.sizing_factor)
             || self.code_protection.as_ref().is_some_and(|p| !p.valid())
+            || self.local_rule.as_ref().is_some_and(|p| !p.valid())
             || self.design_current_a.is_some_and(|a| !(self.current_a..=50_000.0).contains(&a))
             || self.protection_a.is_some_and(|a| !(0.01..=50_000.0).contains(&a))
             || !(0.01..=1.0).contains(&self.derating) || self.ampacity_a.is_some_and(|a| !(0.01..=20_000.0).contains(&a))
             || !(1..=10_000).contains(&self.circuits) || !(0.01..=100.0).contains(&self.target_drop_pct) {
             return Err("Check circuit length, area, voltage, current, temperature, count and voltage-drop target.");
         }
-        let (rho20, alpha) = match self.metal { Metal::Copper => (0.017241, 0.00393), Metal::Aluminium => (0.028264, 0.00403) };
-        let rho = rho20 * (1.0 + alpha * (self.temperature_c - 20.0));
+        let rho = self.metal.resistivity(self.temperature_c);
         let three = self.kind == Kind::AcThree;
         let loop_m = 2.0 * self.length_m + self.extra_m;
         let drop_m = if three { 3.0_f64.sqrt() * self.length_m } else { loop_m };
@@ -127,13 +137,19 @@ impl Circuit {
         let minimum_area = area_for_target_mm2.max(code_checks.as_ref().and_then(|a| a.required_fault_area_mm2).unwrap_or(0.0));
         let protection_ok = code_checks.as_ref().map(|a| a.status == crate::protection::Status::Pass)
             .or_else(|| self.protection_a.map(|a| a >= design && allowed_a.is_none_or(|limit| a <= limit)));
+        let ampacity_ok = allowed_a.map(|a| a >= design);
+        let local_checks = self.local_rule.as_ref().map(|rule| rule.assess(self, drop_pct, ampacity_ok));
+        let protection_ok = match (protection_ok, local_checks.as_ref()) {
+            (basic, Some(local)) => Some(basic.unwrap_or(true) && local.status == crate::protection::Status::Pass),
+            (basic, None) => basic,
+        };
         let suggested = self.candidates.iter().filter(|s| s.area_mm2 >= minimum_area && s.ampacity_a >= required_base_ampacity_a)
             .min_by(|a, b| a.area_mm2.total_cmp(&b.area_mm2)).copied();
         Ok(Estimate {
             drop_v, drop_pct, loss_w: self.current_a.powi(2) * rho * loss_m / self.area_mm2 * f64::from(self.circuits),
             conductor_m: loss_m * f64::from(self.circuits),
             area_for_target_mm2, required_base_ampacity_a, suggested,
-            allowed_a, ampacity_ok: allowed_a.map(|a| a >= design), protection_ok, code_checks, drop_ok: drop_pct <= self.target_drop_pct,
+            allowed_a, ampacity_ok, protection_ok, code_checks, local_checks, drop_ok: drop_pct <= self.target_drop_pct,
         })
     }
 }

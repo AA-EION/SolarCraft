@@ -259,21 +259,55 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
         }));
         out.push(cables);
         use solarcraft_model::protection::{Standard, Status};
+        let assessments: Vec<_> = p.cable_plan.iter().filter_map(|row| {
+            let circuit = solarcraft_model::cable::resolve(p, &electrical, row).ok()?;
+            let estimate = circuit.estimate().ok()?;
+            Some((circuit, estimate))
+        }).collect();
+        let status = |code| match code {
+            Status::Pass => tr(l,"Pass","Cumple","Bestanden","Aprovado"),
+            Status::Fail => tr(l,"Fail","Falla","Fehlgeschlagen","Falha"),
+            Status::Incomplete => tr(l,"Incomplete","Incompleto","Unvollständig","Incompleto"),
+        };
+        let format = |value: Option<f64>| value.map_or("–".into(), |a| n(a, 3));
+        let circuit_name = tr(l,"Circuit","Circuito","Stromkreis","Circuito");
+        let rule_set = tr(l,"Rule set","Norma","Norm","Norma");
+        let outcome = tr(l,"Status","Estado","Status","Estado");
         let mut checks = ContentSection::new("protection_checks", tr(l,"Cable protection checks","Comprobaciones de protección","Schutzprüfungen für Leitungen","Verificações de proteção"));
-        checks.table(vec![tr(l,"Circuit","Circuito","Stromkreis","Circuito"), tr(l,"Rule set","Norma","Norm","Norma"),
-            tr(l,"Status","Estado","Status","Estado"), tr(l,"Minimum device (A)","Protección mínima (A)","Mindestschutz (A)","Proteção mínima (A)")],
-            p.cable_plan.iter().filter_map(|row| {
-                let circuit = solarcraft_model::cable::resolve(p, &electrical, row).ok()?;
-                let e = circuit.estimate().ok()?.code_checks?;
+        checks.table(vec![circuit_name.clone(), rule_set.clone(), outcome.clone(),
+            tr(l,"Minimum device (A)","Protección mínima (A)","Mindestschutz (A)","Proteção mínima (A)")],
+            assessments.iter().filter_map(|(circuit, estimate)| {
+                let e = estimate.code_checks.as_ref()?;
                 let standard = match e.standard { Standard::Nec2023Pv => "NEC 2023 PV DC", Standard::Iec60364 => "IEC 60364-4-43" };
-                let status = match e.status {
-                    Status::Pass => tr(l,"Pass","Cumple","Bestanden","Aprovado"),
-                    Status::Fail => tr(l,"Fail","Falla","Fehlgeschlagen","Falha"),
-                    Status::Incomplete => tr(l,"Incomplete","Incompleto","Unvollständig","Incompleto"),
-                };
-                Some([circuit.label, standard.into(), status, e.minimum_device_a.map_or("–".into(), |a| n(a, 2))])
+                Some([circuit.label.clone(), standard.into(), status(e.status), format(e.minimum_device_a)])
             }));
         if !checks.blocks.is_empty() { out.push(checks); }
+
+        let mut fault = ContentSection::new("fault_coordination", tr(l, "Fault duty and device coordination",
+            "Corriente de falla y coordinación", "Fehlerstrom und Schutzkoordination", "Corrente de falta e coordenação"));
+        fault.table(vec![circuit_name.clone(), tr(l,"Device pair","Par de dispositivos","Gerätepaar","Par de dispositivos"),
+            tr(l,"Near (kA)","Origen (kA)","Einspeisung (kA)","Origem (kA)"),
+            tr(l,"Remote (kA)","Extremo (kA)","Leitungsende (kA)","Extremidade (kA)"),
+            tr(l,"Remote clearing (s)","Despeje al extremo (s)","Abschaltung am Ende (s)","Atuação no fim (s)"), outcome.clone()],
+            assessments.iter().filter_map(|(c, e)| {
+                let inputs = c.code_protection.as_ref()?;
+                if inputs.fault_study.is_none() && inputs.coordination.is_none() { return None; }
+                let result = e.code_checks.as_ref()?;
+                let duty = result.fault_duty.as_ref();
+                let pair = result.coordination.as_ref();
+                let devices = pair.map_or("–".into(), |q| format!("{} / {}", q.upstream_model, q.downstream_model));
+                Some([c.label.clone(), devices, format(duty.map(|d| d.near_ka)), format(duty.map(|d| d.remote_ka)),
+                    format(pair.and_then(|q| q.remote_clear_seconds)), status(result.status)])
+            }));
+        if !fault.blocks.is_empty() { out.push(fault); }
+
+        let mut local = ContentSection::new("local_cable_checks", tr(l,"Local cable checks","Requisitos locales de cables","Lokale Leitungsanforderungen","Requisitos locais de cabos"));
+        local.table(vec![circuit_name, rule_set, tr(l,"Path drop (%)","Caída del recorrido (%)","Spannungsfall (%)","Queda no percurso (%)"),
+            tr(l,"Limit (%)","Límite (%)","Grenze (%)","Limite (%)"), outcome], assessments.iter().filter_map(|(c, e)| {
+                let q = e.local_checks.as_ref()?;
+                Some([c.label.clone(), q.reference.clone(), format(q.total_drop_pct), format(q.limit_pct), status(q.status)])
+            }));
+        if !local.blocks.is_empty() { out.push(local); }
     }
     if let Some(scene) = &p.scene {
         let mut routing = ContentSection::new("string_routes", tr(l, "String cable routes", "Rutas de cableado de cadenas", "String-Kabelwege", "Rotas de cabos das strings"));
