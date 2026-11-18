@@ -213,9 +213,15 @@ pub struct Project {
     #[serde(default)]
     pub ev: Option<demand::Ev>,
     #[serde(default)]
+    pub fleet: Option<demand::Fleet>,
+    #[serde(default)]
     pub heating: Option<demand::Heating>,
     #[serde(default)]
+    pub heat_store: Option<demand::HeatStore>,
+    #[serde(default)]
     pub island_plan: Option<demand::IslandPlan>,
+    #[serde(default)]
+    pub island_clusters: Vec<demand::IslandCluster>,
     #[serde(default)]
     pub tariff: plant::Tariff,
     #[serde(default)]
@@ -262,7 +268,7 @@ impl Project {
             simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
-            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], hourly_cables: Default::default(), ev: None, heating: None, island_plan: None,
+            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
             tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None, roof_photos: vec![],
         };
         derive::derive(&mut p);

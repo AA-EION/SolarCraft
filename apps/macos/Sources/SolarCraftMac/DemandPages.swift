@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import SwiftUI
 
-private struct InputSpec: Identifiable {
+struct InputSpec: Identifiable {
     let id: String
     let label: String
     let preset: Double
@@ -29,7 +29,7 @@ private struct InputSpec: Identifiable {
     }
 }
 
-private func payload(_ specs: [InputSpec], _ values: [String: Double]) -> JSONDict? {
+func payload(_ specs: [InputSpec], _ values: [String: Double]) -> JSONDict? {
     var result: JSONDict = [:]
     for spec in specs {
         guard let value = spec.parsed(values) else { return nil }
@@ -60,29 +60,33 @@ struct DemandEditorPage: View {
 
     var body: some View {
         Form {
-            Toggle(m.t(isEv ? "ev_page" : "heat_page"), isOn: $enabled).disabled(required)
-            if enabled {
-                ForEach(specs) { spec in NumField(label: m.t(spec.label), value: spec.field($fields)) }
-                if isEv {
-                    Picker(m.t("ev_strategy"), selection: $strategy) {
-                        Text(m.t("ev_immediate")).tag("immediate")
-                        Text(m.t("ev_solar")).tag("solar_preferred")
+            if isEv { FleetControls() }
+            if !isEv || m.section("fleet").isEmpty {
+                Toggle(m.t(isEv ? "ev_page" : "heat_page"), isOn: $enabled).disabled(required)
+                if enabled {
+                    ForEach(specs) { spec in NumField(label: m.t(spec.label), value: spec.field($fields)) }
+                    if isEv {
+                        Picker(m.t("ev_strategy"), selection: $strategy) {
+                            Text(m.t("ev_immediate")).tag("immediate")
+                            Text(m.t("ev_solar")).tag("solar_preferred")
+                        }
+                        Text(m.t("ev_window")).foregroundStyle(.secondary)
                     }
-                    Text(m.t("ev_window")).foregroundStyle(.secondary)
+                }
+                Button(m.t("apply")) {
+                    guard enabled else { m.setSection(section, NSNull()); return }
+                    guard var value = payload(specs, fields) else { m.error = m.t("issues"); return }
+                    if isEv { value["strategy"] = strategy }
+                    m.setSection(section, value)
+                }.buttonStyle(.borderedProminent)
+                if let result = m.summary?[section] as? JSONDict {
+                    let electricity = isEv ? num(result, "electrical_kwh") : num(result, "pump_electric_kwh") + num(result, "backup_kwh")
+                    let missing = num(result, isEv ? "unscheduled_kwh" : "unmet_heat_kwh")
+                    LabeledContent(m.t("annual_kwh")) { Text(fmt(electricity, 1)) }
+                    LabeledContent(m.t("island_unserved")) { Text("\(fmt(missing, 1)) kWh") }
                 }
             }
-            Button(m.t("apply")) {
-                guard enabled else { m.setSection(section, NSNull()); return }
-                guard var value = payload(specs, fields) else { m.error = m.t("issues"); return }
-                if isEv { value["strategy"] = strategy }
-                m.setSection(section, value)
-            }.buttonStyle(.borderedProminent)
-            if let result = m.summary?[section] as? JSONDict {
-                let electricity = isEv ? num(result, "electrical_kwh") : num(result, "pump_electric_kwh") + num(result, "backup_kwh")
-                let missing = num(result, isEv ? "unscheduled_kwh" : "unmet_heat_kwh")
-                LabeledContent(m.t("annual_kwh")) { Text(fmt(electricity, 1)) }
-                LabeledContent(m.t("island_unserved")) { Text("\(fmt(missing, 1)) kWh") }
-            }
+            if !isEv { ThermalStoreControls() }
         }
         .onAppear {
             let current = m.section(section)
@@ -119,7 +123,8 @@ struct IslandControlsPage: View {
     ]
     var body: some View {
         Form {
-            if m.systemType == "off_grid_generator" {
+            IslandClusterControls()
+            if m.systemType == "off_grid_generator" && dicts(m.raw["island_clusters"]).isEmpty {
                 Section(m.t("generator")) {
                     Toggle(m.t("island_charge"), isOn: $charge)
                     ForEach(settings) { s in NumField(label: m.t(s.label), value: s.field($plan)) }

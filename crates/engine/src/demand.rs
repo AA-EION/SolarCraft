@@ -20,12 +20,16 @@ pub struct HeatingResult {
     pub unmet_heat_kwh: f64,
 }
 
+pub(crate) fn cop(heating: &Heating, outside: f64) -> f64 {
+    (heating.cop_at_0c + outside * (heating.cop_at_10c - heating.cop_at_0c) / 10.0).clamp(1.0, 12.0)
+}
+
 pub fn heating(h: &Heating, temperatures: impl Iterator<Item = f64>) -> (Vec<f32>, HeatingResult) {
     let mut result = HeatingResult::default();
     let hourly = temperatures.map(|outside| {
         let demand = h.heat_loss_kw_per_k * (h.setpoint_c - outside).max(0.0);
         let pump = if outside >= h.cutoff_c { demand.min(h.thermal_kw) } else { 0.0 };
-        let cop = (h.cop_at_0c + outside * (h.cop_at_10c - h.cop_at_0c) / 10.0).clamp(1.0, 12.0);
+        let cop = cop(h, outside);
         let backup = (demand - pump).min(h.resistance_backup_kw);
         result.demand_kwh += demand;
         result.pump_heat_kwh += pump;

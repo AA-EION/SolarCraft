@@ -102,8 +102,8 @@ pub fn connections(rows: &[(String, String)], grid_label: &str) -> String {
 }
 
 /// The requested load and its sources, with unserved energy as a separate segment.
-pub fn load_supply(series: &[(String, f64); 5], demand: f64, lang: Lang) -> String {
-    let colors = ["#0f766e", "#6d28d9", "#2563eb", "#92400e", "#a3a3a3"];
+pub fn load_supply(series: &[(String, f64)], demand: f64, lang: Lang) -> String {
+    let colors = ["#0f766e", "#6d28d9", "#2563eb", "#92400e", "#a3a3a3", "#be185d"];
     let shown = series.iter().zip(colors).filter(|((_, value), _)| *value > 1e-6);
     let height = 48 + 21 * shown.clone().count();
     let mut svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="640" height="{height}" viewBox="0 0 640 {height}" font-family="{FONT_CSS}">"#);

@@ -56,17 +56,20 @@ impl Workflow {
         p.grid.feed_in = if system == GridExport { FeedIn::Full } else { FeedIn::Surplus };
         if system == GridExport { p.loads.profile = LoadProfile::None; }
         if !system.needs_storage() { p.storage = None; }
-        if !system.needs_ev() { p.ev = None; }
-        if !system.needs_heating() { p.heating = None; }
+        if !system.needs_ev() { p.ev = None; p.fleet = None; }
+        if !system.needs_heating() { p.heating = None; p.heat_store = None; }
         if system.islanded() {
             p.grid.export_limit_kw = None;
-            if let Some(storage) = &mut p.storage {
+            if !p.island_clusters.is_empty() { p.storage = None; }
+            for storage in p.storage.iter_mut().chain(p.island_clusters.iter_mut().map(|c| &mut c.storage)) {
                 storage.grid_service = GridService::None;
                 storage.grid_services_pct = 0.0;
                 storage.grid_charge_backup = false;
                 storage.outages.clear();
                 if system == OffGrid { storage.generator_id = None; }
             }
+        } else {
+            p.island_clusters.clear();
         }
         Cow::Owned(p)
     }

@@ -202,3 +202,122 @@ fn ev_heating_and_hourly_wiring_feed_the_same_project_ledger() {
     assert!(report.contains("Electric vehicle charging") && report.contains("Space heating") && report.contains("Hourly cable losses"));
     std::fs::remove_file(file).ok();
 }
+
+#[test]
+fn fleet_and_tank_dispatch_preserve_mobility_heat_and_site_limits() {
+    let file = fixture("fleet-tank");
+    call("use_demo_weather", json!({"file":file}));
+    call("set_section", json!({"file":file,"section":"loads","value":{
+        "profile":{"kind":"synthetic","profile":"flat"}, "annual_kwh":8760, "critical_fraction":1.0
+    }}));
+    let group = |name: &str, weekdays: Vec<u32>| json!({
+        "name":name, "vehicles":1, "battery_kwh":30, "initial_soc_pct":55,
+        "departure_soc_pct":45,"trip_kwh":4,"weekdays":weekdays,"arrival_hour":9,"departure_hour":23,
+        "charge_kw":1.8,"charge_efficiency":0.94,"discharge_kw":1.1,"discharge_efficiency":0.9,"strategy":"solar_preferred"
+    });
+    call("set_section", json!({"file":file,"section":"fleet","value":{
+        "groups":[group("Service",vec![0,1,2,3,4]),group("Weekend",vec![4,5,6])],
+        "site_charge_kw":2.0,"site_discharge_kw":1.5
+    }}));
+    call("set_section", json!({"file":file,"section":"heating","value":{
+        "setpoint_c":21,"heat_loss_kw_per_k":0.10,"thermal_kw":3,"cutoff_c":-15,"cop_at_0c":2.5,
+        "cop_at_10c":3.8,"resistance_backup_kw":1
+    }}));
+    call("set_section", json!({"file":file,"section":"heat_store","value":{
+        "capacity_kwh":8,"initial_kwh":2,"charge_kw":2,"discharge_kw":2,"standing_loss_pct_per_day":2,
+        "daily_hot_water_kwh":2,"hot_water_hour":20
+    }}));
+    let r = app::simulate(&file, |_| true).unwrap();
+    let fleet = r.fleet.as_ref().unwrap();
+    assert!(fleet.v2h_kwh > 0.0 && r.balance.ev_to_load_kwh > 0.0);
+    for group in &fleet.groups {
+        assert!(group.departures > 0 && group.departures_below_target == 0);
+        assert!(group.min_soc_pct >= 0.0 && group.max_soc_pct <= 100.0);
+        let closure = group.initial_kwh + group.charged_kwh - group.discharged_kwh
+            - group.conversion_loss_kwh - group.travelled_kwh - group.final_kwh;
+        assert!(closure.abs() < 1e-7);
+    }
+    assert!(r.hourly.ev_wh.iter().zip(&r.hourly.ev_discharge_wh).all(|(&draw, &give)|
+        draw <= 2000.0 && give <= 1500.0 && (draw < 0.01 || give < 0.01)));
+    let tank = r.heat_store.as_ref().unwrap();
+    assert!(tank.charge_heat_kwh > 0.0 && tank.discharge_heat_kwh > 0.0 && tank.standing_loss_kwh > 0.0);
+    assert!((tank.charge_heat_kwh + 2.0 - tank.discharge_heat_kwh - tank.standing_loss_kwh - tank.end_kwh).abs() < 1e-7);
+    assert_eq!(tank.hot_water_kwh, 730.0);
+    assert!(r.balance.max_abs_residual_wh < 1e-5);
+    let hours = call("results_hours", json!({"file":file,"day_of_year":21}));
+    assert_eq!(hours["hours"][0]["fleet_soc_pct"].as_array().unwrap().len(), 2);
+    let preview = call("report_preview", json!({"file":file,"report_type":"system_planner"})).to_string();
+    assert!(preview.contains("EV fleet and bidirectional charging") && preview.contains("Thermal storage"));
+    std::fs::remove_file(file).ok();
+}
+
+#[test]
+fn isolated_dispatch_and_linked_cables_use_the_assigned_equipment() {
+    let file = fixture("clusters-routed");
+    call("use_demo_weather", json!({"file":file}));
+    let unit = call("stringing", json!({"file":file}))["inverters"][0]["unit"]["id"].clone();
+    let equipment = call("add_generic_storage_equipment", json!({"file":file}))["ids"].clone();
+    let storage = json!({
+        "battery_id":equipment[1],"units":1,"coupling":{"kind":"ac_coupled","battery_inverter_id":equipment[2]},
+        "model":"simple","soc_min_pct":10,"soc_max_pct":95,"initial_soc_pct":50,"backup_reserve_pct":0,"grid_services_pct":0,
+        "charge_priority":["backup","self_consumption","grid_services"],"grid_charge_backup":false,
+        "grid_service":{"kind":"none"},"outages":[]
+    });
+    call("set_section", json!({"file":file,"section":"loads","value":{
+        "profile":{"kind":"synthetic","profile":"flat"},"annual_kwh":4000,"critical_fraction":1
+    }}));
+    let circuit = |kind: &str, binding: Value, protection: f64| json!({
+        "label":kind,"kind":kind,"metal":"copper","length_m":40,"area_mm2":10,"temperature_c":45,
+        "voltage_v":230,"current_a":1,"circuits":1,"target_drop_pct":3,
+        "ampacity_a":45,"derating":0.8,"sizing_factor":1.25,"protection_a":protection,"binding":binding,
+        "candidates":[{"area_mm2":6,"ampacity_a":36},{"area_mm2":10,"ampacity_a":45}]
+    });
+    let dc = circuit("dc_main", json!({"kind":"mppt","unit_id":unit,"input":0}), 30.0);
+    let ac = circuit("ac_single", json!({"kind":"inverter_ac","unit_id":unit}), 25.0);
+    let preview = call("cable_plan", json!({"file":file,"circuits":[dc,ac]}));
+    assert!(preview["circuits"][0]["current_a"].as_f64().unwrap() > 1.0);
+    assert!(preview["circuits"][0]["design_current_a"].as_f64().unwrap() > preview["circuits"][0]["current_a"].as_f64().unwrap());
+    assert!(preview["estimates"][1]["suggested"].is_object());
+    let mut inadequate = ac.clone();
+    inadequate["protection_a"] = json!(5.0);
+    assert!(app::api::dispatch("cable_plan", &json!({"file":file,"mode":"apply_routed","circuits":[inadequate]}), &mut |_| true).is_err());
+    call("cable_plan", json!({"file":file,"mode":"apply_routed","circuits":[dc,ac]}));
+    workflow(&file,"off_grid","roof");
+    call("set_section", json!({"file":file,"section":"island_clusters","value":[
+        {"name":"PV island","inverter_units":[unit],"load_share_pct":25,"storage":storage},
+        {"name":"Remote island","inverter_units":[],"load_share_pct":75,"storage":storage}
+    ]}));
+    let r = app::simulate(&file, |_| true).unwrap();
+    assert_eq!(r.clusters.len(), 2);
+    assert!(r.clusters[0].balance.curtailed_kwh > 0.0 && r.clusters[1].balance.unserved_kwh > 0.0);
+    assert!(r.clusters[1].balance.pv_ac_kwh.abs() < 1e-10 && r.clusters[1].balance.generator_kwh == 0.0);
+    assert!((r.balance.load_kwh-4000.0).abs() < 1e-6 && r.balance.import_kwh == 0.0 && r.balance.export_kwh == 0.0);
+    assert!((r.balance.unserved_kwh - r.clusters.iter().map(|c| c.balance.unserved_kwh).sum::<f64>()).abs() < 1e-6);
+    assert!(r.island_finance.as_ref().unwrap().investment > 10_000.0);
+    assert!(r.routed_cables.iter().all(|c| c.loss_kwh > 0.0) && r.balance.max_abs_residual_wh < 1e-5);
+    let hours = call("results_hours", json!({"file":file,"day_of_year":160}));
+    assert!(hours["hours"].as_array().unwrap().iter().any(|h| h["routed_cable_wh"][0].as_f64().unwrap() > 0.0));
+    call("add_equipment", json!({"file":file,"kind":"generator","record":{
+        "id":"remote-generator","manufacturer":"Fixture","model":"Remote","rated_va":1500,"max_va":1500,
+        "phases":1,"voltage_v":230,"fuel_unit":"L","fuel_curve":[[0.0,0.0],[1.0,0.75]]
+    }}));
+    workflow(&file,"off_grid_generator","roof");
+    let mut generator = app::get_project(&file).unwrap().island_clusters;
+    generator[1].storage.generator_id = Some("remote-generator".into());
+    generator[1].controls = Some(serde_json::from_value(json!({"minimum_generator_pct":30,"minimum_run_hours":2,
+        "charge_battery":true,"start_soc_pct":20,"stop_soc_pct":50,"fuel_price":1.6,
+        "fuel_escalation_pct":4,"generator_investment":1500})).unwrap());
+    call("set_section", json!({"file":file,"section":"island_clusters","value":generator}));
+    let equipped = app::simulate(&file, |_| true).unwrap();
+    assert_eq!(equipped.clusters[0].balance.generator_kwh, 0.0);
+    assert!(equipped.clusters[1].balance.generator_charge_kwh > 0.0);
+    let fuel_cost = equipped.island_finance.unwrap().years[0].fuel_cost;
+    assert!((fuel_cost - equipped.clusters[1].balance.generator_fuel * 1.6).abs() < 1e-6);
+    let preview = call("report_preview", json!({"file":file,"report_type":"system_planner"})).to_string();
+    assert!(preview.contains("Independent islands") && preview.contains("Hourly cable losses"));
+    let mut invalid = app::get_project(&file).unwrap().island_clusters;
+    invalid[1].inverter_units = invalid[0].inverter_units.clone();
+    call("set_section", json!({"file":file,"section":"island_clusters","value":invalid}));
+    assert!(call("validate", json!({"file":file})).to_string().contains("ISLAND_CLUSTER_INVERTER"));
+    std::fs::remove_file(file).ok();
+}

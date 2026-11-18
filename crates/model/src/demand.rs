@@ -69,3 +69,92 @@ impl IslandPlan {
             && (0.0..=1e12).contains(&self.generator_investment)
     }
 }
+
+/// Identical vehicles with one weekly connection pattern. Days are numbered Monday = 0.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetGroup {
+    pub name: String,
+    pub vehicles: u32,
+    pub battery_kwh: f64,
+    pub initial_soc_pct: f64,
+    pub departure_soc_pct: f64,
+    pub trip_kwh: f64,
+    pub weekdays: Vec<u32>,
+    pub arrival_hour: u32,
+    pub departure_hour: u32,
+    pub charge_kw: f64,
+    pub charge_efficiency: f64,
+    #[serde(default)]
+    pub discharge_kw: f64,
+    #[serde(default = "unity_efficiency")]
+    pub discharge_efficiency: f64,
+    #[serde(default)]
+    pub strategy: ChargeStrategy,
+}
+
+fn unity_efficiency() -> f64 { 1.0 }
+
+impl FleetGroup {
+    pub fn valid(&self) -> bool {
+        !self.name.trim().is_empty() && self.name.len() <= 100 && (1..=1000).contains(&self.vehicles)
+            && (0.1..=1000.0).contains(&self.battery_kwh) && (0.0..=100.0).contains(&self.initial_soc_pct)
+            && (0.0..=100.0).contains(&self.departure_soc_pct) && (0.0..=self.battery_kwh).contains(&self.trip_kwh)
+            && !self.weekdays.is_empty() && self.weekdays.len() <= 7 && self.weekdays.iter().all(|&d| d < 7)
+            && (0..7).filter(|d| self.weekdays.contains(d)).count() == self.weekdays.len()
+            && self.arrival_hour < 24 && self.departure_hour < 24
+            && (0.01..=500.0).contains(&self.charge_kw) && (0.05..=1.0).contains(&self.charge_efficiency)
+            && (0.0..=500.0).contains(&self.discharge_kw) && (0.05..=1.0).contains(&self.discharge_efficiency)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Fleet {
+    pub groups: Vec<FleetGroup>,
+    pub site_charge_kw: f64,
+    /// V2H site limit. Zero disables discharge for the fleet.
+    #[serde(default)]
+    pub site_discharge_kw: f64,
+}
+
+impl Fleet {
+    pub fn valid(&self) -> bool {
+        (1..=32).contains(&self.groups.len()) && self.groups.iter().all(FleetGroup::valid)
+            && (0.01..=100_000.0).contains(&self.site_charge_kw)
+            && (0.0..=100_000.0).contains(&self.site_discharge_kw)
+            && self.groups.iter().enumerate().all(|(i, g)| self.groups[..i].iter().all(|prior| prior.name != g.name))
+    }
+}
+
+/// A lumped usable heat store charged through the heat pump from PV surplus.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeatStore {
+    pub capacity_kwh: f64,
+    pub initial_kwh: f64,
+    pub charge_kw: f64,
+    pub discharge_kw: f64,
+    pub standing_loss_pct_per_day: f64,
+    #[serde(default)]
+    pub daily_hot_water_kwh: f64,
+    #[serde(default)]
+    pub hot_water_hour: u32,
+}
+
+impl HeatStore {
+    pub fn valid(&self) -> bool {
+        (0.01..=100_000.0).contains(&self.capacity_kwh) && (0.0..=self.capacity_kwh).contains(&self.initial_kwh)
+            && (0.01..=10_000.0).contains(&self.charge_kw) && (0.01..=10_000.0).contains(&self.discharge_kw)
+            && (0.0..100.0).contains(&self.standing_loss_pct_per_day)
+            && (0.0..=10_000.0).contains(&self.daily_hot_water_kwh) && self.hot_water_hour < 24
+    }
+}
+
+/// One electrically isolated AC island. PV inverter unit IDs cannot belong to two clusters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IslandCluster {
+    pub name: String,
+    pub inverter_units: Vec<String>,
+    pub load_share_pct: f64,
+    pub storage: crate::plant::Storage,
+    #[serde(default)]
+    pub controls: Option<IslandPlan>,
+}

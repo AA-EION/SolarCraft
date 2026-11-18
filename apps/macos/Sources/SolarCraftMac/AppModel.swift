@@ -94,7 +94,7 @@ final class AppModel: ObservableObject {
             if let circuits { request["circuits"] = circuits }
             result = try Core.invokeJSON("cable_plan", request)
         }
-        if error == nil && (["apply", "apply_hourly", "save"].contains(mode)) { reload() }
+        if error == nil && (["apply", "apply_hourly", "apply_routed", "save"].contains(mode)) { reload() }
         return result
     }
 

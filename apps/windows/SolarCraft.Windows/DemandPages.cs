@@ -14,7 +14,8 @@ public sealed partial class MainWindow
     {
         var ev = _project?["ev"];
         var evStrategy = Combo(T("ev_strategy"), new[] { ("immediate", T("ev_immediate")), ("solar_preferred", T("ev_solar")) }, S(ev, "strategy"));
-        DemandEditor(EvPage, "ev", SystemType is "grid_ev" or "grid_ev_battery", [
+        if (_project?["fleet"] is JsonObject) EvPage.Children.Clear();
+        else DemandEditor(EvPage, "ev", SystemType is "grid_ev" or "grid_ev_battery", [
             ("daily_kwh", "ev_daily", 12, false), ("charger_kw", "ev_charger", 7.2, false), ("efficiency", "ev_efficiency", 0.9, false),
             ("arrival_hour", "ev_arrival", 18, true), ("departure_hour", "ev_departure", 7, true),
         ], evStrategy, T("ev_window"), values => values["strategy"] = Sel(evStrategy));
@@ -24,6 +25,8 @@ public sealed partial class MainWindow
             ("cop_at_0c", "heat_cop0", 2.5, false), ("cop_at_10c", "heat_cop10", 3.8, false),
             ("resistance_backup_kw", "heat_backup", 3, false),
         ], null, "", null);
+        BuildFleet();
+        BuildHeatStore();
         BuildIslandPage();
     }
 
@@ -86,9 +89,10 @@ public sealed partial class MainWindow
         var panel = IslandPage;
         panel.Children.Clear();
         if (!Islanded) return;
+        BuildIslandClusters();
         panel.Children.Add(Note(T("island_cost_hint")));
         var plan = _project?["island_plan"];
-        var generator = new StackPanel { Spacing = 7, Visibility = SystemType == "off_grid_generator" ? Visibility.Visible : Visibility.Collapsed };
+        var generator = new StackPanel { Spacing = 7, Visibility = SystemType == "off_grid_generator" && Arr(_project?["island_clusters"]).Count == 0 ? Visibility.Visible : Visibility.Collapsed };
         panel.Children.Add(generator);
         var controls = MakeFields(generator, plan, [
             ("minimum_generator_pct", "island_min", 25, false), ("minimum_run_hours", "island_run", 1, true),

@@ -531,6 +531,7 @@ struct SimulationPage: View {
                                 ("ev_wh", m.t("ev_page")), ("heating_wh", m.t("heat_page")),
                                 ("dc_cable_wh", "DC cable (Wh)"), ("ac_cable_wh", "AC cable (Wh)"),
                                 ("generator_charge_wh", m.t("island_charge")),
+                                ("ev_discharge_wh", "V2H (Wh)"), ("heat_store_kwh", m.t("tank") + " (kWh)"),
                             ].filter { d in m.dayRows.contains { abs(num($0, d.0)) > 1e-7 } }
                             if !details.isEmpty {
                                 ScrollView(.horizontal) {
@@ -539,6 +540,7 @@ struct SimulationPage: View {
                                         .font(.caption)
                                 }
                             }
+                            AdvancedHourSeries()
                         }
                     }
                 }

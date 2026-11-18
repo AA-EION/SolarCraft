@@ -4,9 +4,9 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 3	Components	yes			partial	equipment	PV, inverter and storage quantities. Optimizer, EV, thermal and detailed mounting are absent.
 4	PV system	yes			partial	production; energy_balance	Production and annual use. Dedicated PV-use chart is absent.
 5	Consumption	yes			available	energy_balance	Annual load information and supply-source graphic when there is consumption
-6	Electric vehicle	yes			partial	ev	Scheduled battery energy, charger use and missed quota. Travel cost, battery SOC and fleets are pending.
+6	Electric vehicle	yes			partial	ev; ev_fleet	Daily quota or fleet tables with energy, SOC range, V2H and departures below target. Travel cost is pending.
 7	Battery system	yes			partial	battery	Annual battery operation and reserve data. Dedicated battery chart is absent in Short.
-8	Thermal system	yes			partial	heating	Hourly heat-pump and backup electricity, served heat and unmet heat. Thermal storage, DHW and cooling are pending.
+8	Thermal system	yes			partial	heating; heat_store	Heat pump and backup electricity, unserved heat, thermal store and scheduled domestic hot water. Cooling is pending.
 9	Energy flow	yes			partial	energy_balance	Customer supply chart. Source-resolved full plant diagram is absent in Short.
 10	Economy	yes			available	finance; island_cost	Grid financial summary and cumulative cash flow, or discounted standalone costs when configured.
 1	Cover		yes	yes	available	cover	Project and customer metadata, designer, date, report title
@@ -14,7 +14,7 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 3	Overview_Setup_Image3D		yes	yes	available	scene_plans	Current 3D scene, when present
 4	Overview_Setup_PVSystem		yes	yes	available	equipment	Assigned equipment, array size, orientation and string counts
 5	Overview_PVYield		yes	yes	available	production; monthly_results	Annual KPI and simulated monthly AC production
-6	Overview_ThermalSystem		yes	yes	partial	heating	Hourly space heating, heat pump and resistance backup results. Thermal storage and DHW are pending.
+6	Overview_ThermalSystem		yes	yes	partial	heating	Heat pump, backup and unserved heat. Thermal store energy, standing loss and hot-water demand are included when configured.
 7	Overview_Profitability		yes	yes	available	finance	Current investment, bills, NPV, return and payback
 8	Overview_FootnoteDeviations		yes	yes	available	notes; run	Run-specific warnings, methods and production assumptions
 9	SystemSetup		yes	yes	group		The report uses SolarCraft section groups
@@ -76,9 +76,9 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 65	Results_PvSystem_SocBatterySystem		no	yes	available	monthly_storage	Charge, discharge and range of recorded SOC by month when storage exists
 66	Results_PvSystem_SocBatterySystemGraph		no	yes	available	monthly_storage	Plot of monthly recorded minimum and maximum battery SOC.
 67	Results_PvSystem_SocBatterySystemTable		no	yes	available	monthly_storage	Charge, discharge and range of recorded SOC by month when storage exists
-68	Results_PvSystem_SocElectricCar		no	yes	pending		Vehicle SOC and lifetime cycle simulation. Annual EV charging results are reported separately.
-69	Results_PvSystem_SocElectricCarGraph		no	yes	pending		Vehicle SOC and lifetime cycle simulation. Annual EV charging results are reported separately.
-70	Results_PvSystem_SocElectricCarTable		no	yes	pending		Vehicle SOC and lifetime cycle simulation. Annual EV charging results are reported separately.
+68	Results_PvSystem_SocElectricCar		no	yes	pending		SOC range and departure shortfalls by group. The hourly inspector has group SOC. Detailed battery cycle aging is pending.
+69	Results_PvSystem_SocElectricCarGraph		no	yes	pending		SOC range and departure shortfalls by group. The hourly inspector has group SOC. Detailed battery cycle aging is pending.
+70	Results_PvSystem_SocElectricCarTable		no	yes	pending		SOC range and departure shortfalls by group. The hourly inspector has group SOC. Detailed battery cycle aging is pending.
 71	Results_PvSystem_ThermalSystem		yes	yes	partial	heating	Space heat demand, heat pump electricity, resistance backup and unmet heat. Detailed thermal plant balance is pending.
 72	Results_PvSystem_ThermalSystemGraph		yes	yes	pending		Thermal simulation and heat-pump models
 73	Results_PvSystem_ThermalSystemTable		no	yes	partial	heating	Annual heat and electricity totals are available. Monthly by-equipment tables are pending.
@@ -89,9 +89,9 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 78	Results_PvSystem_Offgrid_Verbrauch		no	yes	available	monthly_grid	Monthly requested, served and unserved standalone demand.
 79	Results_PvSystem_Offgrid_VerbrauchGraph		no	yes	partial	monthly_grid	Monthly requested consumption is plotted. A served and unserved comparison is pending.
 80	Results_PvSystem_Offgrid_VerbrauchTable		no	yes	available	monthly_grid	Monthly requested, served and unserved standalone demand.
-81	Results_PvSystem_Offgrid_Cluster		no	yes	pending		Electrical simulation and reporting by independently controlled island clusters.
-82	Results_PvSystem_Offgrid_ClusterGraph		no	yes	pending		Electrical simulation and reporting by independently controlled island clusters.
-83	Results_PvSystem_Offgrid_ClusterTable		no	yes	pending		Electrical simulation and reporting by independently controlled island clusters.
+81	Results_PvSystem_Offgrid_Cluster		no	yes	partial	island_clusters	Separate generation, storage and fuel per island. Planner reports show annual totals and the hourly inspector shows SOC and unmet load. The cluster chart and monthly table are pending.
+82	Results_PvSystem_Offgrid_ClusterGraph		no	yes	pending		Separate generation, storage and fuel per island. Planner reports show annual totals and the hourly inspector shows SOC and unmet load. The cluster chart and monthly table are pending.
+83	Results_PvSystem_Offgrid_ClusterTable		no	yes	partial	island_clusters	Separate generation, storage and fuel per island. Planner reports show annual totals and the hourly inspector shows SOC and unmet load. The cluster chart and monthly table are pending.
 84	Results_PvSystem_Offgrid_Soc		no	yes	available	monthly_storage	Monthly charge, discharge and SOC range for the standalone battery.
 85	Results_PvSystem_Offgrid_SocGraph		no	yes	available	monthly_storage	Monthly minimum and maximum SOC for the standalone battery.
 86	Results_PvSystem_Offgrid_SocTable		no	yes	available	monthly_storage	Monthly minimum and maximum SOC for the standalone battery.
@@ -133,7 +133,7 @@ order	reference_section	short	extended_default	planner_default	status	solarcraft
 122	OverviewPlan		yes	yes	available	scene_plans	Current 3D scene, when present
 123	DimensioningPlan		yes	yes	partial	roof_plans; photo_plan	Roof dimensions are in the plan data. A dedicated dimension sheet is absent.
 124	StringPlan		yes	yes	available	scene_plans	Top-down identified strings with planned modules, when routed
-125	CablePlan		yes	yes	partial	string_routes; specified_cables; hourly_wiring	Routed lengths, design-point cable estimates and hourly loss totals. Installer route drawings and protection schedules are pending.
+125	CablePlan		yes	yes	partial	string_routes; specified_cables; hourly_wiring	Routed lengths and circuit sizing. Links to MPPTs and inverter feeders drive per-circuit hourly losses. Installer diagrams and code-specific protection schedules are pending.
 126	Partslist		yes	yes	partial	equipment	Assigned module, inverter, battery, battery inverter and generator quantities. Mounting, hardware and conductor bill of materials is absent.
 127	Screenshots		yes	yes	partial	scene_plans	Generated scene views. A user-curated screenshot collection is absent.
 128	FurtherPictures		yes	yes	pending		User-selected illustration attachments

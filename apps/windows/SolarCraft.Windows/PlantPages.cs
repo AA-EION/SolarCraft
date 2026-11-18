@@ -531,12 +531,42 @@ public sealed partial class MainWindow
             var details = new[] {
                 ("ev_wh", T("ev_page")), ("heating_wh", T("heat_page")), ("dc_cable_wh", "DC cable (Wh)"),
                 ("ac_cable_wh", "AC cable (Wh)"), ("generator_charge_wh", T("island_charge")),
+                ("ev_discharge_wh", "V2H (Wh)"), ("heat_store_kwh", T("tank") + " (kWh)"),
             }.Where(column => hours.Any(h => Math.Abs(N(h, column.Item1)) > 1e-7)).ToArray();
             if (details.Length > 0)
             {
                 host.Children.Add(Table(new[] { T("day"), T("hour") }.Concat(details.Select(d => d.Item2)).ToList(),
                     hours.Select(h => (IList<string>)new[] { F(N(h, "day_of_year")), $"{(int)N(h, "hour"):00}:00" }
                         .Concat(details.Select(d => F(N(h, d.Item1), 2))).ToList()), 12));
+            }
+            var series = new List<(string label, string field, int column)>();
+            void AddSeries(JsonArray entities, string title, string labelKey, string field, string unit)
+            {
+                for (var i = 0; i < entities.Count; i++)
+                    series.Add(($"{title} · {S(entities[i], labelKey)} ({unit})", field, i));
+            }
+            AddSeries(Arr(_summary?["fleet"]?["groups"]), T("fleet"), "name", "fleet_soc_pct", "%");
+            AddSeries(Arr(_summary?["clusters"]), T("clusters"), "name", "cluster_soc_pct", "%");
+            AddSeries(Arr(_summary?["clusters"]), T("island_unserved"), "name", "cluster_unserved_wh", "Wh");
+            AddSeries(Arr(_summary?["routed_cables"]), T("cable_planner"), "label", "routed_cable_wh", "Wh");
+            if (series.Count > 0)
+            {
+                var picker = Combo(T("hours_inspector"), series.Select((s, i) => (i.ToString(), s.label)).ToList(), "0");
+                var selected = new StackPanel();
+                host.Children.Add(picker);
+                host.Children.Add(selected);
+                void ShowSeries()
+                {
+                    if (picker.SelectedIndex < 0) return;
+                    var c = series[picker.SelectedIndex];
+                    selected.Children.Clear();
+                    selected.Children.Add(Table([T("day"), T("hour"), c.label], hours.Select(h => (IList<string>)new[] {
+                        F(N(h,"day_of_year")), $"{(int)N(h,"hour"):00}:00",
+                        F(Arr(h?[c.field]).ElementAtOrDefault(c.column)?.GetValue<double>() ?? 0, 2),
+                    }), 12));
+                }
+                picker.SelectionChanged += (_, _) => ShowSeries();
+                ShowSeries();
             }
         }
         var buttons = new List<UIElement> { day, Btn(T("apply"), () => Try(() => Show(Arr(Api.Invoke("results_hours", new { file = _file, day_of_year = (int)day.Value })?["hours"])))) };
@@ -805,6 +835,45 @@ public sealed partial class MainWindow
                 throw new InvalidOperationException("Cable sizing did not return the expected cross sections.");
             Reload();
             await Capture(NavCables, "22-hourly-cable-estimates.png");
+
+            Api.Invoke("set_section", new { file, section = "fleet", value = new { site_charge_kw = 7.2, site_discharge_kw = 2,
+                groups = new[] {
+                    new { name = "Servicio", vehicles = 2, battery_kwh = 40, initial_soc_pct = 65, departure_soc_pct = 45,
+                        trip_kwh = 12, weekdays = new[] { 0, 1, 2, 3, 4 }, arrival_hour = 9, departure_hour = 23,
+                        charge_kw = 3.6, charge_efficiency = .92, discharge_kw = 1, discharge_efficiency = .9, strategy = "solar_preferred" },
+                    new { name = "Visitas", vehicles = 1, battery_kwh = 55, initial_soc_pct = 55, departure_soc_pct = 40,
+                        trip_kwh = 9, weekdays = new[] { 5, 6 }, arrival_hour = 8, departure_hour = 20,
+                        charge_kw = 3.6, charge_efficiency = .92, discharge_kw = 1, discharge_efficiency = .9, strategy = "solar_preferred" }
+                } } });
+            Api.Invoke("set_section", new { file, section = "heat_store", value = new { capacity_kwh = 9, initial_kwh = 1,
+                charge_kw = 3, discharge_kw = 3, standing_loss_pct_per_day = 2, daily_hot_water_kwh = 2, hot_water_hour = 21 } });
+            Api.Invoke("simulate", new { file });
+            Reload();
+            if (Arr(_summary?["fleet"]?["groups"]).Count != 2 || _summary?["heat_store"] is null)
+                throw new InvalidOperationException("Fleet or thermal store results did not load.");
+            await Capture(NavEv, "23-ev-fleet.png");
+            await Capture(NavHeating, "24-heat-store.png");
+
+            var unitIds = Arr(Api.Invoke("stringing", new { file })?["inverters"]).Select(r => S(r?["unit"],"id")).ToArray();
+            var baseStorage = _project?["storage"]?.DeepClone().AsObject() ?? throw new InvalidOperationException("Demo battery is missing.");
+            var storageIds = Arr(Api.Invoke("add_generic_storage_equipment", new { file })?["ids"]);
+            baseStorage["coupling"] = new JsonObject { ["kind"] = "ac_coupled", ["battery_inverter_id"] = storageIds[2]?.DeepClone() };
+            Api.Invoke("workflow_set", new { file, value = new { system = "off_grid", tools = "both" } });
+            Api.Invoke("set_section", new { file, section = "island_clusters", value = new[] {
+                new { name = "Principal", inverter_units = unitIds, load_share_pct = 65, storage = baseStorage },
+                new { name = "Taller", inverter_units = Array.Empty<string>(), load_share_pct = 35, storage = baseStorage },
+            } });
+            Api.Invoke("cable_plan", new { file, mode = "apply_routed", circuits = new[] {
+                new { label = "Salida principal", kind = "ac_single", metal = "copper", length_m = 18,
+                    area_mm2 = 10, temperature_c = 50, voltage_v = 230, current_a = 1, circuits = 1, target_drop_pct = 3,
+                    ampacity_a = 55, derating = .85, sizing_factor = 1.25, binding = new { kind = "inverter_ac", unit_id = unitIds[0] } },
+            } });
+            Api.Invoke("simulate", new { file });
+            Reload();
+            if (Arr(_summary?["clusters"]).Count != 2 || Arr(_summary?["routed_cables"]).Count != 1)
+                throw new InvalidOperationException("Island or linked cable results did not load.");
+            await Capture(NavIsland, "25-island-clusters.png");
+            await Capture(NavCables, "26-routed-cables.png");
         }
         catch (Exception ex) { ok = false; File.WriteAllText(IOPath.Combine(dir, "error.txt"), ex.ToString()); }
         Application.Current.Exit();

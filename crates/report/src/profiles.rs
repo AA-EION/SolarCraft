@@ -111,6 +111,7 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
                 (tr(l, "Grid", "Red", "Netz", "Rede"), b.grid_to_load_kwh),
                 (tr(l, "Generator", "Generador", "Generator", "Gerador"), b.generator_to_load_kwh),
                 (tr(l, "Unserved demand", "Demanda no atendida", "Nicht versorgter Bedarf", "Demanda não atendida"), b.unserved_kwh + b.shed_noncritical_kwh),
+                ("V2H".into(), b.ev_to_load_kwh),
             ];
             let caption = tr(l, "Sources of customer electricity", "Fuentes de electricidad del cliente", "Quellen des Kundenstroms", "Fontes de eletricidade do cliente");
             content.figure(charts::load_supply(&series, b.load_kwh, l), caption, view);
@@ -169,6 +170,10 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
             ["DC".into(), format!("{} kWh", n(&r.hourly.dc_cable_wh))],
             ["AC".into(), format!("{} kWh", n(&r.flows.ac_cable_loss))],
         ]);
+        if !r.routed_cables.is_empty() {
+            wiring.table(vec![tr(l,"Circuit","Circuito","Stromkreis","Circuito"), "kWh".into()],
+                r.routed_cables.iter().map(|c| [c.label.clone(), l.num(c.loss_kwh,2)]));
+        }
         view.contents.push(wiring);
     }
     if !view.notes.is_empty() {

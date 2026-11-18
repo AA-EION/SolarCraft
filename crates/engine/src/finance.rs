@@ -196,20 +196,30 @@ pub struct IslandFinance {
 
 /// Repeated representative-year dispatch. Fuel and maintenance prices escalate,
 /// while the physical demand served and fuel volume repeat each year.
-pub fn island_cost(p: &solarcraft_model::Project, dc_kwp: f64, balance: &crate::energy::Balance) -> Option<IslandFinance> {
-    let plan = p.island_plan.as_ref()?;
+pub fn island_cost(p: &solarcraft_model::Project, dc_kwp: f64, balance: &crate::energy::Balance, clusters: &[crate::islands::ClusterResult]) -> Option<IslandFinance> {
     let ec = &p.economics;
-    let capacity = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id)
-        .map(|b| b.capacity_kwh * f64::from(s.units))).unwrap_or(0.0);
-    let generator_investment = if p.workflow.system == solarcraft_model::workflow::SystemType::OffGridGenerator {
-        plan.generator_investment
-    } else { 0.0 };
+    let (capacity, fuel): (f64, Vec<_>) = if clusters.is_empty() {
+        let plan = p.island_plan.as_ref()?;
+        let capacity = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id)
+            .map(|b| b.capacity_kwh * f64::from(s.units))).unwrap_or(0.0);
+        let fuel = if p.workflow.system == solarcraft_model::workflow::SystemType::OffGridGenerator {
+            vec![(plan, balance.generator_fuel)]
+        } else { vec![] };
+        (capacity, fuel)
+    } else {
+        let capacity = clusters.iter().map(|c| c.storage_kwh).sum();
+        let fuel = p.island_clusters.iter().zip(clusters).filter_map(|(config, result)| {
+            config.controls.as_ref().filter(|_| result.fuel_unit.is_some()).map(|plan| (plan, result.balance.generator_fuel))
+        }).collect();
+        (capacity, fuel)
+    };
+    let generator_investment: f64 = fuel.iter().map(|(plan, _)| plan.generator_investment).sum();
     let investment = ec.cost_fixed + dc_kwp * ec.cost_per_kwp + capacity * ec.cost_per_battery_kwh + generator_investment;
     let mut cost = investment - ec.subsidy;
     let mut energy = 0.0;
     let mut years = vec![];
     for year in 1..=ec.horizon_years {
-        let fuel_cost = plan.fuel_price * balance.generator_fuel * (1.0 + plan.fuel_escalation_pct / 100.0).powi(year as i32 - 1);
+        let fuel_cost: f64 = fuel.iter().map(|(plan, volume)| plan.fuel_price * volume * (1.0 + plan.fuel_escalation_pct / 100.0).powi(year as i32 - 1)).sum();
         let maintenance = investment * ec.om_pct_of_investment / 100.0 * (1.0 + ec.om_escalation_pct / 100.0).powi(year as i32 - 1);
         let replacements = if year == ec.inverter_replacement_year { ec.inverter_replacement_cost } else { 0.0 }
             + if year == ec.battery_replacement_year { ec.battery_replacement_cost } else { 0.0 };

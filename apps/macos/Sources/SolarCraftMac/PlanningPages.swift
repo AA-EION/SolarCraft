@@ -42,6 +42,9 @@ private struct CableDraft: Identifiable {
     var target: Double
     var ampacity: String
     var derating: Double
+    var sizingFactor: Double
+    var protection: String
+    var link: String
     var candidates: String
     let source: String?
 
@@ -61,6 +64,12 @@ private struct CableDraft: Identifiable {
         target = num(v, "target_drop_pct", 1.5)
         ampacity = (v["ampacity_a"] as? NSNumber)?.stringValue ?? ""
         derating = num(v, "derating", 1)
+        sizingFactor = num(v, "sizing_factor", 1)
+        protection = (v["protection_a"] as? NSNumber)?.stringValue ?? ""
+        if let binding = v["binding"] as? JSONDict {
+            let id = str(binding, "unit_id")
+            link = str(binding, "kind") == "mppt" ? "dc|\(id)|\(int(binding, "input"))" : "ac|\(id)"
+        } else { link = "" }
         candidates = dicts(v["candidates"]).map { "\(num($0, "area_mm2")),\(num($0, "ampacity_a"))" }.joined(separator: "; ")
         source = value?["source_route"] as? String
     }
@@ -79,6 +88,17 @@ private struct CableDraft: Identifiable {
             value["ampacity_a"] = a
         }
         value["derating"] = derating
+        value["sizing_factor"] = sizingFactor
+        if !protection.isEmpty {
+            guard let rating = Double(protection.replacingOccurrences(of:",",with:".")), rating.isFinite else { return nil }
+            value["protection_a"] = rating
+        }
+        let parts = link.split(separator: "|").map(String.init)
+        if kind.hasPrefix("dc_"), parts.count == 3, parts[0] == "dc", let input = Int(parts[2]) {
+            value["binding"] = ["kind":"mppt", "unit_id":parts[1], "input":input] as JSONDict
+        } else if !kind.hasPrefix("dc_"), parts.count == 2, parts[0] == "ac" {
+            value["binding"] = ["kind":"inverter_ac", "unit_id":parts[1]]
+        }
         value["candidates"] = sizes
         if let source { value["source_route"] = source }
         return value
@@ -91,7 +111,7 @@ struct CablePlannerSection: View {
     @State private var draft: CableDraft?
     @State private var selected = 0
     private var circuits: [JSONDict] { dicts(data["circuits"]) }
-    private var estimates: [JSONDict] { dicts(data["estimates"]) }
+    private var estimates: [JSONDict] { (data["estimates"] as? [Any] ?? []).map { $0 as? JSONDict ?? [:] } }
 
     var body: some View {
         GroupBox(m.t("cable_planner")) {
@@ -118,7 +138,9 @@ struct CablePlannerSection: View {
                     ScrollView(.horizontal) {
                         SimpleTable(header: [m.t("cable_planner"), m.t("cable_drop"), "W", m.t("cable_area_target"), m.t("cable_current_check"), m.t("cable_suggested")],
                             rows: zip(circuits, estimates).map { c, r in
-                                let current = r["allowed_a"] is NSNumber ? "\(fmt(num(r, "allowed_a"), 1)) / \(fmt(num(c, "current_a"), 1))" : "–"
+                                if r.isEmpty { return [str(c,"label"),"–","–","–","–","–"] }
+                                let target = num(c,"design_current_a",num(c,"current_a")) * num(c,"sizing_factor",1)
+                                let current = r["allowed_a"] is NSNumber ? "\(fmt(num(r, "allowed_a"), 1)) / \(fmt(target, 1))" : "–"
                                 let size = (r["suggested"] as? JSONDict).map { fmt(num($0, "area_mm2"), 1) + " mm²" } ?? "–"
                                 return [str(c, "label"), fmt(num(r, "drop_pct"), 2) + " %", fmt(num(r, "loss_w"), 1),
                                     fmt(num(r, "area_for_target_mm2"), 2), current, size]
@@ -140,6 +162,16 @@ struct CablePlannerSection: View {
                     Button(m.t("cable_apply")) { run("apply", circuits) }.disabled(circuits.isEmpty)
                     Button(m.t("cable_hourly")) { run("apply_hourly", circuits) }.buttonStyle(.borderedProminent)
                         .disabled(circuits.isEmpty)
+                    Button(m.t("cable_apply_routed")) { run("apply_routed", circuits) }
+                        .disabled(!circuits.contains { $0["binding"] is JSONDict })
+                }
+                ForEach((data["row_errors"] as? [Any] ?? []).compactMap { $0 as? String }, id: \.self) { detail in
+                    Text(detail).foregroundStyle(.red)
+                }
+                let losses = dicts(m.summary?["routed_cables"])
+                if !losses.isEmpty {
+                    SimpleTable(header: [m.t("cable_planner"), m.t("cable_routed_loss")],
+                        rows: losses.map { [str($0,"label"), fmt(num($0,"loss_kwh"),2)] })
                 }
             }
         }
@@ -147,6 +179,8 @@ struct CablePlannerSection: View {
         .sheet(item: $draft) { start in
             CableEditor(value: start) { value in
                 guard let encoded = value.encoded else { m.error = m.t("cable_candidates"); return false }
+                guard let check = m.cablePlan(mode: "preview", circuits: [encoded]) else { return false }
+                if let issue = (check["row_errors"] as? [Any])?.first as? String { m.error = issue; return false }
                 var rows = circuits
                 if let index = value.index { rows[index] = encoded }
                 else { rows.append(encoded) }
@@ -183,6 +217,19 @@ private struct CableEditor: View {
                 Picker(m.t("cable_kind"), selection: $value.kind) {
                     ForEach(["dc_string", "dc_main", "ac_single", "ac_three"], id: \.self) { Text(m.t("cable_" + $0)).tag($0) }
                 }
+                Picker(m.t("cable_link"), selection: $value.link) {
+                    Text(m.t("cable_unbound")).tag("")
+                    let units = dicts(m.stringingDoc?["inverters"]).compactMap { $0["unit"] as? JSONDict }
+                    ForEach(units.indices, id: \.self) { j in
+                        let id = str(units[j], "id")
+                        let name = str(units[j], "name")
+                        if value.kind.hasPrefix("dc_") {
+                            ForEach(0..<(units[j]["mppts"] as? [Any] ?? []).count, id: \.self) { i in
+                                Text("\(name) / MPPT \(i+1)").tag("dc|\(id)|\(i)")
+                            }
+                        } else { Text(name).tag("ac|\(id)") }
+                    }
+                }
                 Picker(m.t("cable_material"), selection: $value.metal) {
                     ForEach(["copper", "aluminium"], id: \.self) { Text(m.t("cable_" + $0)).tag($0) }
                 }
@@ -190,12 +237,14 @@ private struct CableEditor: View {
                 if value.kind.hasPrefix("dc_") { NumField(label: m.t("cable_extra"), value: $value.extra) }
                 NumField(label: m.t("cable_area"), value: $value.area)
                 NumField(label: m.t("cable_temp"), value: $value.temperature)
-                NumField(label: m.t("cable_voltage"), value: $value.voltage)
-                NumField(label: m.t("cable_current"), value: $value.current)
+                NumField(label: m.t("cable_voltage"), value: $value.voltage).disabled(value.link.hasPrefix("dc|"))
+                NumField(label: m.t("cable_current"), value: $value.current).disabled(!value.link.isEmpty)
                 NumField(label: m.t("cable_count"), value: $value.count)
                 NumField(label: m.t("cable_target"), value: $value.target)
                 TextField(m.t("cable_ampacity"), text: $value.ampacity)
                 NumField(label: m.t("cable_derating"), value: $value.derating)
+                NumField(label: m.t("cable_sizing_factor"), value: $value.sizingFactor)
+                TextField(m.t("cable_protection"), text: $value.protection)
                 TextField(m.t("cable_candidates"), text: $value.candidates)
             }
             if !error.isEmpty { Text(error).foregroundStyle(.red) }
@@ -206,7 +255,10 @@ private struct CableEditor: View {
                     if submit(value) { dismiss() } else { error = m.error ?? m.t("issues") }
                 }.buttonStyle(.borderedProminent).disabled(value.count < 1 || value.count > 10_000 || value.count != value.count.rounded())
             }
-        }.padding(20).frame(width: 495)
+        }.padding(20).frame(width: 495, height: 630)
+        .onChange(of: value.kind) { old, new in
+            if old.hasPrefix("dc_") != new.hasPrefix("dc_") { value.link = "" }
+        }
     }
 }
 

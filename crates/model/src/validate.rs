@@ -167,6 +167,57 @@ fn electrical_issues(p: &Project, push: &mut Push) {
     }
 }
 
+fn validate_clusters(p: &Project, push: &mut Push) {
+    use crate::{plant::Coupling, workflow::SystemType};
+    let clusters = &p.island_clusters;
+    if clusters.is_empty() || !p.workflow.system.islanded() { return; }
+    let list = "/island_clusters";
+    if !(1..=50).contains(&p.economics.horizon_years) || !(-99.0..=100.0).contains(&p.economics.discount_rate_pct) {
+        push("ISLAND_FINANCE", Severity::Error, "/economics".into(), "Check the shared cost horizon and discount rate.".into());
+    }
+    let electrical = crate::derive::electrical(p);
+    let mut units = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    let mut share = 0.0;
+    if clusters.len() > 24 {
+        push("ISLAND_CLUSTER_COUNT", Severity::Error, list.into(), "Use at most 24 independently dispatched islands.".into());
+        return;
+    }
+    for (i, c) in clusters.iter().enumerate() {
+        let path = format!("{list}/{i}");
+        share += c.load_share_pct;
+        if c.name.trim().is_empty() || c.name.len() > 100 || !names.insert(c.name.as_str())
+            || !(0.0..=100.0).contains(&c.load_share_pct) {
+            push("ISLAND_CLUSTER", Severity::Error, path.clone(), "Give each island a unique name and a load share from 0% to 100%.".into());
+        }
+        for id in &c.inverter_units {
+            if !electrical.inverters.iter().any(|u| &u.id == id) || !units.insert(id.as_str()) {
+                push("ISLAND_CLUSTER_INVERTER", Severity::Error, path.clone(), format!("Inverter unit '{id}' must exist and belong to only one island."));
+            }
+        }
+        if matches!(&c.storage.coupling, Coupling::DcHybrid { unit_id } if !c.inverter_units.contains(unit_id)) {
+            push("ISLAND_CLUSTER_HYBRID", Severity::Error, path.clone(), "A DC-coupled battery must use an inverter on the same island.".into());
+        }
+        let mut child = p.clone();
+        child.island_clusters.clear();
+        child.hourly_cables = Default::default();
+        child.storage = Some(c.storage.clone());
+        child.island_plan = c.controls.clone();
+        child.workflow.system = if c.storage.generator_id.is_some() { SystemType::OffGridGenerator } else { SystemType::OffGrid };
+        plant_issues(&child, &mut |code, severity, pointer, message| {
+            if pointer.starts_with("/storage") || pointer == "/island_plan" {
+                let suffix = if pointer == "/island_plan" { "/controls" } else { &pointer };
+                push(code, severity, format!("{path}{suffix}"), message);
+            }
+        });
+    }
+    if units.len() != electrical.inverters.len() || (share - 100.0).abs() > 1e-6 {
+        push("ISLAND_CLUSTER_ALLOCATION", Severity::Error, list.into(), "Assign every PV inverter unit once and allocate 100% of the load.".into());
+    }
+    if p.workflow.system == SystemType::OffGridGenerator && clusters.iter().all(|c| c.storage.generator_id.is_none()) {
+        push("ISLAND_GENERATOR_REQUIRED", Severity::Error, list.into(), "At least one island needs a generator in this workflow.".into());
+    }
+}
 /// Grid, loads, storage and tariff checks.
 fn plant_issues(p: &Project, push: &mut Push) {
     use crate::{plant::{Coupling, LoadProfile}, workflow::SystemType};
@@ -174,13 +225,19 @@ fn plant_issues(p: &Project, push: &mut Push) {
     if !matches!(system, SystemType::Custom | SystemType::GridExport) && matches!(p.loads.profile, LoadProfile::None) {
         push("WORKFLOW_LOAD_REQUIRED", Severity::Error, "/loads/profile".into(), "Select a consumption profile on the Consumption page.".into());
     }
-    if (system.needs_ev() && p.ev.is_none()) || p.ev.as_ref().is_some_and(|ev| !ev.valid()) {
+    if (system.needs_ev() && p.ev.is_none() && p.fleet.is_none()) || p.ev.as_ref().is_some_and(|ev| !ev.valid()) {
         push("EV_CONFIGURATION", Severity::Error, "/ev".into(), "Configure EV energy, charger power, charging efficiency and arrival/departure hours.".into());
     }
     if (system.needs_heating() && p.heating.is_none()) || p.heating.as_ref().is_some_and(|heat| !heat.valid()) {
         push("HEATING_CONFIGURATION", Severity::Error, "/heating".into(), "Configure a valid heating demand, heat pump and backup capacity.".into());
     }
-    if let Some(plan) = p.island_plan.as_ref().filter(|_| system.islanded()) {
+    if p.fleet.as_ref().is_some_and(|fleet| !fleet.valid()) {
+        push("EV_FLEET", Severity::Error, "/fleet".into(), "Check vehicle groups, weekday schedules, state of charge and shared charger limits.".into());
+    }
+    if p.heat_store.as_ref().is_some_and(|store| !store.valid() || p.heating.is_none()) {
+        push("HEAT_STORE", Severity::Error, "/heat_store".into(), "Thermal storage requires valid capacity, heat limits and a configured heat pump.".into());
+    }
+    if let Some(plan) = p.island_plan.as_ref().filter(|_| system.islanded() && p.island_clusters.is_empty()) {
         if !plan.valid() || p.economics.horizon_years == 0 || p.economics.horizon_years > 50
             || !(-99.0..=100.0).contains(&p.economics.discount_rate_pct) {
             push("ISLAND_PLAN", Severity::Error, "/island_plan".into(), "Check generator settings, cost horizon and discount rate.".into());
@@ -192,6 +249,11 @@ fn plant_issues(p: &Project, push: &mut Push) {
             push("ISLAND_GENERATOR_CHARGE", Severity::Error, "/island_plan".into(), "Generator charging requires an AC battery converter and thresholds inside its SOC window.".into());
         }
     }
+    if !p.hourly_cables.routed.is_empty() {
+        if let Err(error) = crate::cable::routed(p, &crate::derive::electrical(p)) {
+            push("ROUTED_CABLE_LOSS", Severity::Error, "/hourly_cables/routed".into(), error);
+        }
+    }
     for value in [p.hourly_cables.dc_pct, p.hourly_cables.ac_pct].into_iter().flatten() {
         if !(0.0..=25.0).contains(&value) { push("HOURLY_CABLE_LOSS", Severity::Error, "/hourly_cables".into(), "The hourly cable model requires a design-point loss between 0% and 25%.".into()); }
     }
@@ -200,7 +262,8 @@ fn plant_issues(p: &Project, push: &mut Push) {
             push("CABLE_LOSS_RANGE", Severity::Error, format!("/losses/{key}"), "Wiring loss must be at least zero and below 100%.".into());
         }
     }
-    if system.needs_storage() && p.storage.is_none() {
+    validate_clusters(p, push);
+    if system.needs_storage() && p.storage.is_none() && p.island_clusters.is_empty() {
         push("WORKFLOW_STORAGE_REQUIRED", Severity::Error, "/storage".into(), "Configure the battery on the Battery page.".into());
     }
     if system == SystemType::OffGridGenerator && p.storage.as_ref().is_some_and(|s| s.generator_id.is_none()) {

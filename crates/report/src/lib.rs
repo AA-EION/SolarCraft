@@ -180,9 +180,15 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
     };
     let lo = &p.losses;
     let pct = |v: f64| format!("{} %", n(v, 1));
-    let wire_pct = |manual: f64, hourly: Option<f64>| hourly.map_or_else(|| pct(manual), |v| {
-        format!("{} · {}", pct(v), tr(l, "design point (hourly)", "punto de diseño (horario)", "Auslegungspunkt (stündlich)", "ponto de projeto (horário)"))
-    });
+    let wire_pct = |manual: f64, hourly: Option<f64>, dc: bool| {
+        if p.hourly_cables.routed.iter().any(|circuit| circuit.is_dc() == dc) {
+            return format!("{} · {}", tr(l, "Linked circuits", "Circuitos vinculados", "Verknüpfte Stromkreise", "Circuitos vinculados"),
+                format!("{} {}", pct(manual), tr(l, "for unlinked paths", "en líneas sin enlace", "für unverknüpfte Leitungen", "em linhas sem vínculo")));
+        }
+        hourly.map_or_else(|| pct(manual), |v| {
+            format!("{} · {}", pct(v), tr(l, "design point (hourly)", "punto de diseño (horario)", "Auslegungspunkt (stündlich)", "ponto de projeto (horário)"))
+        })
+    };
     let model_name = format!("{:?}", p.simulation.transposition.value).replace("HayDavies", "Hay–Davies").replace("Perez", "Perez et al. (1990)");
     let roof_svgs: Vec<String> = p.arrays.iter().filter_map(|a| a.roof.as_ref().map(|r| {
         let cap = format!("{} — {}", a.name.value, s["roof_caption"].replace("%N%", &r.modules.len().to_string()).replace("%S%", &n(r.params.setback, 2)));
@@ -206,7 +212,7 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
         }).collect(),
         monthly_header: [s["month"].into(), "GHI kWh/m²".into(), "POA kWh/m²".into(), format!("{} kWh", s["energy"])],
         monthly_rows,
-        assumption_rows: vec![[s["soiling"].into(), pct(lo.soiling_pct.value)], [s["lid"].into(), pct(lo.lid_pct.value)], [s["mismatch"].into(), pct(lo.mismatch_pct.value)], [s["dc_wiring"].into(), wire_pct(lo.dc_wiring_pct.value, p.hourly_cables.dc_pct)], [s["ac_wiring"].into(), wire_pct(lo.ac_wiring_pct.value, p.hourly_cables.ac_pct)], [s["availability"].into(), pct(lo.availability_pct.value)], ["Albedo".into(), n(p.site.albedo.value, 2)]],
+        assumption_rows: vec![[s["soiling"].into(), pct(lo.soiling_pct.value)], [s["lid"].into(), pct(lo.lid_pct.value)], [s["mismatch"].into(), pct(lo.mismatch_pct.value)], [s["dc_wiring"].into(), wire_pct(lo.dc_wiring_pct.value, p.hourly_cables.dc_pct, true)], [s["ac_wiring"].into(), wire_pct(lo.ac_wiring_pct.value, p.hourly_cables.ac_pct, false)], [s["availability"].into(), pct(lo.availability_pct.value)], ["Albedo".into(), n(p.site.albedo.value, 2)]],
         models_text: s["models_text"].replace("%MODEL%", &model_name).replace("%PV_MODEL%", match r.manifest.pv_model {
             solarcraft_model::PvModel::SingleDiode => s["single_diode"],
             solarcraft_model::PvModel::TwoDiode => s["two_diode"],
@@ -273,14 +279,48 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             intro: String::new(), header: vec![], rows });
     }
     if let Some(heat) = &r.heating {
+        let total_heat = r.heat_store.as_ref().is_some_and(|tank| tank.hot_water_kwh > 0.0);
+        let demand_label = if total_heat { tr(l, "Total heat demand", "Demanda térmica total", "Gesamtwärmebedarf", "Demanda térmica total") }
+            else { tr(l, "Space heat demand", "Demanda de calefacción", "Raumwärmebedarf", "Demanda de aquecimento") };
         let rows = [
-            (tr(l, "Space heat demand", "Demanda de calefacción", "Raumwärmebedarf", "Demanda de aquecimento"), heat.demand_kwh),
+            (demand_label, heat.demand_kwh),
             (tr(l, "Heat pump electricity", "Electricidad de la bomba de calor", "Strom der Wärmepumpe", "Eletricidade da bomba de calor"), heat.pump_electric_kwh),
             (tr(l, "Resistance backup", "Respaldo eléctrico", "Elektrische Zusatzheizung", "Aquecimento elétrico auxiliar"), heat.backup_kwh),
             (tr(l, "Unserved heat", "Calor no atendido", "Ungedeckter Wärmebedarf", "Calor não atendido"), heat.unmet_heat_kwh),
         ].into_iter().map(|(label, value)| vec![label, format!("{} kWh", n(value, 1))]).collect();
-        out.push(Section { id: "heating", title: tr(l, "Space heating", "Calefacción", "Raumheizung", "Aquecimento ambiente"),
+        let title = if total_heat { tr(l, "Space heating and hot water", "Calefacción y agua caliente", "Raumheizung und Warmwasser", "Aquecimento ambiente e água quente") }
+            else { tr(l, "Space heating", "Calefacción", "Raumheizung", "Aquecimento ambiente") };
+        out.push(Section { id: "heating", title, intro: String::new(), header: vec![], rows });
+    }
+    if let Some(fleet) = &r.fleet {
+        let rows = fleet.groups.iter().map(|g| vec![g.name.clone(), g.vehicles.to_string(),
+            format!("{}–{}", n(g.min_soc_pct, 1), n(g.max_soc_pct, 1)), n(g.charged_kwh, 1),
+            n(g.discharged_kwh, 1), g.departures_below_target.to_string(), n(g.unmet_travel_kwh, 1)]).collect();
+        out.push(Section { id: "ev_fleet", title: tr(l, "EV fleet and bidirectional charging", "Flota eléctrica y carga bidireccional", "Elektroflotte und bidirektionales Laden", "Frota elétrica e carregamento bidirecional"),
+            intro: String::new(), header: vec![
+                tr(l,"Group","Grupo","Gruppe","Grupo"), tr(l,"Vehicles","Vehículos","Fahrzeuge","Veículos"), "SOC %".into(),
+                tr(l,"Charge (kWh)","Carga (kWh)","Ladung (kWh)","Carga (kWh)"), "V2H kWh".into(),
+                tr(l,"Below departure SOC","Salidas bajo el SOC","Unter Abfahrt-SOC","Saídas abaixo do SOC"),
+                tr(l,"Unmet travel (kWh)","Viajes no cubiertos (kWh)","Fehlende Fahrenergie (kWh)","Energia de viagens não suprida (kWh)")], rows });
+    }
+    if let Some(store) = &r.heat_store {
+        let rows = [
+            (tr(l,"Charge","Carga","Ladung","Carga"), store.charge_heat_kwh),
+            (tr(l,"Discharge","Descarga","Entladung","Descarga"), store.discharge_heat_kwh),
+            (tr(l,"Standing loss","Pérdida en reposo","Stillstandsverlust","Perda em repouso"), store.standing_loss_kwh),
+            (tr(l,"Hot water demand","Demanda de agua caliente","Warmwasserbedarf","Demanda de água quente"), store.hot_water_kwh),
+        ].into_iter().map(|(label,value)| vec![label, format!("{} kWh", n(value,1))]).collect();
+        out.push(Section { id: "heat_store", title: tr(l,"Thermal storage","Almacenamiento térmico","Wärmespeicher","Armazenamento térmico"),
             intro: String::new(), header: vec![], rows });
+    }
+    if !r.clusters.is_empty() {
+        let rows = r.clusters.iter().map(|c| vec![c.name.clone(), n(c.storage_kwh,1),
+            n(c.balance.load_served_kwh,1), n(c.balance.unserved_kwh,1), n(c.balance.generator_kwh,1),
+            c.fuel_unit.as_ref().map_or("–".into(), |unit| format!("{} {unit}", n(c.balance.generator_fuel,1)))]).collect();
+        out.push(Section { id: "island_clusters", title: tr(l,"Independent islands","Islas independientes","Unabhängige Inseln","Ilhas independentes"),
+            intro: String::new(), header: vec![tr(l,"Island","Isla","Insel","Ilha"), tr(l,"Battery (kWh)","Batería (kWh)","Batterie (kWh)","Bateria (kWh)"),
+                tr(l,"Served (kWh)","Atendida (kWh)","Versorgt (kWh)","Atendida (kWh)"), tr(l,"Unserved (kWh)","No atendida (kWh)","Ungedeckt (kWh)","Não atendida (kWh)"),
+                tr(l,"Generator (kWh)","Generador (kWh)","Generator (kWh)","Gerador (kWh)"), tr(l,"Fuel","Combustible","Kraftstoff","Combustível")], rows });
     }
     if let Some(cost) = &r.island_finance {
         let rows = [
@@ -300,7 +340,7 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
     if b.load_kwh > 0.0 || b.batt_charge_kwh > 0.0 {
         let kwh = |v: f64| format!("{} kWh", n(v, 0));
         let mut rows = vec![
-            vec![tr(l, "PV generation used or exported", "Generación FV aprovechada o exportada", "Genutzte oder eingespeiste PV-Erzeugung", "Geração FV aproveitada ou exportada"), kwh(b.pv_generation_kwh)],
+            vec![tr(l, "PV generation before curtailment", "Generación FV antes de recortes", "PV-Erzeugung vor Abregelung", "Geração FV antes do corte"), kwh(b.pv_generation_kwh)],
             vec![tr(l, "Consumption", "Consumo", "Verbrauch", "Consumo"), kwh(b.load_kwh)],
             vec![tr(l, "Consumption served", "Consumo atendido", "Versorgter Verbrauch", "Consumo atendido"), kwh(b.load_served_kwh)],
             vec![tr(l, "PV used directly", "FV usada directamente", "PV-Direktverbrauch", "FV usada diretamente"), kwh(b.pv_to_load_kwh)],

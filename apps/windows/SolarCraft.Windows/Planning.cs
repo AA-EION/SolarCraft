@@ -81,10 +81,11 @@ public sealed partial class MainWindow
             if (estimates.Count > 0)
             {
                 holder.Children.Add(Table([T("cable_planner"), T("cable_drop"), "W", T("cable_area_target"), T("cable_current_check"), T("cable_suggested")],
-                    estimates.Select((r, i) => (IList<string>)new[] { S(circuits[i], "label"), $"{F(N(r, "drop_pct"), 2)} %",
-                        F(N(r, "loss_w"), 1), F(N(r, "area_for_target_mm2"), 2),
-                        r?["allowed_a"] is null ? "—" : $"{F(N(r, "allowed_a"), 1)} / {F(N(circuits[i], "current_a"), 1)}",
-                        r?["suggested"] is null ? "—" : $"{F(N(r["suggested"], "area_mm2"), 1)} mm²" })));
+                    estimates.Select((r, i) => (IList<string>)(r is null ? new[] { S(circuits[i], "label"), "—", "—", "—", "—", "—" } : new[] {
+                        S(circuits[i], "label"), $"{F(N(r, "drop_pct"), 2)} %", F(N(r, "loss_w"), 1), F(N(r, "area_for_target_mm2"), 2),
+                        r["allowed_a"] is null ? "—" : $"{F(N(r, "allowed_a"), 1)} / {F(N(circuits[i], "design_current_a", N(circuits[i], "current_a")) * N(circuits[i], "sizing_factor", 1), 1)}",
+                        r["suggested"] is null ? "—" : $"{F(N(r["suggested"], "area_mm2"), 1)} mm²" }))));
+                foreach (var error in Arr(data?["row_errors"]).Where(e => e is not null)) holder.Children.Add(Note(error!.GetValue<string>()));
                 var useSize = Btn(T("cable_use_size"), () =>
                 {
                     int index = picker.SelectedIndex;
@@ -108,14 +109,19 @@ public sealed partial class MainWindow
             hourly.IsEnabled = apply.IsEnabled;
             var active = data?["hourly"];
             if (active?["dc_pct"] is not null || active?["ac_pct"] is not null) holder.Children.Add(Note(T("cable_hourly") + " ✓"));
-            holder.Children.Add(Row(save, apply, hourly));
+            var routed = Btn(T("cable_apply_routed"), () => Evaluate((JsonArray)circuits.DeepClone(), "apply_routed", 0), true);
+            routed.IsEnabled = circuits.Any(c => c?["binding"] is not null);
+            holder.Children.Add(Row(save, apply, hourly, routed));
+            var losses = Arr(_summary?["routed_cables"]);
+            if (losses.Count > 0) holder.Children.Add(Table([T("cable_planner"), T("cable_routed_loss")],
+                losses.Select(c => (IList<string>)new[] { S(c,"label"), F(N(c,"loss_kwh"),2) })));
         }
 
         void Evaluate(JsonArray rows, string mode, int selected)
         {
             if (!Try(() => data = Api.Invoke("cable_plan", new { file, circuits = rows, mode }))) return;
-            if (mode is "save" or "apply" or "apply_hourly") {
-                ShowInfo(T(mode == "save" ? "cable_save" : mode == "apply_hourly" ? "cable_hourly" : "cable_apply"));
+            if (mode is "save" or "apply" or "apply_hourly" or "apply_routed") {
+                ShowInfo(T(mode switch { "save" => "cable_save", "apply_hourly" => "cable_hourly", "apply_routed" => "cable_apply_routed", _ => "cable_apply" }));
                 Reload();
             }
             else Render(Math.Max(0, selected));
@@ -136,19 +142,67 @@ public sealed partial class MainWindow
             ("temperature_c", "cable_temp", 60.0), ("voltage_v", "cable_voltage", 400.0),
             ("current_a", "cable_current", 10.0), ("circuits", "cable_count", 1.0), ("target_drop_pct", "cable_target", 1.5)
         }.Select(f => (key: f.Item1, box: Num(T(f.Item2), N(original, f.Item1, f.Item3), 250))).ToList();
-        var extra = fields[1].box;
-        void UpdateExtra() => extra.Visibility = Sel(kind).StartsWith("dc_", StringComparison.Ordinal)
-            ? Visibility.Visible : Visibility.Collapsed;
-        kind.SelectionChanged += (_, _) => UpdateExtra();
-        UpdateExtra();
         var form = new StackPanel { Spacing = 7, Children = { name, kind, metal } };
+        var unitRows = Arr(Api.Invoke("stringing", new { file = _file })?["inverters"]);
+        var links = new Dictionary<string, JsonObject>();
+        var linkHolder = new StackPanel();
+        form.Children.Add(linkHolder);
+        ComboBox link = new();
+        string Key(JsonNode? binding) => binding is null ? "" :
+            S(binding,"kind") == "mppt" ? $"dc:{S(binding,"unit_id")}:{N(binding,"input")}" : $"ac:{S(binding,"unit_id")}";
+        void BuildLinks()
+        {
+            var dc = Sel(kind).StartsWith("dc_", StringComparison.Ordinal);
+            fields[1].box.Visibility = dc ? Visibility.Visible : Visibility.Collapsed;
+            var choices = new List<(string, string)> { ("", T("cable_unbound")) };
+            links.Clear();
+            foreach (var row in unitRows)
+            {
+                var unit = row?["unit"];
+                var id = S(unit,"id");
+                var title = S(unit,"name");
+                if (dc)
+                {
+                    var mppts = Arr(unit?["mppts"]);
+                    for (var i = 0; i < mppts.Count; i++)
+                    {
+                        var binding = new JsonObject { ["kind"] = "mppt", ["unit_id"] = id, ["input"] = i };
+                        var key = Key(binding);
+                        choices.Add((key, $"{title} / MPPT {i + 1}"));
+                        links[key] = binding;
+                    }
+                }
+                else
+                {
+                    var binding = new JsonObject { ["kind"] = "inverter_ac", ["unit_id"] = id };
+                    var key = Key(binding);
+                    choices.Add((key, title));
+                    links[key] = binding;
+                }
+            }
+            linkHolder.Children.Clear();
+            link = Combo(T("cable_link"), choices, Key(original?["binding"]));
+            linkHolder.Children.Add(link);
+            void UpdateFields()
+            {
+                fields[4].box.IsEnabled = !(dc && links.ContainsKey(Sel(link)));
+                fields[5].box.IsEnabled = !links.ContainsKey(Sel(link));
+            }
+            link.SelectionChanged += (_, _) => UpdateFields();
+            UpdateFields();
+        }
+        kind.SelectionChanged += (_, _) => BuildLinks();
+        BuildLinks();
         foreach (var field in fields) form.Children.Add(field.box);
         var ampacity = Num(T("cable_ampacity"), N(original, "ampacity_a", double.NaN), 280);
         var derating = Num(T("cable_derating"), N(original, "derating", 1), 280);
         var candidates = new TextBox { Header = T("cable_candidates"), TextWrapping = TextWrapping.Wrap,
             Text = string.Join("; ", Arr(original?["candidates"]).Select(row =>
                 N(row, "area_mm2").ToString(CultureInfo.InvariantCulture) + "," + N(row, "ampacity_a").ToString(CultureInfo.InvariantCulture))) };
-        form.Children.Add(ampacity); form.Children.Add(derating); form.Children.Add(candidates);
+        var factor = Num(T("cable_sizing_factor"), N(original, "sizing_factor", 1), 280);
+        var protection = Num(T("cable_protection"), N(original, "protection_a", double.NaN), 280);
+        form.Children.Add(ampacity); form.Children.Add(derating); form.Children.Add(factor);
+        form.Children.Add(protection); form.Children.Add(candidates);
         var dialog = new ContentDialog { Title = T(original is null ? "cable_add" : "cable_edit"), XamlRoot = Content.XamlRoot,
             Content = new ScrollViewer { Content = form, MaxHeight = 535 }, PrimaryButtonText = T("cable_preview"), CloseButtonText = T("cancel") };
         var status = Note("");
@@ -170,6 +224,9 @@ public sealed partial class MainWindow
             {
                 result["ampacity_a"] = double.IsNaN(ampacity.Value) ? null : JsonValue.Create(ampacity.Value);
                 result["derating"] = derating.Value;
+                result["sizing_factor"] = factor.Value;
+                result["protection_a"] = double.IsNaN(protection.Value) ? null : JsonValue.Create(protection.Value);
+                if (links.TryGetValue(Sel(link), out var binding)) result["binding"] = binding.DeepClone();
                 var sizes = new JsonArray();
                 foreach (var entry in candidates.Text.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
                 {
@@ -179,7 +236,8 @@ public sealed partial class MainWindow
                         ["ampacity_a"] = double.Parse(pair[1], CultureInfo.InvariantCulture) });
                 }
                 result["candidates"] = sizes;
-                Api.Invoke("cable_plan", new { file = _file, circuits = new[] { result }, mode = "preview" });
+                var preview = Api.Invoke("cable_plan", new { file = _file, circuits = new[] { result }, mode = "preview" });
+                if (Arr(preview?["row_errors"]).FirstOrDefault() is JsonNode error) throw new ArgumentException(error.GetValue<string>());
             }
             catch (Exception error) { args.Cancel = true; status.Text = error.Message; }
         };

@@ -87,16 +87,29 @@ pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Resul
     let ac_w: f64 = electrical.inverters.iter().filter_map(|u| project.library.inverter(&u.inverter_id).map(|i| i.pac_max_w)).sum();
     let (mut dc_loss, mut ac_loss) = (0.0, 0.0);
     let mut rows = vec![];
-    for (i, circuit) in circuits.iter().enumerate() {
-        let estimate = circuit.estimate().map_err(|error| e("CABLE_PLAN", format!("Cable {}: {error}", i + 1)))?;
-        if circuit.is_dc() { dc_loss += estimate.loss_w; } else { ac_loss += estimate.loss_w; }
-        rows.push(estimate);
+    let mut errors = vec![];
+    for (i, circuit) in circuits.iter_mut().enumerate() {
+        let checked = solarcraft_model::cable::resolve(&project, &electrical, circuit)
+            .and_then(|row| row.estimate().map(|estimate| (row, estimate)));
+        match checked {
+            Ok((row, estimate)) => {
+                *circuit = row;
+                if circuit.is_dc() { dc_loss += estimate.loss_w; } else { ac_loss += estimate.loss_w; }
+                rows.push(Some(estimate));
+                errors.push(None);
+            }
+            Err(error) if matches!(mode, "preview" | "import_routes" | "save") => {
+                rows.push(None);
+                errors.push(Some(error));
+            }
+            Err(error) => return Err(e("CABLE_PLAN", format!("Cable {}: {error}", i + 1))),
+        }
     }
     let fraction = |loss, rating| (rating > 0.0).then(|| 100.0 * loss / rating);
     let dc_pct = fraction(dc_loss, dc_w);
     let ac_pct = fraction(ac_loss, ac_w);
     if mode == "apply_hourly" {
-        if circuits.is_empty() || rows.iter().any(|r| r.ampacity_ok == Some(false)) {
+        if circuits.is_empty() || rows.iter().flatten().any(|r| r.ampacity_ok == Some(false) || r.protection_ok == Some(false)) {
             return Err(e("CABLE_PLAN", "Add at least one circuit and resolve known ampacity shortfalls before applying."));
         }
         let choose = |present: bool, pct: Option<f64>| -> Result<Option<f64>> {
@@ -107,9 +120,16 @@ pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Resul
         project.hourly_cables = solarcraft_model::cable::HourlyLosses {
             dc_pct: choose(circuits.iter().any(Circuit::is_dc), dc_pct)?,
             ac_pct: choose(circuits.iter().any(|c| !c.is_dc()), ac_pct)?,
+            routed: vec![],
         };
     }
-    if matches!(mode, "save" | "apply" | "apply_hourly") {
+    if mode == "apply_routed" {
+        let linked: Vec<_> = circuits.iter().filter(|c| c.binding.is_some()).cloned().collect();
+        if linked.is_empty() { return Err(e("CABLE_PLAN", "Add at least one linked circuit.")); }
+        project.hourly_cables = solarcraft_model::cable::HourlyLosses { routed: linked, ..Default::default() };
+        solarcraft_model::cable::routed(&project, &electrical).map_err(|error| e("CABLE_PLAN", error))?;
+    }
+    if matches!(mode, "save" | "apply" | "apply_hourly" | "apply_routed") {
         if mode == "apply" {
             let apply = |field: &mut Field<f64>, pct: Option<f64>| -> Result<()> {
                 let v = pct.filter(|v| (0.0..100.0).contains(v)).ok_or_else(|| {
@@ -118,7 +138,7 @@ pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Resul
                 *field = Field::user(v);
                 Ok(())
             };
-            if circuits.is_empty() || rows.iter().any(|r| r.ampacity_ok == Some(false)) {
+            if circuits.is_empty() || rows.iter().flatten().any(|r| r.ampacity_ok == Some(false) || r.protection_ok == Some(false)) {
                 return Err(e("CABLE_PLAN", "Add at least one circuit and resolve known ampacity shortfalls before applying."));
             }
             project.hourly_cables = Default::default();
@@ -128,7 +148,7 @@ pub fn cable_plan(path: &Path, edits: Option<Vec<Circuit>>, mode: &str) -> Resul
         project.cable_plan = circuits.clone();
         save(&mut store, &project, if mode == "apply" { "apply cable losses" } else { "save cable plan" })?;
     }
-    Ok(json!({"circuits": circuits, "estimates": rows, "dc_loss_pct": dc_pct, "ac_loss_pct": ac_pct,
+    Ok(json!({"circuits": circuits, "estimates": rows, "row_errors": errors, "dc_loss_pct": dc_pct, "ac_loss_pct": ac_pct,
         "dc_reference_w": dc_w, "ac_reference_w": ac_w,
         "hourly": project.hourly_cables, "applied_dc_pct": project.losses.dc_wiring_pct.value, "applied_ac_pct": project.losses.ac_wiring_pct.value}))
 }
@@ -147,7 +167,7 @@ fn import_routes(project: &Project, circuits: &mut Vec<Circuit>) {
             circuits.push(Circuit { label: label[..max].into(), kind: Kind::DcString, metal: Metal::Copper,
                 length_m: route.home_run_m / 2.0, extra_m: route.jumper_m, area_mm2: 4.0, temperature_c: 60.0,
                 voltage_v: route.modules.len() as f64 * module.v_mp, current_a: module.i_mp, circuits: 1,
-                target_drop_pct: 1.5, source_route: Some(route.id.clone()), ampacity_a: None, derating: 1.0, candidates: vec![] });
+                target_drop_pct: 1.5, source_route: Some(route.id.clone()), ampacity_a: None, derating: 1.0, candidates: vec![], binding: None, sizing_factor: 1.0, protection_a: None, design_current_a: None });
         }
     }
 }
