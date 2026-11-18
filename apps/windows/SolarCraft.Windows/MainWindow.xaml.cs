@@ -75,6 +75,7 @@ public sealed partial class MainWindow : Window
         RoofHint.Text = T("roof_hint"); ApplyRoofButton.Content = T("apply_roof");
         PhotoPlanButton.Content = T("photo_open"); SavedPhotoButton.Content = T("photo_resume");
         PhotoArrayBox.Header = T("photo_array");
+        AddRoofArrayButton.Content = T("add_pv_array"); RoofObstacleHint.Text = T("roof_obstacle_formats");
         LangBox.Header = T("language"); FormatBox.Header = T("format"); DesignerBox.Header = T("designer"); ExportButton.Content = T("export_report");
         ReportTypeBox.Header = T("report_type");
         foreach (ComboBoxItem option in ReportTypeBox.Items) option.Content = T((string)option.Tag);
@@ -118,6 +119,7 @@ public sealed partial class MainWindow : Window
     {
         _file = path;
         _designArray = 0;
+        _roofArray = 0;
         _previewSections = null;
         _reportExclusions.Clear();
         Nav.IsEnabled = true; UndoButton.IsEnabled = true; SimulateButton.IsEnabled = true;
@@ -138,6 +140,7 @@ public sealed partial class MainWindow : Window
             JsonNode? r = null;
             try { r = Api.Invoke("explain", new { file = _file }); } catch (CoreError ce) when (ce.Code == "NO_RESULTS") { }
             ShowResults(r);
+            RefreshWorkflowNavigation();
             BuildPlantPages();
             UpdateStep();
         });
@@ -180,7 +183,6 @@ public sealed partial class MainWindow : Window
         foreach (var (box, key) in new[] { (KwpBox, "target_kwp"), (TiltBox, "tilt"), (AzimuthBox, "azimuth"), (MpsBox, "modules_per_string"), (StringsBox, "strings") })
             box.PlaceholderText = Api.IsUser(a[key]) ? "" : T("derived");
         EquipmentText.Text = $"{T("inverter")}: {Api.Num(a["inverter_count"])}";
-        ShowRoof(arrays[0]?["roof"]);
         PopulatePhotoArrays();
         _loading = false;
     }
@@ -208,6 +210,7 @@ public sealed partial class MainWindow : Window
         RidgeBox.Visibility = i == 1 ? Visibility.Visible : Visibility.Collapsed;
         CustomBox.Visibility = DraftPanel.Visibility = i == 2 ? Visibility.Visible : Visibility.Collapsed;
         ObstaclesBox.Visibility = SetbackBox.Visibility = ClearanceBox.Visibility = i == 3 ? Visibility.Collapsed : Visibility.Visible;
+        if (RoofObstacleHint is not null) RoofObstacleHint.Visibility = ObstaclesBox.Visibility;
     }
 
     // ---- Click-to-add outline editor (1 m grid, 0.1 m snap, y up the slope) ----
@@ -267,7 +270,8 @@ public sealed partial class MainWindow : Window
 
     private void OnApplyRoof(object sender, RoutedEventArgs e)
     {
-        if (_file is null) return;
+        if (_file is null || PhotoArrayBox.SelectedIndex < 0) return;
+        var array = PhotoArrayBox.SelectedIndex;
         double eave = EaveBox.Value, ridge = RidgeBox.Value, slope = SlopeBox.Value;
         List<double[]>? outline = RoofShapeBox.SelectedIndex switch
         {
@@ -277,14 +281,16 @@ public sealed partial class MainWindow : Window
             _ => null,
         };
         if (outline is { Count: < 3 }) { ShowError(T("custom_points")); return; }
-        Try(() =>
+        if (Try(() =>
         {
-            var r = outline is null
-                ? Api.Invoke("set_roof", new { file = _file, array = 0, outline = (object?)null })!
-                : Api.Invoke("set_roof", new { file = _file, array = 0, outline, obstacles = ParseObstacles(ObstaclesBox.Text), obstacle_heights = ParseObstacleHeights(ObstaclesBox.Text), @params = new { setback = SetbackBox.Value, obstacle_clearance = ClearanceBox.Value } })!;
+            var obstacleText = outline is null ? "" : ObstaclesBox.Text.Trim();
+            var obstacleDocument = obstacleText.StartsWith('{') ? JsonNode.Parse(obstacleText)!.AsObject() : null;
+            var obstacles = obstacleDocument?["polygons"] ?? System.Text.Json.JsonSerializer.SerializeToNode(ParseObstacles(obstacleText));
+            var obstacle_heights = obstacleDocument?["heights"] ?? System.Text.Json.JsonSerializer.SerializeToNode(ParseObstacleHeights(obstacleText));
+            var r = Api.Invoke("set_roof", new { file = _file, array, outline, obstacles, obstacle_heights,
+                @params = new { setback = SetbackBox.Value, obstacle_clearance = ClearanceBox.Value } })!;
             if (r["modules_fit"] is JsonNode n) ShowInfo($"{n.GetValue<int>()} {T("modules_fit")}");
-        });
-        Reload();
+        })) Reload();
     }
 
     private void ShowRoof(JsonNode? roof)
@@ -406,8 +412,19 @@ public sealed partial class MainWindow : Window
         UpdateStep();
     }
 
-    private NavigationViewItem[] Steps => [NavProject, NavSite, NavLoads, NavDesign, NavRoof, NavScene,
+    private NavigationViewItem[] AllSteps => [NavProject, NavSite, NavLoads, NavDesign, NavRoof, NavScene,
         NavElectrical, NavStorage, NavCables, NavPlans, NavEconomics, NavResults, NavReport];
+    private NavigationViewItem[] Steps => AllSteps.Where(step => step.Visibility == Visibility.Visible).ToArray();
+
+    private void RefreshWorkflowNavigation()
+    {
+        var settings = Api.Invoke("workflow_get", new { file = _file });
+        var tags = Arr(settings?["steps"]).Select(tag => tag?.GetValue<string>()).ToHashSet();
+        foreach (var step in AllSteps)
+            step.Visibility = tags.Contains(step.Tag as string) ? Visibility.Visible : Visibility.Collapsed;
+        if (Nav.SelectedItem is NavigationViewItem selected && selected.Visibility == Visibility.Collapsed)
+            Nav.SelectedItem = NavSite;
+    }
 
     private void UpdateStep()
     {

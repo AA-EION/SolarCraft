@@ -72,7 +72,10 @@ pub(crate) fn compose(view: &mut View, input: &ReportInput) {
     } else if view.report_type == SystemPlanner {
         view.title = tr(l, "System planner report", "Informe de diseño del sistema", "Anlagenplanungsbericht", "Relatório de projeto do sistema");
     }
-    let mut overview = ContentSection::new("production", s["monthly_chart"]);
+    let chart = if input.project.workflow.system.islanded() {
+        tr(l, "Monthly PV energy at the AC bus", "Energía FV mensual en el bus CA", "Monatliche PV-Energie am AC-Inselnetz", "Energia FV mensal no barramento CA")
+    } else { s["monthly_chart"].into() };
+    let mut overview = ContentSection::new("production", chart);
     overview.figure(view.monthly_svg.clone(), "", view);
     view.contents.push(overview);
 
@@ -227,6 +230,21 @@ fn planner_sections(input: &ReportInput) -> Vec<ContentSection> {
         }
     }
     let mut out = vec![datasheets];
+    if !p.cable_plan.is_empty() {
+        let mut cables = ContentSection::new("specified_cables", tr(l, "Cable estimates", "Estimación de cables", "Leitungsverluste", "Estimativa de cabos"));
+        cables.text(tr(l, "Resistive loss at the specified operating point. The simulation uses the DC and AC wiring percentages listed under Assumptions.",
+            "Pérdida resistiva en el punto indicado. La simulación utiliza los porcentajes de cableado de la sección Supuestos.",
+            "Ohmscher Verlust am angegebenen Betriebspunkt. Die Simulation verwendet die Leitungsverluste unter Annahmen.",
+            "Perda resistiva no ponto indicado. A simulação utiliza os percentuais de cabeamento nas premissas."));
+        cables.table(vec![
+            tr(l, "Circuit", "Circuito", "Stromkreis", "Circuito"),
+            "mm²".into(), "m".into(), "ΔV (%)".into(), "W".into(),
+        ], p.cable_plan.iter().filter_map(|c| {
+            let e = c.estimate().ok()?;
+            Some([c.label.clone(), n(c.area_mm2, 2), n(e.conductor_m, 1), n(e.drop_pct, 2), n(e.loss_w, 1)])
+        }));
+        out.push(cables);
+    }
     if let Some(scene) = &p.scene {
         let mut routing = ContentSection::new("string_routes", tr(l, "String cable routes", "Rutas de cableado de cadenas", "String-Kabelwege", "Rotas de cabos das strings"));
         routing.table(vec![

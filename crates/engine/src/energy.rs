@@ -216,6 +216,7 @@ pub struct EnergyResult { pub flows: Flows, pub balance: Balance }
 /// `load_w[k]`: consumption in hour k (UTC index); `local_hour[k]`: local hour of year (0..8759).
 pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[u32], f_ac: f64) -> Result<EnergyResult, String> {
     let n = local_hour.len();
+    let islanded = p.workflow.system.islanded();
     let full_feed_in = p.grid.feed_in == FeedIn::Full;
     let export_limit = p.grid.export_limit_kw.map(|k| k * 1000.0);
     let crit = p.loads.critical_fraction;
@@ -281,9 +282,9 @@ pub fn dispatch(p: &Project, units: &[UnitInput], load_w: &[f64], local_hour: &[
 
     for k in 0..n {
         let lh = local_hour[k];
-        let outage = outage_set.contains(&lh);
+        let outage = islanded || outage_set.contains(&lh);
         let load = load_w.get(k).copied().unwrap_or(0.0);
-        let served_target = if outage { load * crit } else { load };
+        let served_target = if outage && !islanded { load * crit } else { load };
         // Inverter standby when a unit has no DC input.
         let mut standby: f64 = units.iter().enumerate().filter(|(i, u)| u.dc_w[k] <= 0.0 && Some(*i) != hybrid_unit).map(|(_, u)| u.spec.night_w).sum();
         if let Some(bi) = batinv { standby += bi.standby_w; }

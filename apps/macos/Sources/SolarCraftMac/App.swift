@@ -53,6 +53,19 @@ enum Page: String, CaseIterable, Identifiable {
         case .workflow_presentation: return "doc.richtext"
         }
     }
+    var workflowTag: String {
+        switch self {
+        case .workflow_site: return "site"
+        case .workflow_pv_modules: return "design"
+        case .scene3d: return "scene"
+        case .battery: return "storage"
+        case .workflow_cables: return "cables"
+        case .workflow_plans: return "plans"
+        case .workflow_results: return "results"
+        case .workflow_presentation: return "report"
+        default: return rawValue
+        }
+    }
     static let groups: [(String, [Page])] = [
         ("workflow_setup", [.project, .workflow_site, .loads]),
         ("workflow_system", [.workflow_pv_modules, .roof, .scene3d, .electrical, .battery, .workflow_cables, .workflow_plans]),
@@ -63,6 +76,10 @@ enum Page: String, CaseIterable, Identifiable {
 struct RootView: View {
     @EnvironmentObject var m: AppModel
     @State private var page: Page? = .project
+    private var steps: [Page] {
+        guard let visible = m.workflow["steps"] as? [String] else { return Page.allCases }
+        return Page.allCases.filter { visible.contains($0.workflowTag) }
+    }
     private var canSimulate: Bool {
         m.project?.weather != nil && !m.busy && !m.issues.contains { $0.severity == "error" }
     }
@@ -72,7 +89,7 @@ struct RootView: View {
                 ForEach(Page.groups.indices, id: \.self) { index in
                     let (group, pages) = Page.groups[index]
                     Section(m.t(group)) {
-                        ForEach(pages) { p in Label(m.t(p.rawValue), systemImage: p.icon).tag(p) }
+                        ForEach(pages.filter { steps.contains($0) }) { p in Label(m.t(p.rawValue), systemImage: p.icon).tag(p) }
                     }
                 }
             }.disabled(m.project == nil || m.busy).navigationSplitViewColumnWidth(220)
@@ -91,7 +108,7 @@ struct RootView: View {
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     let current = page ?? .project
-                    let index = Page.allCases.firstIndex(of: current) ?? 0
+                    let index = steps.firstIndex(of: current) ?? 0
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(m.t(current.rawValue)).font(.title2.bold()).accessibilityAddTraits(.isHeader)
@@ -103,10 +120,10 @@ struct RootView: View {
                         }
                         Spacer()
                         if index > 0 {
-                            Button(m.t("workflow_back")) { page = Page.allCases[index - 1] }
+                            Button(m.t("workflow_back")) { page = steps[index - 1] }
                         }
-                        if index + 1 < Page.allCases.count {
-                            Button(m.t("workflow_next")) { page = Page.allCases[index + 1] }
+                        if index + 1 < steps.count {
+                            Button(m.t("workflow_next")) { page = steps[index + 1] }
                                 .disabled(current == .workflow_results && m.summary == nil)
                         }
                     }.padding(.horizontal, 20).padding(.vertical, 10).disabled(m.busy)
@@ -130,6 +147,9 @@ struct RootView: View {
             }
             .onChange(of: m.completedRuns) { _, _ in page = .workflow_results }
             .onChange(of: m.url) { _, _ in page = .project }
+            .onChange(of: steps) { _, visible in
+                if let page, !visible.contains(page) { self.page = .workflow_site }
+            }
             .toolbar {
                 if m.busy { ProgressView(value: m.progress).frame(width: 120); Button(m.t("cancel")) { m.cancel() } }
                 Button { m.simulate() } label: { Label(m.t("simulate"), systemImage: "play.fill") }.disabled(!canSimulate)
@@ -441,6 +461,9 @@ func parseObstacles(_ text: String) -> [[[Double]]] {
 struct RoofPage: View {
     @EnvironmentObject var m: AppModel
     @State private var showPhoto = false
+    @State private var selectedArray = 0
+    private var arrays: [ProjectDoc.ArrayDoc] { m.project?.arrays ?? [] }
+    private var roof: ProjectDoc.RoofDoc? { arrays.indices.contains(selectedArray) ? arrays[selectedArray].roof : nil }
     @State private var shape = "rect"
     @State private var eave = 10.0
     @State private var ridge = 6.0
@@ -466,6 +489,10 @@ struct RoofPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Form {
+                Picker(m.t("photo_array"), selection: $selectedArray) {
+                    ForEach(arrays.indices, id: \.self) { i in Text(arrays[i].name.value).tag(i) }
+                }
+                Button(m.t("add_pv_array")) { if let index = m.addArray() { selectedArray = index } }
                 Button(m.t("photo_plan")) { showPhoto = true }.disabled(m.url == nil)
                 Picker(m.t("roof_shape"), selection: $shape) {
                     Text(m.t("roof_rect")).tag("rect")
@@ -493,34 +520,49 @@ struct RoofPage: View {
                 }
                 if shape != "none" {
                     TextField(m.t("obstacles"), text: $obstacles)
+                    Text(m.t("roof_obstacle_formats")).font(.caption).foregroundStyle(.secondary)
                     TextField(m.t("setback"), value: $setback, format: .number)
                     TextField(m.t("clearance"), value: $clearance, format: .number)
                 }
                 Text(m.t("roof_hint")).font(.caption).foregroundStyle(.secondary)
                 Button(m.t("apply_roof")) {
-                    m.setRoof(outline: shape == "none" ? nil : outline(), obstacles: parseObstacles(obstacles), heights: parseObstacleHeights(obstacles), setback: setback, clearance: clearance)
+                    let ring = outline()
+                    guard shape == "none" || ring != nil else { m.error = m.t("custom_points"); return }
+                    let text = obstacles.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.hasPrefix("{") {
+                        guard let o = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? JSONDict,
+                              let polygons = o["polygons"] as? [[[Double]]], let heights = o["heights"] as? [Double]
+                        else { m.error = m.t("roof_obstacle_formats"); return }
+                        m.setRoof(array: selectedArray, outline: ring, obstacles: polygons, heights: heights, setback: setback, clearance: clearance)
+                    } else {
+                        m.setRoof(array: selectedArray, outline: ring, obstacles: parseObstacles(text), heights: parseObstacleHeights(text), setback: setback, clearance: clearance)
+                    }
                 }.keyboardShortcut(.return, modifiers: [.command])
             }
-            if let roof = m.project?.arrays.first?.roof {
+            if let roof {
                 RoofPreview(roof: roof).frame(height: 300)
                 Text("\(roof.modules.count) \(m.t("modules_fit"))").font(.headline)
             }
         }
         .onAppear(perform: loadFromProject)
-        .sheet(isPresented: $showPhoto) { PhotoPlanSheet().environmentObject(m) }
+        .onChange(of: selectedArray) { _, _ in loadFromProject() }
+        .sheet(isPresented: $showPhoto, onDismiss: loadFromProject) { PhotoPlanSheet(initialArray: selectedArray).environmentObject(m) }
     }
 
     private func loadFromProject() {
-        guard let roof = m.project?.arrays.first?.roof else { return }
+        eave = 10; ridge = 6; slope = 5
+        guard let roof else {
+            shape = "rect"; custom = ""; obstacles = ""; setback = 0.4; clearance = 0.3
+            return
+        }
         shape = "custom"
         custom = roof.face.outline.map { "\($0[0]),\($0[1])" }.joined(separator: "; ")
-        obstacles = roof.face.obstacles.compactMap { pts -> String? in
-            let xs = pts.map { $0[0] }, ys = pts.map { $0[1] }
-            guard let x0 = xs.min(), let x1 = xs.max(), let y0 = ys.min(), let y1 = ys.max() else { return nil }
-            let i = roof.face.obstacles.firstIndex { $0 == pts } ?? 0
-            let h = i < roof.face.obstacle_heights.count ? roof.face.obstacle_heights[i] : 1.0
-            return "\(x0),\(y0),\(x1 - x0),\(y1 - y0),\(h)"
-        }.joined(separator: "; ")
+        if roof.face.obstacles.isEmpty { obstacles = "" } else {
+            let payload: JSONDict = ["polygons": roof.face.obstacles, "heights": roof.face.obstacle_heights]
+            if let bytes = try? JSONSerialization.data(withJSONObject: payload) {
+                obstacles = String(decoding: bytes, as: UTF8.self)
+            }
+        }
         setback = roof.params.setback
         clearance = roof.params.obstacle_clearance
     }

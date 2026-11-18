@@ -10,6 +10,8 @@ pub mod derive;
 pub mod equipment;
 pub mod plant;
 pub mod validate;
+pub mod workflow;
+pub mod cable;
 
 use serde::{Deserialize, Serialize};
 
@@ -200,6 +202,10 @@ pub struct Project {
     pub loads: plant::Loads,
     #[serde(default)]
     pub storage: Option<plant::Storage>,
+    #[serde(default, skip_serializing_if = "workflow::Workflow::is_default")]
+    pub workflow: workflow::Workflow,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cable_plan: Vec<cable::Circuit>,
     #[serde(default)]
     pub tariff: plant::Tariff,
     #[serde(default)]
@@ -246,7 +252,7 @@ impl Project {
             simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
-            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None,
+            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![],
             tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None, roof_photos: vec![],
         };
         derive::derive(&mut p);

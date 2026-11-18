@@ -18,6 +18,7 @@ final class AppModel: ObservableObject {
     @Published var raw: JSONDict = [:]
     @Published var summary: JSONDict?
     @Published var designSchedule: JSONDict?
+    @Published var workflow: JSONDict = [:]
     @Published private(set) var completedRuns = 0
     @Published var stringingDoc: JSONDict?
     @Published var dayRows: [JSONDict] = []
@@ -48,6 +49,7 @@ final class AppModel: ObservableObject {
             issues = try Core.invoke("validate", ["file": file], as: IssuesResult.self).issues
             results = try? Core.invoke("explain", ["file": file], as: Explain.self)
             raw = (try? Core.invokeJSON("get_project", ["file": file])) ?? [:]
+            workflow = (try? Core.invokeJSON("workflow_get", ["file": file])) ?? [:]
             summary = try? Core.invokeJSON("results_summary", ["file": file])
             stringingDoc = try? Core.invokeJSON("stringing", ["file": file])
             designSchedule = try? Core.invokeJSON("design_schedule", ["file": file])
@@ -68,6 +70,32 @@ final class AppModel: ObservableObject {
             if !errs.isEmpty { error = errs.joined(separator: "\n") }
         }
         reload()
+    }
+
+    var systemType: String { workflowSettings["system"] as? String ?? "custom" }
+    var workflowSettings: JSONDict { workflow["settings"] as? JSONDict ?? [:] }
+    var isIslanded: Bool { workflow["islanded"] as? Bool ?? false }
+    func setWorkflow(system: String, tools: String) {
+        run { workflow = try Core.invokeJSON("workflow_set", ["file": file, "value": ["system": system, "tools": tools]]) }
+        if error == nil { reload() }
+    }
+
+    func addArray() -> Int? {
+        var index: Int?
+        run { index = try Core.invokeJSON("add_array", ["file": file])["array"] as? Int }
+        if error == nil { reload() }
+        return index
+    }
+
+    func cablePlan(mode: String, circuits: [JSONDict]? = nil) -> JSONDict? {
+        var result: JSONDict?
+        run {
+            var request: JSONDict = ["file": file, "mode": mode]
+            if let circuits { request["circuits"] = circuits }
+            result = try Core.invokeJSON("cable_plan", request)
+        }
+        if error == nil && (mode == "apply" || mode == "save") { reload() }
+        return result
     }
 
     func setCableLosses(dc: Double, ac: Double) {
@@ -92,7 +120,7 @@ final class AppModel: ObservableObject {
             if saveToLibrary { _ = try Core.invokeRaw("library_save", ["kind": kind, "record": record]) }
             notice = "\(kind) \(record["id"] as? String ?? "") ✓"
         }
-        reload()
+        if error == nil { reload() }
     }
 
     func addGenericStorage() { run { _ = try Core.invokeRaw("add_generic_storage_equipment", ["file": file]) }; reload() }
@@ -183,9 +211,9 @@ final class AppModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func setRoof(outline: [[Double]]?, obstacles: [[[Double]]], heights: [Double], setback: Double, clearance: Double) {
+    func setRoof(array: Int, outline: [[Double]]?, obstacles: [[[Double]]], heights: [Double], setback: Double, clearance: Double) {
         run {
-            var params: [String: Any] = ["file": file, "array": 0]
+            var params: [String: Any] = ["file": file, "array": array, "array": 0]
             if let o = outline {
                 params["outline"] = o
                 params["obstacles"] = obstacles

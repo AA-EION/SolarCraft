@@ -198,8 +198,25 @@ public sealed partial class MainWindow
             var fid = S(f, "id");
             p.Children.Add(Note($"{S(f, "name")} · {f["modules"]} modules · {f["strings"]} strings · array {S(f, "array_id")}"));
             var mps = Num(T("modules_per_string"), 8, 200);
+            var storedField = Arr(_project?["scene"]?["fields"]).FirstOrDefault(row => S(row, "id") == fid);
+            var point = Arr(storedField?["inverter_at"]);
+            var toInverter = new CheckBox { Content = T("workflow_home_run"), IsChecked = point.Count == 3 };
+            double Coordinate(int index) => point.Count == 3 ? point[index]!.GetValue<double>() : 0.0;
+            var x = Num("X (m)", Coordinate(0), 125);
+            var y = Num("Y (m)", Coordinate(1), 125);
+            var z = Num("Z (m)", Coordinate(2), 125);
+            var coordinates = Row(x, y, z);
+            void CoordinateVisibility() => coordinates.Visibility = toInverter.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+            toInverter.Checked += (_, _) => CoordinateVisibility();
+            toInverter.Unchecked += (_, _) => CoordinateVisibility();
+            CoordinateVisibility();
+            p.Children.Add(toInverter);
+            p.Children.Add(coordinates);
             p.Children.Add(Row(mps,
-                Btn(T("route_strings"), () => SceneEdit(new object[] { new { op = "route_strings", field = fid, modules_per_string = (int)mps.Value } })),
+                Btn(T("route_strings"), () => SceneEdit(new object[] { new {
+                    op = "route_strings", field = fid, modules_per_string = (int)mps.Value,
+                    inverter_at = toInverter.IsChecked == true ? new[] { x.Value, y.Value, z.Value } : null
+                } })),
                 Btn(T("fit_to_array"), () => { Try(() => Api.Invoke("scene_bind", new { file = _file, field = fid, array_id = string.IsNullOrEmpty(S(f, "array_id")) ? FirstArray() : S(f, "array_id"), match_array = true })); Reload(); })));
             if (hit.Contains("/m")) p.Children.Add(Btn("Remove " + hit.Split('/').Last(), () => SceneEdit(new object[] { new { op = "remove_modules", field = fid, modules = new[] { hit } } })));
             p.Children.Add(Btn(T("delete_selected"), () => { _hit = null; SceneEdit(new object[] { new { op = "remove_field", id = fid } }); }));

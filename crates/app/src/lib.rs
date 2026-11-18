@@ -19,6 +19,7 @@ pub mod catalog_ops;
 mod load_import;
 pub mod photo;
 pub mod plant_ops;
+pub mod planning;
 pub mod scene_ops;
 pub mod ui_strings;
 pub mod userlib;
@@ -113,7 +114,7 @@ pub fn load_weather(s: &Store, p: &Project) -> Result<(Weather, String)> {
 pub fn simulate(path: &Path, progress: impl FnMut(f64) -> bool) -> Result<SimResult> {
     let (mut s, p) = open(path)?;
     let (w, hash) = load_weather(&s, &p)?;
-    let series = plant_ops::load_series(&s, &p)?;
+    let series = plant_ops::load_series(&s, &solarcraft_model::workflow::Workflow::active(&p))?;
     let r = solarcraft_engine::simulate(&p, &w, &hash, series.as_deref(), progress).map_err(|x| if x.0 == "cancelled" { e("CANCELLED", x) } else { e("SIMULATION", x) })?;
     let bytes = serde_json::to_vec(&r).map_err(|x| e("RESULT_ENCODE", x))?;
     let kind = format!("results:{}", r.manifest.inputs_hash);
@@ -211,7 +212,8 @@ pub fn report_view_selected(path: &Path, lang: &str, report_type: ReportType, de
     let (s, p) = open(path)?;
     let r = current_results(&s, &p)?.ok_or_else(|| e("NO_RESULTS", "Run the simulation for the current design first."))?;
     let (w, _) = load_weather(&s, &p)?;
-    let input = solarcraft_report::ReportInput { project: &p, result: &r, lang: l, date: today_utc(), designer: designer.into(),
+    let active = solarcraft_model::workflow::Workflow::active(&p);
+    let input = solarcraft_report::ReportInput { project: &active, result: &r, lang: l, date: today_utc(), designer: designer.into(),
         weather: solarcraft_report::WeatherInfo { provider: w.provenance.provider.clone(), dataset: w.provenance.dataset.clone(), licence: w.provenance.licence.clone(), horizon_applied: w.horizon_applied } };
     let mut view = solarcraft_report::build_view_for(&input, report_type);
     photo::report_figures(&s, &p, &mut view)?;

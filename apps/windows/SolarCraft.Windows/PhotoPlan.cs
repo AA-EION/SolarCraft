@@ -29,16 +29,47 @@ public sealed partial class MainWindow
         return bitmap;
     }
 
+    private int _roofArray;
+    private bool _loadingRoofArrays;
+
     private void PopulatePhotoArrays()
     {
-        var index = Math.Max(0, PhotoArrayBox.SelectedIndex);
         var arrays = Arr(_project?["arrays"]);
+        _loadingRoofArrays = true;
         PhotoArrayBox.ItemsSource = arrays.Select(a => Api.Str(a?["name"])).ToList();
-        PhotoArrayBox.SelectedIndex = arrays.Count > 0 ? Math.Min(index, arrays.Count - 1) : -1;
-        RefreshPhotoArray();
+        PhotoArrayBox.SelectedIndex = arrays.Count > 0 ? Math.Clamp(_roofArray, 0, arrays.Count - 1) : -1;
+        _loadingRoofArrays = false;
+        LoadSelectedRoof();
     }
 
-    private void OnPhotoArray(object sender, SelectionChangedEventArgs e) => RefreshPhotoArray();
+    private void OnAddRoofArray(object sender, RoutedEventArgs e)
+    {
+        if (_file is null) return;
+        if (Try(() => _roofArray = (int)N(Api.Invoke("add_array", new { file = _file }), "array"))) Reload();
+    }
+
+    private void OnPhotoArray(object sender, SelectionChangedEventArgs e) => LoadSelectedRoof();
+
+    private void LoadSelectedRoof()
+    {
+        if (_loadingRoofArrays || PhotoArrayBox is null) return;
+        var index = PhotoArrayBox.SelectedIndex;
+        var arrays = Arr(_project?["arrays"]);
+        if (index < 0 || index >= arrays.Count) return;
+        _roofArray = index;
+        var roof = arrays[index]?["roof"];
+        RoofShapeBox.SelectedIndex = roof is null ? 0 : 2;
+        EaveBox.Value = 10; RidgeBox.Value = 6; SlopeBox.Value = 5;
+        CustomBox.Text = string.Join("; ", Arr(roof?["face"]?["outline"]).Select(p =>
+            string.Join(",", Arr(p).Select(x => x!.GetValue<double>().ToString("R", System.Globalization.CultureInfo.InvariantCulture)))));
+        var obstacles = Arr(roof?["face"]?["obstacles"]);
+        var heights = Arr(roof?["face"]?["obstacle_heights"]);
+        ObstaclesBox.Text = obstacles.Count == 0 ? "" : new JsonObject { ["polygons"] = obstacles.DeepClone(), ["heights"] = heights.DeepClone() }.ToJsonString();
+        SetbackBox.Value = N(roof?["params"], "setback", 0.4);
+        ClearanceBox.Value = N(roof?["params"], "obstacle_clearance", 0.3);
+        ShowRoof(roof);
+        RefreshPhotoArray();
+    }
 
     private void RefreshPhotoArray()
     {

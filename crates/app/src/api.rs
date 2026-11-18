@@ -37,7 +37,7 @@ pub const METHODS: &[&str] = &[
     "scene_get", "scene_edit", "scene_place_roof", "scene_bind", "scene_view", "scene_image", "scene_pick", "scene_svg", "scene_shading", "scene_export", "scene_import",
     "version", "ui_strings", "create_project", "get_project", "set_fields", "set_mode", "validate", "fetch_weather_pvgis", "import_weather",
     "use_demo_weather", "set_roof", "photo_source", "photo_saved", "photo_layout", "add_module", "simulate", "explain", "export_report", "undo", "history",
-    "design_schedule", "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
+    "workflow_get", "workflow_set", "add_array", "cable_plan", "design_schedule", "set_section", "add_equipment", "add_generic_storage_equipment", "import_load", "stringing", "set_stringing", "results_summary", "results_hours",
     "cash_flow", "create_variant", "list_variants", "apply_variant", "delete_variant", "compare_variants",
     "report_preview", "catalog_audit", "catalog_import", "catalog_search", "catalog_details", "catalog_history", "catalog_pin", "catalog_apply_tariff", "catalog_coverage", "library_list", "library_get", "library_save", "library_delete", "library_history", "library_pin", "library_import", "library_import_workbook", "library_count",
 ];
@@ -85,8 +85,8 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "set_roof" => {
             // {file, array?: 0, outline: [[x,y],...] | null, obstacles?: [[[x,y],...]], params?: {...}}
             let file = path(params, "file")?;
-            let idx = params.get("array").and_then(Value::as_u64).unwrap_or(0);
-            let ptr = format!("/arrays/{idx}/roof");
+            let idx = params.get("array").map(|value| value.as_u64().and_then(|i| usize::try_from(i).ok())
+                .ok_or_else(|| bad("array must be a nonnegative index"))).transpose()?.unwrap_or(0);
             let value = match params.get("outline") {
                 None | Some(Value::Null) => Value::Null,
                 Some(outline) => {
@@ -97,8 +97,8 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
                     json!({"face": {"outline": outline, "obstacles": params.get("obstacles").cloned().unwrap_or(json!([])), "obstacle_heights": params.get("obstacle_heights").cloned().unwrap_or(json!([]))}, "params": lp, "modules": [], "orientation": "best", "inputs_key": ""})
                 }
             };
-            let p = app::set_fields(&file, &[(ptr, value)])?;
-            let a = p.arrays.get(idx as usize).ok_or_else(|| AppError { code: "INVALID_ARGUMENT", message: "no such array".into() })?;
+            let p = app::planning::set_roof(&file, idx, value)?;
+            let a = &p.arrays[idx];
             Ok(json!({"modules_fit": a.roof.as_ref().map(|r| r.modules.len()), "orientation": a.roof.as_ref().map(|r| r.orientation), "target_kwp": a.target_kwp.value, "strings": a.strings.value, "modules_per_string": a.modules_per_string.value, "issues": solarcraft_model::validate::validate(&p)}))
         }
         "use_demo_weather" => Ok(v(&app::use_demo_weather(&path(params, "file")?)?)),
@@ -122,6 +122,19 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "results_summary" => match app::latest_results(&path(params, "file")?)? { Some(r) => Ok(summary(&r)), None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }) },
         "results_hours" => app::plant_ops::results_hours(&path(params, "file")?, params),
         "cash_flow" => match app::latest_results(&path(params, "file")?)? { Some(r) => Ok(v(&r.finance)), None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }) },
+        "workflow_get" => Ok(app::planning::workflow(&app::get_project(&path(params, "file")?)?)),
+        "workflow_set" => {
+            let value = serde_json::from_value(arg(params, "value")?.clone()).map_err(|error| bad(format!("workflow: {error}")))?;
+            app::planning::set_workflow(&path(params, "file")?, value)
+        }
+        "add_array" => app::planning::add_array(&path(params, "file")?, params.get("name").and_then(Value::as_str)),
+        "cable_plan" => {
+            let circuits = params.get("circuits").map(|rows| serde_json::from_value(rows.clone()))
+                .transpose().map_err(|error| bad(format!("circuits: {error}")))?;
+            let mode = params.get("mode").and_then(Value::as_str).unwrap_or("preview");
+            if !matches!(mode, "preview" | "import_routes" | "save" | "apply") { return Err(bad("unknown cable plan mode")); }
+            app::planning::cable_plan(&path(params, "file")?, circuits, mode)
+        }
         "design_schedule" => {
             let project = app::get_project(&path(params, "file")?)?;
             let routes: Vec<_> = project.scene.as_ref().into_iter().flat_map(|scene| &scene.fields).flat_map(|field| {
@@ -129,7 +142,8 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
                     "modules": route.modules.len(), "jumper_m": route.jumper_m,
                     "home_run_m": field.inverter_at.map(|_| route.home_run_m)}))
             }).collect();
-            Ok(json!({"equipment": solarcraft_model::derive::equipment_counts(&project), "routes": routes}))
+            let active = solarcraft_model::workflow::Workflow::active(&project);
+            Ok(json!({"equipment": solarcraft_model::derive::equipment_counts(&active), "routes": routes}))
         }
         "set_section" => {
             let sec = s(params, "section")?;

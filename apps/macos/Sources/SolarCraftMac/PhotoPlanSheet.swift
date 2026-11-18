@@ -20,6 +20,10 @@ struct PhotoPlanSheet: View {
     @State private var depth = 5.0
     @State private var status = ""
 
+    init(initialArray: Int = 0) {
+        _array = State(initialValue: initialArray)
+    }
+
     private var arrays: [ProjectDoc.ArrayDoc] { m.project?.arrays ?? [] }
     private var canResume: Bool {
         arrays.indices.contains(array) && (m.project?.roof_photos?.contains(where: { $0.array_id == arrays[array].id }) ?? false)

@@ -13,6 +13,11 @@ pub enum Severity { Error, Warning, Info }
 pub struct Issue { pub code: &'static str, pub severity: Severity, pub pointer: String, pub message: String }
 
 pub fn validate(p: &Project) -> Vec<Issue> {
+    let active = crate::workflow::Workflow::active(p);
+    validate_active(&active)
+}
+
+pub fn validate_active(p: &Project) -> Vec<Issue> {
     let mut v = vec![];
     let mut push = |code, severity, pointer: String, message: String| v.push(Issue { code, severity, pointer, message });
     if !(-90.0..=90.0).contains(&p.site.latitude.value) { push("SITE_LAT_RANGE", Severity::Error, "/site/latitude".into(), "Latitude must be between −90 and 90°.".into()); }
@@ -164,7 +169,22 @@ fn electrical_issues(p: &Project, push: &mut Push) {
 
 /// Grid, loads, storage and tariff checks.
 fn plant_issues(p: &Project, push: &mut Push) {
-    use crate::plant::{Coupling, LoadProfile};
+    use crate::{plant::{Coupling, LoadProfile}, workflow::SystemType};
+    let system = p.workflow.system;
+    if !matches!(system, SystemType::Custom | SystemType::GridExport) && matches!(p.loads.profile, LoadProfile::None) {
+        push("WORKFLOW_LOAD_REQUIRED", Severity::Error, "/loads/profile".into(), "Select a consumption profile on the Consumption page.".into());
+    }
+    for (key, loss) in [("dc_wiring_pct", p.losses.dc_wiring_pct.value), ("ac_wiring_pct", p.losses.ac_wiring_pct.value)] {
+        if !(0.0..100.0).contains(&loss) {
+            push("CABLE_LOSS_RANGE", Severity::Error, format!("/losses/{key}"), "Wiring loss must be at least zero and below 100%.".into());
+        }
+    }
+    if system.needs_storage() && p.storage.is_none() {
+        push("WORKFLOW_STORAGE_REQUIRED", Severity::Error, "/storage".into(), "Configure the battery on the Battery page.".into());
+    }
+    if system == SystemType::OffGridGenerator && p.storage.as_ref().is_some_and(|s| s.generator_id.is_none()) {
+        push("ISLAND_GENERATOR_REQUIRED", Severity::Error, "/storage/generator_id".into(), "Select a backup generator on the Battery page.".into());
+    }
     if let Some(l) = p.grid.export_limit_kw { if l < 0.0 { push("GRID_EXPORT_LIMIT", Severity::Error, "/grid/export_limit_kw".into(), "Export limit cannot be negative.".into()); } }
     if !matches!(p.grid.phases, 1 | 3) { push("GRID_PHASES", Severity::Error, "/grid/phases".into(), "Grid connection must be single-phase (1) or three-phase (3).".into()); }
     if matches!(p.loads.profile, LoadProfile::Synthetic { .. }) && p.loads.annual_kwh <= 0.0 { push("LOAD_ANNUAL", Severity::Error, "/loads/annual_kwh".into(), "Annual consumption must be positive.".into()); }
@@ -219,6 +239,7 @@ fn plant_issues(p: &Project, push: &mut Push) {
             push("GRID_SERVICE_UNUSED", Severity::Warning, "/storage/grid_services_pct".into(), "Energy is allocated to grid services but no grid service is configured; it stays unused.".into());
         }
     }
+    if system.islanded() { return; }
     for (i, t) in p.tariff.tou.iter().enumerate() {
         if t.start_hour > 23 || t.end_hour > 24 || t.months.iter().any(|m| !(1..=12).contains(m)) { push("TARIFF_PERIOD", Severity::Error, format!("/tariff/tou/{i}"), format!("Tariff period '{}' has invalid hours or months.", t.name)); }
     }

@@ -89,6 +89,7 @@
           </StackPanel>
 
           <StackPanel x:Name="SitePage" Spacing="10" Visibility="Collapsed">
+            <StackPanel x:Name="WorkflowPanel" Spacing="8" Margin="0,0,0,14" />
             <NumberBox x:Name="LatBox" Width="220" HorizontalAlignment="Left" Tag="/site/latitude" ValueChanged="OnNumber" />
             <NumberBox x:Name="LonBox" Width="220" HorizontalAlignment="Left" Tag="/site/longitude" ValueChanged="OnNumber" />
             <NumberBox x:Name="ElevBox" Width="220" HorizontalAlignment="Left" Tag="/site/elevation" ValueChanged="OnNumber" />
@@ -134,7 +135,10 @@
           </StackPanel>
 
           <StackPanel x:Name="RoofPage" Spacing="10" Visibility="Collapsed">
-            <ComboBox x:Name="PhotoArrayBox" Width="300" SelectionChanged="OnPhotoArray" />
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Bottom">
+              <ComboBox x:Name="PhotoArrayBox" Width="300" SelectionChanged="OnPhotoArray" />
+              <Button x:Name="AddRoofArrayButton" Click="OnAddRoofArray" VerticalAlignment="Bottom" />
+            </StackPanel>
             <StackPanel Orientation="Horizontal" Spacing="8">
               <Button x:Name="PhotoPlanButton" Click="OnPhotoPlan" />
               <Button x:Name="SavedPhotoButton" Click="OnSavedPhoto" Visibility="Collapsed" />
@@ -154,7 +158,8 @@
                 <Button x:Name="ClearPointsButton" Click="OnClearPoints" />
               </StackPanel>
             </StackPanel>
-            <TextBox x:Name="ObstaclesBox" Width="520" HorizontalAlignment="Left" />
+            <TextBox x:Name="ObstaclesBox" Width="620" TextWrapping="Wrap" HorizontalAlignment="Left" />
+            <TextBlock x:Name="RoofObstacleHint" TextWrapping="Wrap" MaxWidth="620" HorizontalAlignment="Left" />
             <NumberBox x:Name="SetbackBox" Width="220" HorizontalAlignment="Left" Value="0.4" SmallChange="0.05" />
             <NumberBox x:Name="ClearanceBox" Width="220" HorizontalAlignment="Left" Value="0.3" SmallChange="0.05" />
             <TextBlock x:Name="RoofHint" Opacity="0.7" TextWrapping="Wrap" />

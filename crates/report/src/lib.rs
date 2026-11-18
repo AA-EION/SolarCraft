@@ -157,6 +157,8 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
             (_, "inverter") => match l { Lang::Es => "Eficiencia del inversor", Lang::De => "Wechselrichterwirkungsgrad", _ => "Eficiência do inversor" }.into(),
             (_, "clipping") => match l { Lang::Es => "Recorte por límite de potencia", Lang::De => "Begrenzung (Leistungslimit)", _ => "Corte por limite de potência" }.into(),
             (_, "night") => match l { Lang::Es => "Consumo nocturno del inversor", Lang::De => "Nachtverbrauch Wechselrichter", _ => "Consumo noturno do inversor" }.into(),
+            (_, "grid") if p.workflow.system.islanded() =>
+                tr(l, "PV energy at the AC bus", "Energía FV en el bus CA", "PV-Energie am AC-Inselnetz", "Energia FV no barramento CA"),
             (_, "grid") => match l { Lang::Es => "Energía a la red", Lang::De => "Netzeinspeisung", _ => "Energia para a rede" }.into(),
             _ => loss_label(key, en),
         }
@@ -271,7 +273,16 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             vec![tr(l, "Self-consumption rate", "Tasa de autoconsumo", "Eigenverbrauchsquote", "Taxa de autoconsumo"), format!("{} %", n(b.self_consumption_rate * 100.0, 1))],
             vec![tr(l, "Autarky (self-sufficiency)", "Autarquía (autosuficiencia)", "Autarkiegrad", "Autossuficiência"), format!("{} %", n(b.autarky * 100.0, 1))],
         ];
-        if b.outage_hours > 0 { rows.push(vec![tr(l, "Outage hours · unserved critical load", "Horas de corte · carga crítica no atendida", "Ausfallstunden · nicht versorgte kritische Last", "Horas de interrupção · carga crítica não atendida"), format!("{} h · {}", b.outage_hours, kwh(b.unserved_kwh))]); }
+        if p.workflow.system.islanded() {
+            let label = tr(l, "Surplus curtailed", "Excedente limitado", "Abgeregelter Überschuss", "Excedente limitado");
+            rows.drain(4..7);
+            rows.push(vec![label, kwh(b.curtailed_kwh)]);
+            if let Some(generator) = p.storage.as_ref().and_then(|st| st.generator_id.as_deref()).and_then(|id| p.library.generator(id)) {
+                rows.push(vec![tr(l, "Generator energy", "Energía del generador", "Generatorenergie", "Energia do gerador"), kwh(b.generator_kwh)]);
+                rows.push(vec![tr(l, "Generator fuel", "Combustible del generador", "Generator-Kraftstoff", "Combustível do gerador"), format!("{} {}", n(b.generator_fuel, 1), generator.fuel_unit)]);
+            }
+            rows.push(vec![tr(l, "Unserved demand", "Demanda no atendida", "Nicht versorgter Bedarf", "Demanda não atendida"), kwh(b.unserved_kwh)]);
+        } else if b.outage_hours > 0 { rows.push(vec![tr(l, "Outage hours · unserved critical load", "Horas de corte · carga crítica no atendida", "Ausfallstunden · nicht versorgte kritische Last", "Horas de interrupção · carga crítica não atendida"), format!("{} h · {}", b.outage_hours, kwh(b.unserved_kwh))]); }
         out.push(Section { id: "energy_balance", title: tr(l, "Energy balance", "Balance energético", "Energiebilanz", "Balanço energético"), intro: tr(l, "Hourly simulation for one year; the balance closes in every hour.", "Simulación horaria de un año; el balance cierra en cada hora.", "Stündliche Jahressimulation; die Bilanz ist in jeder Stunde geschlossen.", "Simulação horária de um ano; o balanço fecha em cada hora."), header: vec![], rows });
     }
     if let (Some(st), Some(bat)) = (&p.storage, p.storage.as_ref().and_then(|st| p.library.battery(&st.battery_id))) {

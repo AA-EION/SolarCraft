@@ -59,10 +59,14 @@ struct GridSection: View {
     @State private var phases = 1
     @State private var voltage = 230.0
     var body: some View {
-        GroupBox(m.t("grid")) {
+        GroupBox(m.t(m.isIslanded ? "island_bus" : "grid")) {
             Form {
-                Picker(m.t("feed_in"), selection: $feedIn) { Text(m.t("surplus")).tag("surplus"); Text(m.t("full_feed_in")).tag("full") }
-                LabeledContent(m.t("export_limit")) { TextField("", text: $limit).frame(width: 120) }
+                if m.systemType == "custom" {
+                    Picker(m.t("feed_in"), selection: $feedIn) { Text(m.t("surplus")).tag("surplus"); Text(m.t("full_feed_in")).tag("full") }
+                }
+                if !m.isIslanded {
+                    LabeledContent(m.t("export_limit")) { TextField("", text: $limit).frame(width: 120) }
+                }
                 Picker(m.t("phases"), selection: $phases) { Text("1").tag(1); Text("3").tag(3) }.pickerStyle(.segmented).frame(width: 240)
                 NumField(label: m.t("voltage"), value: $voltage)
                 Button(m.t("apply")) {
@@ -84,7 +88,7 @@ struct GridSection: View {
 }
 
 struct SiteClimatePage: View {
-    var body: some View { VStack(alignment: .leading, spacing: 18) { SitePage(); GridSection() } }
+    var body: some View { VStack(alignment: .leading, spacing: 18) { SystemWorkflowSection(); SitePage(); GridSection() } }
 }
 
 // MARK: - consumption and storage
@@ -118,6 +122,10 @@ struct StorageLoadsPage: View {
     @State private var gsPower = 3.0
     @State private var gridCharge = false
     @State private var outages: [OutageEdit] = []
+    @State private var generatorID = ""
+    @State private var generatorEditor = false
+    private var generators: [JSONDict] { dicts(lib["generators"]) }
+    private var requiresStorage: Bool { ["grid_battery", "off_grid", "off_grid_generator"].contains(m.systemType) }
 
     private var lib: JSONDict { m.section("library") }
     private var batteries: [JSONDict] { dicts(lib["batteries"]) }
@@ -133,7 +141,7 @@ struct StorageLoadsPage: View {
                     }
                     if profile != "series" && profile != "none" { NumField(label: m.t("annual_kwh"), value: $annual) }
                     if profile == "series" { Text((m.section("loads")["profile"] as? JSONDict).map { str($0, "name") } ?? "").foregroundStyle(.secondary) }
-                    NumField(label: m.t("critical_share"), value: $critical)
+                    if !m.isIslanded { NumField(label: m.t("critical_share"), value: $critical) }
                     HStack {
                         Button(m.t("apply")) { applyLoads() }
                         Button(m.t("import_load")) { m.importLoad() }
@@ -142,44 +150,55 @@ struct StorageLoadsPage: View {
             }
             } else { GroupBox(m.t("use_battery")) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle(m.t("use_battery"), isOn: $enabled)
+                    Toggle(m.t("use_battery"), isOn: $enabled).disabled(requiresStorage)
                     if enabled {
                         if batteries.isEmpty { Button(m.t("add_generic_storage")) { m.addGenericStorage() } }
                         Form {
                             Picker(m.t("battery"), selection: $batteryId) { ForEach(batteries.indices, id: \.self) { i in Text("\(str(batteries[i], "manufacturer")) \(str(batteries[i], "model"))").tag(str(batteries[i], "id")) } }
                             Stepper("\(m.t("units")): \(units)", value: $units, in: 1...20)
-                            Picker(m.t("coupling"), selection: $coupling) { Text(m.t("dc_hybrid")).tag("dc_hybrid"); Text(m.t("ac_coupled")).tag("ac_coupled") }
+                            Picker(m.t("coupling"), selection: $coupling) { Text(m.t("dc_hybrid")).tag("dc_hybrid"); Text(m.t("ac_coupled")).tag("ac_coupled"); Text(m.t("integrated")).tag("integrated") }
                             if coupling == "dc_hybrid" {
                                 Picker(m.t("inverter"), selection: $unitId) { ForEach(hybridUnits.indices, id: \.self) { i in Text(str(hybridUnits[i], "name")).tag(str(hybridUnits[i], "id")) } }
-                            } else {
+                            } else if coupling == "ac_coupled" {
                                 Picker(m.t("inverter"), selection: $batInvId) { ForEach(batInverters.indices, id: \.self) { i in Text("\(str(batInverters[i], "manufacturer")) \(str(batInverters[i], "model"))").tag(str(batInverters[i], "id")) } }
                             }
                             Picker(m.t("battery_model"), selection: $model) { Text(m.t("model_simple")).tag("simple"); Text(m.t("model_detailed")).tag("detailed") }
                             HStack { NumField(label: m.t("soc_window"), value: $socMin); Text("–"); TextField("", value: $socMax, format: .number).frame(width: 60) }
                             NumField(label: m.t("initial_soc"), value: $initSoc)
                         }
-                        Text(m.t("allocation")).font(.headline)
-                        AllocationBar(backup: backup, services: services, labels: [m.t("backup_reserve"), m.t("self_consumption"), m.t("grid_services")])
-                        Form {
-                            NumField(label: m.t("backup_reserve"), value: $backup)
-                            NumField(label: m.t("grid_services"), value: $services)
-                            LabeledContent(m.t("self_consumption")) { Text("\(fmt(100 - backup - services)) %").monospacedDigit() }
-                            Picker(m.t("grid_service"), selection: $gsKind) { Text(m.t("gs_none")).tag("none"); Text(m.t("gs_peak")).tag("peak_shaving"); Text(m.t("gs_window")).tag("export_window") }
-                            if gsKind == "peak_shaving" { NumField(label: "kW", value: $gsLimit) }
-                            if gsKind == "export_window" { HStack { NumField(label: m.t("hour"), value: $gsStart); TextField("", value: $gsEnd, format: .number).frame(width: 50); NumField(label: "kW", value: $gsPower) } }
-                            Toggle(m.t("grid_charge_backup"), isOn: $gridCharge)
-                        }
-                        Text(m.t("allocation_note")).font(.caption).foregroundStyle(.secondary)
-                        Text(m.t("outages")).font(.headline)
-                        ForEach($outages) { $o in
-                            HStack {
-                                NumField(label: m.t("day"), value: $o.day)
-                                NumField(label: m.t("hour"), value: $o.hour)
-                                NumField(label: m.t("hours_n"), value: $o.hours)
-                                Button(m.t("remove")) { outages.removeAll { $0.id == o.id } }
+                        if !m.isIslanded {
+                            Text(m.t("allocation")).font(.headline)
+                            AllocationBar(backup: backup, services: services, labels: [m.t("backup_reserve"), m.t("self_consumption"), m.t("grid_services")])
+                            Form {
+                                NumField(label: m.t("backup_reserve"), value: $backup)
+                                NumField(label: m.t("grid_services"), value: $services)
+                                LabeledContent(m.t("self_consumption")) { Text("\(fmt(100 - backup - services)) %").monospacedDigit() }
+                                Picker(m.t("grid_service"), selection: $gsKind) { Text(m.t("gs_none")).tag("none"); Text(m.t("gs_peak")).tag("peak_shaving"); Text(m.t("gs_window")).tag("export_window") }
+                                if gsKind == "peak_shaving" { NumField(label: "kW", value: $gsLimit) }
+                                if gsKind == "export_window" { HStack { NumField(label: m.t("hour"), value: $gsStart); TextField("", value: $gsEnd, format: .number).frame(width: 50); NumField(label: "kW", value: $gsPower) } }
+                                Toggle(m.t("grid_charge_backup"), isOn: $gridCharge)
                             }
+                            Text(m.t("allocation_note")).font(.caption).foregroundStyle(.secondary)
+                            Text(m.t("outages")).font(.headline)
+                            ForEach($outages) { $o in
+                                HStack {
+                                    NumField(label: m.t("day"), value: $o.day)
+                                    NumField(label: m.t("hour"), value: $o.hour)
+                                    NumField(label: m.t("hours_n"), value: $o.hours)
+                                    Button(m.t("remove")) { outages.removeAll { $0.id == o.id } }
+                                }
+                            }
+                            Button(m.t("add_outage")) { outages.append(OutageEdit()) }
                         }
-                        Button(m.t("add_outage")) { outages.append(OutageEdit()) }
+                        if m.systemType != "off_grid" {
+                            Picker(m.t("generator"), selection: $generatorID) {
+                                Text(m.t("gs_none")).tag("")
+                                ForEach(generators.indices, id: \.self) { i in
+                                    Text("\(str(generators[i], "manufacturer")) \(str(generators[i], "model"))").tag(str(generators[i], "id"))
+                                }
+                            }
+                            Button(m.t("new_generator")) { generatorEditor = true }
+                        }
                     }
                     Button(m.t("apply")) { applyStorage() }.keyboardShortcut(.defaultAction)
                     IssueList(issues: m.issues.filter { $0.pointer.hasPrefix("/storage") || $0.pointer.hasPrefix("/loads") }.map { ["severity": $0.severity, "message": $0.message] })
@@ -188,6 +207,7 @@ struct StorageLoadsPage: View {
             }
         }
         .onAppear(perform: load)
+        .sheet(isPresented: $generatorEditor) { GeneratorEditor().environmentObject(m) }
     }
 
     private func applyLoads() {
@@ -203,7 +223,12 @@ struct StorageLoadsPage: View {
 
     private func applyStorage() {
         guard enabled else { m.setSection("storage", NSNull()); return }
-        let c: JSONDict = coupling == "dc_hybrid" ? ["kind": "dc_hybrid", "unit_id": unitId] : ["kind": "ac_coupled", "battery_inverter_id": batInvId]
+        let c: JSONDict
+        switch coupling {
+        case "dc_hybrid": c = ["kind": coupling, "unit_id": unitId]
+        case "ac_coupled": c = ["kind": coupling, "battery_inverter_id": batInvId]
+        default: c = ["kind": "integrated"]
+        }
         let gs: JSONDict
         switch gsKind {
         case "peak_shaving": gs = ["kind": "peak_shaving", "import_limit_kw": gsLimit]
@@ -214,6 +239,7 @@ struct StorageLoadsPage: View {
             "battery_id": batteryId, "units": units, "coupling": c, "model": model, "soc_min_pct": socMin, "soc_max_pct": socMax, "initial_soc_pct": initSoc,
             "backup_reserve_pct": backup, "grid_services_pct": services, "charge_priority": ["backup", "self_consumption", "grid_services"],
             "grid_charge_backup": gridCharge, "grid_service": gs,
+            "generator_id": generatorID.isEmpty ? NSNull() as Any : generatorID,
             "outages": outages.map { ["start_hour": max(0, Int($0.day) - 1) * 24 + Int($0.hour), "hours": Int($0.hours)] },
         ]
         m.setSection("storage", value)
@@ -226,7 +252,8 @@ struct StorageLoadsPage: View {
         annual = num(l, "annual_kwh", 4000)
         critical = num(l, "critical_fraction", 0.3)
         let s = m.section("storage")
-        enabled = !s.isEmpty
+        enabled = requiresStorage || !s.isEmpty
+        generatorID = str(s, "generator_id")
         batteryId = str(s, "battery_id").isEmpty ? (batteries.first.map { str($0, "id") } ?? "") : str(s, "battery_id")
         units = int(s, "units", 1)
         let c = s["coupling"] as? JSONDict ?? [:]
@@ -449,10 +476,16 @@ struct SimulationPage: View {
         VStack(alignment: .leading, spacing: 18) {
             if let s = m.summary, let b = s["balance"] as? JSONDict {
                 HStack {
-                    Kpi(label: m.t("self_consumption"), value: fmt(num(b, "self_consumption_rate") * 100, 1), unit: "%")
-                    Kpi(label: m.t("autarky"), value: fmt(num(b, "autarky") * 100, 1), unit: "%")
-                    Kpi(label: m.t("grid_import"), value: fmt(num(b, "import_kwh")), unit: "kWh")
-                    Kpi(label: m.t("grid_export"), value: fmt(num(b, "export_kwh")), unit: "kWh")
+                    if m.isIslanded {
+                        Kpi(label: m.t("island_results"), value: fmt(num(b, "load_served_kwh"), 1), unit: "kWh")
+                        Kpi(label: m.t("island_unserved"), value: fmt(num(b, "unserved_kwh"), 1), unit: "kWh")
+                        Kpi(label: m.t("generator"), value: fmt(num(b, "generator_kwh"), 1), unit: "kWh")
+                    } else {
+                        Kpi(label: m.t("self_consumption"), value: fmt(num(b, "self_consumption_rate") * 100, 1), unit: "%")
+                        Kpi(label: m.t("autarky"), value: fmt(num(b, "autarky") * 100, 1), unit: "%")
+                        Kpi(label: m.t("grid_import"), value: fmt(num(b, "import_kwh")), unit: "kWh")
+                        Kpi(label: m.t("grid_export"), value: fmt(num(b, "export_kwh")), unit: "kWh")
+                    }
                 }
                 GroupBox(m.t("energy_balance")) {
                     SimpleTable(header: [], rows: [
@@ -654,8 +687,9 @@ struct CablesPage: View {
                 NumField(label: m.t("workflow_ac_loss"), value: $ac)
                 Button(m.t("apply")) {
                     m.setCableLosses(dc: dc, ac: ac)
-                }.disabled(!(0...100).contains(dc) || !(0...100).contains(ac))
+                }.disabled(!(0..<100).contains(dc) || !(0..<100).contains(ac))
             }
+            CablePlannerSection()
             let routes = dicts(m.designSchedule?["routes"])
             if routes.isEmpty {
                 Text(m.t("workflow_no_routes")).foregroundStyle(.secondary)

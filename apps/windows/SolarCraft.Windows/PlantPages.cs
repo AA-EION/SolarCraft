@@ -108,6 +108,7 @@ public sealed partial class MainWindow
         try { _summary = Api.Invoke("results_summary", new { file = _file }); } catch { _summary = null; }
         try { _stringing = Api.Invoke("stringing", new { file = _file }); } catch { _stringing = null; }
         try { _cash = Api.Invoke("cash_flow", new { file = _file }); } catch { _cash = null; }
+        BuildWorkflowPanel();
         BuildGridPanel();
         BuildElectrical();
         BuildLoads();
@@ -127,7 +128,7 @@ public sealed partial class MainWindow
         var losses = _project?["losses"];
         var dc = Num(T("workflow_dc_loss"), Api.Num(losses?["dc_wiring_pct"]));
         var ac = Num(T("workflow_ac_loss"), Api.Num(losses?["ac_wiring_pct"]));
-        foreach (var box in new[] { dc, ac }) { box.Minimum = 0; box.Maximum = 100; }
+        foreach (var box in new[] { dc, ac }) { box.Minimum = 0; box.Maximum = 99.999; }
         CablesPage.Children.Add(Row(dc, ac));
         CablesPage.Children.Add(Btn(T("apply"), () =>
         {
@@ -136,6 +137,7 @@ public sealed partial class MainWindow
                 new { pointer = "/losses/ac_wiring_pct", value = ac.Value },
             } }))) Reload();
         }, true));
+        BuildCablePlanner(CablesPage);
         var schedule = Api.Invoke("design_schedule", new { file = _file });
         var routes = Arr(schedule?["routes"]);
         if (routes.Count > 0)
@@ -148,8 +150,11 @@ public sealed partial class MainWindow
         PlansPage.Children.Add(H(T("workflow_parts")));
         PlansPage.Children.Add(Table([T("family"), T("model"), T("workflow_quantity")], Arr(schedule?["equipment"]).Select(row =>
             (IList<string>)new[] { T(S(row, "kind")), S(row, "model"), F(N(row, "quantity"), 0) }).ToList()));
-        PlansPage.Children.Add(Row(Btn(T("roof"), () => Nav.SelectedItem = NavRoof),
-            Btn(T("scene3d"), () => Nav.SelectedItem = NavScene), Btn(T("workflow_presentation"), () => Nav.SelectedItem = NavReport)));
+        var planLinks = Row();
+        if (Steps.Contains(NavRoof)) planLinks.Children.Add(Btn(T("roof"), () => Nav.SelectedItem = NavRoof));
+        if (Steps.Contains(NavScene)) planLinks.Children.Add(Btn(T("scene3d"), () => Nav.SelectedItem = NavScene));
+        planLinks.Children.Add(Btn(T("workflow_presentation"), () => Nav.SelectedItem = NavReport));
+        PlansPage.Children.Add(planLinks);
         foreach (var array in Arr(_project?["arrays"]).Where(array => array?["roof"] is not null))
         {
             var canvas = new Canvas { Width = 560, Height = 245, HorizontalAlignment = HorizontalAlignment.Left };
@@ -164,12 +169,14 @@ public sealed partial class MainWindow
     {
         GridPanel.Children.Clear();
         var g = _project!["grid"];
-        GridPanel.Children.Add(H(T("grid")));
+        GridPanel.Children.Add(H(T(Islanded ? "island_bus" : "grid")));
         var feed = Combo(T("feed_in"), new[] { ("surplus", T("surplus")), ("full", T("full_feed_in")) }, S(g, "feed_in"));
         var limit = Num(T("export_limit"), g?["export_limit_kw"] is null ? double.NaN : N(g, "export_limit_kw"));
         var phases = Combo(T("phases"), new[] { ("1", "1"), ("3", "3") }, ((int)N(g, "phases", 1)).ToString(CultureInfo.InvariantCulture));
         var volt = Num(T("voltage"), N(g, "voltage_v", 230));
-        GridPanel.Children.Add(feed); GridPanel.Children.Add(limit); GridPanel.Children.Add(phases); GridPanel.Children.Add(volt);
+        if (SystemType == "custom") GridPanel.Children.Add(feed);
+        if (!Islanded) GridPanel.Children.Add(limit);
+        GridPanel.Children.Add(phases); GridPanel.Children.Add(volt);
         GridPanel.Children.Add(Btn(T("apply"), () => SetSection("grid", new JsonObject
         {
             ["feed_in"] = Sel(feed), ["export_limit_kw"] = double.IsNaN(limit.Value) ? null : (JsonNode)limit.Value, ["phases"] = int.Parse(Sel(phases), CultureInfo.InvariantCulture), ["voltage_v"] = volt.Value,
@@ -296,6 +303,9 @@ public sealed partial class MainWindow
         {
             "module" => new[] { ("cells_in_series", "Cells in series", 72.0), ("length_m", "Length (m)", 1.76), ("width_m", "Width (m)", 1.13), ("v_oc", "Voc (V)", 49.6), ("i_sc", "Isc (A)", 11.6), ("v_mp", "Vmp (V)", 41.4), ("i_mp", "Imp (A)", 10.87), ("alpha_sc", "α Isc (A/K)", 0.0058), ("beta_voc", "β Voc (V/K)", -0.134), ("gamma_pmp", "γ Pmp (%/K)", -0.35) },
             "inverter" => new[] { ("pac_max_w", "Pac max (W)", 5000.0), ("eta_nominal", "Efficiency", 0.97), ("mppt_v_min", "MPPT V min", 120.0), ("mppt_v_max", "MPPT V max", 500.0), ("v_dc_max", "V DC max", 600.0), ("mppt_count", "MPPT inputs", 2.0), ("i_max_per_mppt", "I max per MPPT (A)", 16.0), ("night_w", "Night (W)", 2.0), ("port_v_min", "Battery port V min (0 = none)", 150.0), ("port_v_max", "Battery port V max", 500.0), ("port_p", "Battery port power (W)", 5000.0) },
+            "generator" => new[] { ("rated_va", T("generator_rated"), 3000.0), ("max_va", T("generator_max"), 3000.0),
+                ("fuel_rate", T("generator_fuel_rate"), 1.0), ("voltage_v", T("voltage"), N(_project?["grid"], "voltage_v", 230)),
+                ("phases", T("phases"), N(_project?["grid"], "phases", 1)) },
             _ => new[] { ("capacity_kwh", "Capacity (kWh)", 10.0), ("nominal_voltage_v", "Nominal voltage (V)", 204.8), ("soc_min_pct", "SOC min (%)", 5.0), ("soc_max_pct", "SOC max (%)", 100.0), ("p_charge_max_kw", "Charge power (kW)", 5.0), ("p_discharge_max_kw", "Discharge power (kW)", 5.0), ("roundtrip_efficiency", "Round-trip efficiency", 0.95), ("self_discharge_pct_per_month", "Self-discharge (%/month)", 2.0), ("cycle_life", "Cycles to 80 %", 6000.0) },
         };
         var panel = new StackPanel { Spacing = 6 };
@@ -305,6 +315,8 @@ public sealed partial class MainWindow
         panel.Children.Add(id); panel.Children.Add(man); panel.Children.Add(model);
         var boxes = fields.Select(f => (f.key, box: Num(f.label, f.def, 260))).ToList();
         foreach (var (_, box) in boxes) panel.Children.Add(box);
+        var fuelUnit = new TextBox { Header = T("generator_fuel_unit"), Text = "L" };
+        if (kind == "generator") panel.Children.Add(fuelUnit);
         var save = new CheckBox { Content = T("save_to_library"), IsChecked = true };
         panel.Children.Add(save);
         var dlg = new ContentDialog { Title = T("new_" + kind), Content = new ScrollViewer { Content = panel, MaxHeight = 560 }, PrimaryButtonText = T("apply"), CloseButtonText = T("cancel"), XamlRoot = Content.XamlRoot };
@@ -321,6 +333,12 @@ public sealed partial class MainWindow
                 foreach (var k in new[] { "pac_max_w", "eta_nominal", "mppt_v_min", "mppt_v_max", "v_dc_max", "i_max_per_mppt", "night_w" }) rec[k] = v[k];
                 rec["mppt_count"] = (int)v["mppt_count"];
                 if (v["port_v_min"] > 0) rec["battery_port"] = new JsonObject { ["v_min"] = v["port_v_min"], ["v_max"] = v["port_v_max"], ["p_charge_max_w"] = v["port_p"], ["p_discharge_max_w"] = v["port_p"], ["dc_dc_efficiency"] = 0.98 };
+                break;
+            case "generator":
+                foreach (var key in new[] { "rated_va", "max_va", "voltage_v" }) rec[key] = v[key];
+                rec["phases"] = (int)v["phases"];
+                rec["fuel_curve"] = new JsonArray(new JsonArray(1.0, v["fuel_rate"]));
+                rec["fuel_unit"] = fuelUnit.Text;
                 break;
             default:
                 rec["chemistry"] = "lfp";
@@ -344,7 +362,8 @@ public sealed partial class MainWindow
         var profile = Combo(T("load_profile"), new[] { "none", "residential", "office", "retail", "flat", "series" }.Select(x => (x, T("profile_" + x))).ToList(), kind == "synthetic" ? S(prof, "profile") : kind);
         var annual = Num(T("annual_kwh"), N(l, "annual_kwh", 4000));
         var critical = Num(T("critical_share"), N(l, "critical_fraction", 0.3));
-        p.Children.Add(profile); p.Children.Add(annual); p.Children.Add(critical);
+        p.Children.Add(profile); p.Children.Add(annual);
+        if (!Islanded) p.Children.Add(critical);
         if (kind == "series") p.Children.Add(Note(S(prof, "name")));
         p.Children.Add(Row(Btn(T("apply"), () =>
         {
@@ -365,13 +384,14 @@ public sealed partial class MainWindow
         var s = _project!["storage"];
         var lib = _project!["library"];
         p.Children.Add(H(T("use_battery")));
-        var enabled = new ToggleSwitch { IsOn = s is JsonObject };
+        var required = SystemType is "grid_battery" or "off_grid" or "off_grid_generator";
+        var enabled = new ToggleSwitch { IsOn = required || s is JsonObject, IsEnabled = !required };
         p.Children.Add(enabled);
         if (Arr(lib?["batteries"]).Count == 0) p.Children.Add(Btn(T("add_generic_storage"), () => { if (Try(() => Api.Invoke("add_generic_storage_equipment", new { file = _file }))) Reload(); }));
         var battery = Combo(T("battery"), Arr(lib?["batteries"]).Select(b => (S(b, "id"), $"{S(b, "manufacturer")} {S(b, "model")}")).ToList(), S(s, "battery_id"));
         var units = Num(T("units"), N(s, "units", 1));
         var c = s?["coupling"];
-        var coupling = Combo(T("coupling"), new[] { ("dc_hybrid", T("dc_hybrid")), ("ac_coupled", T("ac_coupled")) }, S(c, "kind") is "" ? "dc_hybrid" : S(c, "kind"));
+        var coupling = Combo(T("coupling"), new[] { ("dc_hybrid", T("dc_hybrid")), ("ac_coupled", T("ac_coupled")), ("integrated", T("integrated")) }, S(c, "kind") is "" ? "dc_hybrid" : S(c, "kind"));
         var hybrids = Arr(_stringing?["inverters"]).Where(i => i?["has_battery_port"]?.GetValue<bool>() == true).Select(i => (S(i!["unit"], "id"), S(i!["unit"], "name"))).ToList();
         var unit = Combo(T("dc_hybrid"), hybrids, S(c, "unit_id"));
         var batInv = Combo(T("ac_coupled"), Arr(lib?["battery_inverters"]).Select(b => (S(b, "id"), $"{S(b, "manufacturer")} {S(b, "model")}")).ToList(), S(c, "battery_inverter_id"));
@@ -386,7 +406,7 @@ public sealed partial class MainWindow
             Text = string.Join("; ", Arr(s?["outages"]).Select(o => $"{(int)N(o, "start_hour") / 24 + 1},{(int)N(o, "start_hour") % 24},{N(o, "hours")}")) };
         foreach (var el in new UIElement[] { battery, units, coupling, unit, batInv, model, Row(socMin, socMax), init }) p.Children.Add(el);
         // Allocation bar drawn to scale.
-        p.Children.Add(H(T("allocation")));
+        if (!Islanded) p.Children.Add(H(T("allocation")));
         var bar = new Grid { Height = 18, Width = 520, HorizontalAlignment = HorizontalAlignment.Left, CornerRadius = new CornerRadius(4) };
         void DrawBar()
         {
@@ -401,9 +421,22 @@ public sealed partial class MainWindow
         }
         DrawBar();
         backup.ValueChanged += (_, _) => DrawBar(); services.ValueChanged += (_, _) => DrawBar();
-        p.Children.Add(bar);
-        p.Children.Add(Note($"■ {T("backup_reserve")}   ■ {T("self_consumption")}   ■ {T("grid_services")}"));
-        foreach (var el in new UIElement[] { Row(backup, services), Note(T("allocation_note")), gsKind, Row(gsA, gsB, gsC), gridCharge, outages }) p.Children.Add(el);
+        if (!Islanded)
+        {
+            p.Children.Add(bar);
+            p.Children.Add(Note($"■ {T("backup_reserve")}   ■ {T("self_consumption")}   ■ {T("grid_services")}"));
+        }
+        foreach (var el in new UIElement[] { Row(backup, services), Note(T("allocation_note")), gsKind, Row(gsA, gsB, gsC), gridCharge, outages }) {
+            if (!Islanded) p.Children.Add(el);
+        }
+        var genChoices = new List<(string, string)> { ("", T("gs_none")) };
+        genChoices.AddRange(Arr(lib?["generators"]).Select(g => (S(g, "id"), $"{S(g, "manufacturer")} {S(g, "model")}")));
+        var generator = Combo(T("generator"), genChoices, S(s, "generator_id"));
+        if (SystemType != "off_grid")
+        {
+            p.Children.Add(generator);
+            p.Children.Add(Btn(T("new_generator"), () => _ = NewEquipment("generator")));
+        }
         p.Children.Add(Btn(T("apply"), () =>
         {
             if (!enabled.IsOn) { SetSection("storage", null); return; }
@@ -419,12 +452,17 @@ public sealed partial class MainWindow
                 "export_window" => new JsonObject { ["kind"] = "export_window", ["start_hour"] = (int)gsA.Value, ["end_hour"] = (int)gsB.Value, ["power_kw"] = gsC.Value },
                 _ => new JsonObject { ["kind"] = "none" },
             };
-            JsonObject cp = Sel(coupling) == "ac_coupled" ? new JsonObject { ["kind"] = "ac_coupled", ["battery_inverter_id"] = Sel(batInv) } : new JsonObject { ["kind"] = "dc_hybrid", ["unit_id"] = Sel(unit) };
+            JsonObject cp = Sel(coupling) switch {
+                "ac_coupled" => new JsonObject { ["kind"] = "ac_coupled", ["battery_inverter_id"] = Sel(batInv) },
+                "integrated" => new JsonObject { ["kind"] = "integrated" },
+                _ => new JsonObject { ["kind"] = "dc_hybrid", ["unit_id"] = Sel(unit) },
+            };
             SetSection("storage", new JsonObject
             {
                 ["battery_id"] = Sel(battery), ["units"] = (int)units.Value, ["coupling"] = cp, ["model"] = Sel(model), ["soc_min_pct"] = socMin.Value, ["soc_max_pct"] = socMax.Value, ["initial_soc_pct"] = init.Value,
                 ["backup_reserve_pct"] = backup.Value, ["grid_services_pct"] = services.Value, ["charge_priority"] = new JsonArray("backup", "self_consumption", "grid_services"),
                 ["grid_charge_backup"] = gridCharge.IsChecked == true, ["grid_service"] = gsv, ["outages"] = outs,
+                ["generator_id"] = Sel(generator) is "" ? null : Sel(generator),
             });
         }, true));
         IssuesInto(p, x => x.StartsWith("/storage") || x.StartsWith("/loads") || x.StartsWith("STORAGE") || x.StartsWith("BATTERY"));
@@ -436,7 +474,10 @@ public sealed partial class MainWindow
         if (_summary is null) return;
         var b = _summary["balance"];
         var kpis = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        foreach (var (label, value, unit) in new[] { (T("self_consumption"), F(N(b, "self_consumption_rate") * 100, 1), "%"), (T("autarky"), F(N(b, "autarky") * 100, 1), "%"), (T("grid_import"), F(N(b, "import_kwh")), "kWh"), (T("grid_export"), F(N(b, "export_kwh")), "kWh") })
+        var metrics = Islanded
+            ? new[] { (T("island_results"), F(N(b, "load_served_kwh"), 1), "kWh"), (T("island_unserved"), F(N(b, "unserved_kwh"), 1), "kWh"), (T("generator"), F(N(b, "generator_kwh"), 1), "kWh") }
+            : new[] { (T("self_consumption"), F(N(b, "self_consumption_rate") * 100, 1), "%"), (T("autarky"), F(N(b, "autarky") * 100, 1), "%"), (T("grid_import"), F(N(b, "import_kwh")), "kWh"), (T("grid_export"), F(N(b, "export_kwh")), "kWh") };
+        foreach (var (label, value, unit) in metrics)
         {
             var sp = new StackPanel { Padding = new Thickness(12), CornerRadius = new CornerRadius(6), Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"], MinWidth = 160 };
             sp.Children.Add(new TextBlock { Text = label, Opacity = 0.7 });
@@ -685,24 +726,52 @@ public sealed partial class MainWindow
             _compareRows = Arr(Api.Invoke("compare_variants", new { file })?["variants"]);
             _previewSections = Arr(Api.Invoke("report_preview", new { file, lang = "en", report_type = SelectedReportType(), include_figures = true })?["contents"]);
             BuildPlantPages();
-            var items = Steps;
-            for (int i = 0; i < items.Length; i++)
+            async Task Capture(NavigationViewItem item, string filename)
             {
-                Nav.SelectedItem = items[i];
-                await Task.Delay(600);
+                Nav.SelectedItem = item;
+                await Task.Delay(420);
                 Content.UpdateLayout();
                 var rtb = new RenderTargetBitmap();
                 await rtb.RenderAsync(Content);
                 var pixels = await rtb.GetPixelsAsync();
-                var path = IOPath.Combine(dir, $"{i + 1:00}-{items[i].Tag}.png");
-                using (var fs = File.Create(path))
-                {
-                    var enc = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, fs.AsRandomAccessStream());
-                    enc.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)rtb.PixelWidth, (uint)rtb.PixelHeight, 96, 96, pixels.ToArray());
-                    await enc.FlushAsync();
-                }
-                Console.WriteLine($"PASS screenshot {IOPath.GetFileName(path)} {rtb.PixelWidth}x{rtb.PixelHeight}");
+                using var fs = File.Create(IOPath.Combine(dir, filename));
+                var enc = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, fs.AsRandomAccessStream());
+                enc.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)rtb.PixelWidth, (uint)rtb.PixelHeight, 96, 96, pixels.ToArray());
+                await enc.FlushAsync();
             }
+
+            var items = Steps;
+            for (int i = 0; i < items.Length; i++) await Capture(items[i], $"{i + 1:00}-{items[i].Tag}.png");
+
+            Api.Invoke("workflow_set", new { file, value = new { system = "grid_export", tools = "roof" } });
+            Reload();
+            if (Steps.Contains(NavLoads) || Steps.Contains(NavStorage) || Steps.Contains(NavScene) || _summary is not null)
+                throw new InvalidOperationException("Full-export workflow navigation or result invalidation failed.");
+            await Capture(NavSite, "14-full-export.png");
+            Api.Invoke("workflow_set", new { file, value = new { system = "off_grid_generator", tools = "scene" } });
+            Reload();
+            if (!Steps.Contains(NavLoads) || !Steps.Contains(NavStorage) || Steps.Contains(NavRoof) || Steps.Contains(NavEconomics))
+                throw new InvalidOperationException("Off-grid workflow navigation failed.");
+            await Capture(NavSite, "15-off-grid.png");
+            Api.Invoke("workflow_set", new { file, value = new { system = "custom", tools = "both" } });
+
+            _roofArray = (int)N(Api.Invoke("add_array", new { file, name = "West roof" }), "array");
+            Api.Invoke("set_roof", new { file, array = _roofArray, outline = new[] {
+                new[] { 0.0, 0.0 }, new[] { 10.0, 0.0 }, new[] { 10.0, 5.5 }, new[] { 5.0, 5.5 }, new[] { 5.0, 7.0 }, new[] { 0.0, 7.0 }
+            } });
+            Reload();
+            if (PhotoArrayBox.SelectedIndex != _roofArray || RoofCanvas.Children.Count <= 1)
+                throw new InvalidOperationException("Second roof did not load in the roof editor.");
+            await Capture(NavRoof, "16-second-roof.png");
+
+            Api.Invoke("cable_plan", new { file, mode = "save", circuits = new[] {
+                new { label = "West DC", kind = "dc_string", metal = "copper", length_m = 19, area_mm2 = 4, temperature_c = 60,
+                    voltage_v = 390, current_a = 10, circuits = 2, target_drop_pct = 1.5 },
+                new { label = "Main AC", kind = "ac_single", metal = "copper", length_m = 15, area_mm2 = 6, temperature_c = 60,
+                    voltage_v = 230, current_a = 20, circuits = 1, target_drop_pct = 1.5 },
+            } });
+            Reload();
+            await Capture(NavCables, "17-cable-estimates.png");
         }
         catch (Exception ex) { ok = false; File.WriteAllText(IOPath.Combine(dir, "error.txt"), ex.ToString()); }
         Application.Current.Exit();

@@ -196,8 +196,14 @@ struct ScenePage: View {
                 if let f = hit["field"] as? JSONDict {
                     Text("\(str(f, "name")) · \(int(f, "modules")) modules · \(int(f, "strings")) strings · array \(str(f, "array_id"))").font(.caption)
                     Stepper("\(m.t("modules_per_string")): \(mps)", value: $mps, in: 1...40)
+                    let fieldID = str(f, "id")
+                    let stored = dicts(m.section("scene")["fields"]).first { str($0, "id") == fieldID }
+                    StringRouteEditor(point: stored?["inverter_at"] as? [Double]) { point in
+                        var route: JSONDict = ["op": "route_strings", "field": fieldID, "modules_per_string": mps]
+                        if let point { route["inverter_at"] = point }
+                        edit([route])
+                    }.id(fieldID)
                     HStack {
-                        Button(m.t("route_strings")) { edit([["op": "route_strings", "field": str(f, "id"), "modules_per_string": mps]]) }
                         Button(m.t("fit_to_array")) {
                             let boundArray = str(f, "array_id")
                             let arrayId = boundArray.isEmpty ? str(arrays.first ?? [:], "id") : boundArray
@@ -270,5 +276,37 @@ struct ScenePage: View {
         panel.nameFieldStringValue = "\(m.url?.deletingPathExtension().lastPathComponent ?? "scene").\(exportFormat)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         if let r = call("scene_export", ["file": file, "output": url.path, "format": exportFormat]) { report = describe(r) }
+    }
+}
+
+
+private struct StringRouteEditor: View {
+    @EnvironmentObject var m: AppModel
+    @State private var usePoint: Bool
+    @State private var x: Double
+    @State private var y: Double
+    @State private var z: Double
+    let route: ([Double]?) -> Void
+
+    init(point: [Double]?, route: @escaping ([Double]?) -> Void) {
+        let position = point ?? []
+        _usePoint = State(initialValue: position.count == 3)
+        _x = State(initialValue: position.count == 3 ? position[0] : 0)
+        _y = State(initialValue: position.count == 3 ? position[1] : 0)
+        _z = State(initialValue: position.count == 3 ? position[2] : 0)
+        self.route = route
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(m.t("workflow_home_run"), isOn: $usePoint)
+            if usePoint {
+                NumField(label: "X (m)", value: $x)
+                NumField(label: "Y (m)", value: $y)
+                NumField(label: "Z (m)", value: $z)
+            }
+            Button(m.t("route_strings")) { route(usePoint ? [x, y, z] : nil) }
+                .disabled(usePoint && ![x, y, z].allSatisfy { $0.isFinite })
+        }
     }
 }

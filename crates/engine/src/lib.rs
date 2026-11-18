@@ -9,7 +9,7 @@
 //! voltage window → module quality/LID → mismatch → DC wiring → inverter
 //! efficiency → clipping → night tare → AC wiring → availability → grid.
 use serde::{Deserialize, Serialize};
-use solarcraft_model::validate::{validate, Severity};
+use solarcraft_model::validate::Severity;
 use solarcraft_model::{Project, TranspositionModel};
 use solarcraft_pv::{diode, iam, irradiance as irr, spa, temperature};
 use solarcraft_weather::Weather;
@@ -21,7 +21,7 @@ pub mod finance;
 pub mod loads;
 mod partial_shading;
 
-pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 5)");
+pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 6)");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step { pub key: String, pub label: String, pub value: f64, pub delta: f64, pub delta_pct: f64 }
@@ -139,7 +139,10 @@ const E_KEYS: [(&str, &str); 16] = [
 
 /// `progress(fraction) -> continue?`
 pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Option<&[f64]>, mut progress: impl FnMut(f64) -> bool) -> Result<SimResult, SimError> {
-    let errors: Vec<_> = validate(p).into_iter().filter(|i| i.severity == Severity::Error).collect();
+    let inputs_hash = inputs_hash(p, weather_hash);
+    let active = solarcraft_model::workflow::Workflow::active(p);
+    let p = active.as_ref();
+    let errors: Vec<_> = solarcraft_model::validate::validate_active(p).into_iter().filter(|i| i.severity == Severity::Error).collect();
     if !errors.is_empty() {
         return Err(SimError(format!("project has errors: {}", errors.iter().map(|e| format!("{} ({})", e.message, e.code)).collect::<Vec<_>>().join("; "))));
     }
@@ -426,18 +429,24 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
     progress(0.95);
 
     // 4. Bills and cash flow.
-    let battery_kwh = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id).map(|b| b.capacity_kwh * s.units as f64)).unwrap_or(0.0);
-    let zero = vec![0.0f32; n];
-    let load_f32: Vec<f32> = load_w.iter().map(|&x| x as f32).collect();
-    let annual_load_kwh = match &p.loads.profile {
-        solarcraft_model::plant::LoadProfile::None => 0.0,
-        solarcraft_model::plant::LoadProfile::Synthetic { .. } => p.loads.annual_kwh,
-        solarcraft_model::plant::LoadProfile::Series { .. } => load_series.unwrap_or_default().iter().sum(),
+    let fin = if p.workflow.system.islanded() {
+        warnings.push(Note { code: "ISLAND_FINANCE".into(), subject: String::new(), value: 0.0,
+            text: "Off-grid results include unserved demand and generator fuel. Grid-tariff ROI is unavailable for this system.".into() });
+        None
+    } else {
+        let battery_kwh = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id).map(|b| b.capacity_kwh * s.units as f64)).unwrap_or(0.0);
+        let zero = vec![0.0f32; n];
+        let load_f32: Vec<f32> = load_w.iter().map(|&x| x as f32).collect();
+        let annual_load_kwh = match &p.loads.profile {
+            solarcraft_model::plant::LoadProfile::None => 0.0,
+            solarcraft_model::plant::LoadProfile::Synthetic { .. } => p.loads.annual_kwh,
+            solarcraft_model::plant::LoadProfile::Series { .. } => load_series.unwrap_or_default().iter().sum(),
+        };
+        let tariff = p.tariff.for_run(annual_load_kwh, dc_kwp);
+        let without = finance::bill(&tariff, &load_f32, &zero, &local_hour);
+        let with = finance::bill(&tariff, &en.flows.import, &en.flows.export, &local_hour);
+        Some(finance::cash_flow(&tariff, &p.economics, &finance::Plant { dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_generation_kwh }, without, with))
     };
-    let tariff = p.tariff.for_run(annual_load_kwh, dc_kwp);
-    let without = finance::bill(&tariff, &load_f32, &zero, &local_hour);
-    let with = finance::bill(&tariff, &en.flows.import, &en.flows.export, &local_hour);
-    let fin = finance::cash_flow(&tariff, &p.economics, &finance::Plant { dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_generation_kwh }, without, with);
     progress(1.0);
     if en.balance.pv_to_battery_dc_kwh > 0.0 {
         warnings.push(Note { code: "DC_BATTERY_LEDGER".into(), subject: String::new(), value: en.balance.pv_to_battery_dc_kwh,
@@ -461,14 +470,17 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
         totals.insert(3, p_independent_wh);
         mk(&keys, &totals, 1.0 / 1000.0)
     } else { mk(&E_KEYS, &e_tot, 1.0 / 1000.0) };
+    let mut energy_ledger = energy_ledger;
+    if p.workflow.system.islanded() {
+        if let Some(ac) = energy_ledger.last_mut() { ac.label = "PV energy at the AC bus".into(); }
+    }
     let closure = energy_ledger[0].value + energy_ledger.iter().skip(1).map(|s| s.delta).sum::<f64>() - energy_ledger.last().unwrap().value;
     let ac_kwh = energy_ledger.last().unwrap().value;
     let poa = irradiance_ledger[1].value;
-    let inputs_hash = inputs_hash(p, weather_hash);
     Ok(SimResult {
         manifest: RunManifest { inputs_hash, engine: ENGINE_VERSION.into(), weather_hash: weather_hash.into(), weather_provider: w.provenance.provider.clone(), transposition: format!("{:?}", p.simulation.transposition.value), pv_model: p.simulation.pv_model, hours: n, ledger_closure_error_kwh: closure },
         annual: Annual { dc_kwp, ac_kw, ghi_kwh_m2: irradiance_ledger[0].value, poa_kwh_m2: poa, ac_kwh, specific_yield_kwh_kwp: ac_kwh / dc_kwp, performance_ratio: ac_kwh / (poa * dc_kwp) },
-        electrical: unit_results, array_irradiation, flows: en.flows, balance: en.balance, finance: Some(fin), local_hour,
+        electrical: unit_results, array_irradiation, flows: en.flows, balance: en.balance, finance: fin, local_hour,
         irradiance_ledger, energy_ledger, monthly, hourly, warnings, module_shading,
     })
 }
@@ -477,7 +489,16 @@ pub fn simulate(p: &Project, w: &Weather, weather_hash: &str, load_series: Optio
 pub fn inputs_hash(p: &Project, weather_hash: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(serde_json::to_vec(&p.design_snapshot()).unwrap_or_default());
+    let mut design = p.design_snapshot();
+    if let Some(fields) = design.as_object_mut() {
+        fields.remove("cable_plan"); // The simulation reads only applied loss percentages.
+        if p.workflow.system == solarcraft_model::workflow::SystemType::Custom {
+            fields.remove("workflow");
+        } else if let Some(workflow) = fields.get_mut("workflow").and_then(serde_json::Value::as_object_mut) {
+            workflow.remove("tools");
+        }
+    }
+    h.update(serde_json::to_vec(&design).unwrap_or_default());
     h.update(weather_hash.as_bytes());
     h.update(ENGINE_VERSION.as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()

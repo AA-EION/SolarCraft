@@ -65,6 +65,14 @@ fn scene_workflow() {
     let issues = ok("validate", json!({"file": fs}))["issues"].as_array().unwrap().clone();
     assert!(issues.iter().all(|i| i["severity"] != "error" && !i["code"].as_str().unwrap().starts_with("SCENE_FIELD")), "{issues:?}");
 
+    let proposal = ok("cable_plan", json!({"file":fs,"mode":"import_routes"}));
+    let circuits = proposal["circuits"].as_array().unwrap();
+    assert!(!circuits.is_empty());
+    assert!(circuits.iter().all(|row| row["source_route"].is_string()));
+    let same = ok("cable_plan", json!({"file":fs,"mode":"import_routes","circuits":circuits}));
+    assert_eq!(same["circuits"], proposal["circuits"]);
+    assert!(ok("cable_plan", json!({"file":fs}))["circuits"].as_array().unwrap().is_empty());
+
     // 3. Simulate: per-module shading with bypass diodes, and the ledger shows it.
     ok("simulate", json!({"file": fs}));
     let report = ok("report_preview", json!({"file": fs, "report_type": "system_planner"}));

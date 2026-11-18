@@ -238,7 +238,7 @@ pub fn compare_variants(path: &Path) -> Result<Vec<VariantMetrics>> {
     for (id, name, q) in designs {
         let res = (|| -> Result<SimResult> {
             let (w, hash) = crate::load_weather(&s, &q)?;
-            let series = load_series(&s, &q)?;
+            let series = load_series(&s, &solarcraft_model::workflow::Workflow::active(&q))?;
             solarcraft_engine::simulate(&q, &w, &hash, series.as_deref(), |_| true).map_err(|x| e("SIMULATION", x))
         })();
         let bkwh = q.storage.as_ref().and_then(|st| q.library.battery(&st.battery_id).map(|b| b.capacity_kwh * st.units as f64)).unwrap_or(0.0);

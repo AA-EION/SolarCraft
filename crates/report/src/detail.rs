@@ -47,14 +47,26 @@ pub(crate) fn results(view: &mut View, input: &ReportInput) {
             month.soc = Some(month.soc.map_or((soc, soc), |(lo, hi)| (lo.min(soc), hi.max(soc))));
         }
     }
-    let mut grid = ContentSection::new("monthly_grid", tr(l, "Monthly consumption and grid exchange", "Consumo e intercambio mensual con la red", "Monatsverbrauch und Netzaustausch", "Consumo e intercâmbio mensal com a rede"));
+    let islanded = p.workflow.system.islanded();
+    let grid_title = if islanded {
+        tr(l, "Monthly off-grid supply", "Suministro aislado mensual", "Monatliche Inselversorgung", "Suprimento isolado mensal")
+    } else {
+        tr(l, "Monthly consumption and grid exchange", "Consumo e intercambio mensual con la red", "Monatsverbrauch und Netzaustausch", "Consumo e intercâmbio mensal com a rede")
+    };
+    let exchanged = if islanded {
+        [tr(l, "Unserved", "No atendido", "Ungedeckt", "Não atendido"), tr(l, "Generator", "Generador", "Generator", "Gerador")]
+    } else {
+        [tr(l, "Import", "Importación", "Bezug", "Importação"), tr(l, "Export", "Exportación", "Einspeisung", "Exportação")]
+    };
+    let mut grid = ContentSection::new("monthly_grid", grid_title);
     let mut labels = vec![view.s["month"].into(), tr(l, "Requested", "Solicitado", "Bedarf", "Solicitado"),
-        tr(l, "Served", "Atendido", "Versorgt", "Atendido"), tr(l, "Import", "Importación", "Bezug", "Importação"),
-        tr(l, "Export", "Exportación", "Einspeisung", "Exportação")];
+        tr(l, "Served", "Atendido", "Versorgt", "Atendido")];
+    labels.extend(exchanged);
     if r.balance.load_kwh == 0.0 { labels.drain(1..3); }
     grid.text("kWh");
     grid.table(labels, months.iter().zip(names).map(|(m, name)| {
-        let mut row = vec![name.into(), n(m.load, 0), n(m.served, 0), n(m.import, 0), n(m.export, 0)];
+        let (first, second) = if islanded { (m.unserved, m.generator) } else { (m.import, m.export) };
+        let mut row = vec![name.into(), n(m.load, 0), n(m.served, 0), n(first, 0), n(second, 0)];
         if r.balance.load_kwh == 0.0 { row.drain(1..3); }
         row
     }));
@@ -137,7 +149,7 @@ pub(crate) fn results(view: &mut View, input: &ReportInput) {
             tr(l, "Range of battery state of charge", "Rango de estado de carga", "Bereich des Batterieladezustands", "Faixa do estado de carga"), view);
         view.contents.push(storage);
     }
-    if r.balance.outage_hours > 0 {
+    if r.balance.outage_hours > 0 && !p.workflow.system.islanded() {
         let b = &r.balance;
         let mut outage = ContentSection::new("outage_service", tr(l, "Service during scheduled outages", "Servicio durante cortes programados", "Versorgung bei geplanten Ausfällen", "Serviço durante interrupções programadas"));
         outage.table(vec![], [
