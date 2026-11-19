@@ -279,6 +279,8 @@ struct DesignPage: View {
         if let p = m.project, !p.arrays.isEmpty {
             let index = min(selectedArray, p.arrays.count - 1)
             let a = p.arrays[index]
+            let rawArrays = dicts(m.raw["arrays"])
+            let tracking = rawArrays.indices.contains(index) ? rawArrays[index]["tracking"] as? JSONDict : nil
             let arrayPath = "/arrays/\(index)"
             Form {
                 Picker(m.t("photo_array"), selection: $selectedArray) {
@@ -297,6 +299,10 @@ struct DesignPage: View {
                 NumberRow(label: m.t("target_kwp"), field: a.target_kwp, pointer: arrayPath + "/target_kwp").id(arrayPath + "/target_kwp")
                 NumberRow(label: m.t("tilt"), field: a.tilt, pointer: arrayPath + "/tilt").id(arrayPath + "/tilt")
                 NumberRow(label: m.t("azimuth"), field: a.azimuth, pointer: arrayPath + "/azimuth").id(arrayPath + "/azimuth")
+                TrackerEditor(pointer: arrayPath + "/tracking",
+                              settings: tracking ?? [:],
+                              facing: a.azimuth.value)
+                    .id((m.url?.path ?? "") + arrayPath + "/tracking")
                 Picker(m.t("mounting"), selection: Binding(get: { p.simulation.mounting.value }, set: { m.set("/simulation/mounting", $0) })) {
                     Text(m.t("open_rack")).tag("open_rack"); Text(m.t("roof_mounted")).tag("roof_mounted"); Text(m.t("integrated")).tag("integrated")
                 }

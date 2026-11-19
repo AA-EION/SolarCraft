@@ -24,6 +24,7 @@ pub mod wiring;
 pub mod flexible;
 pub mod islands;
 mod partial_shading;
+mod tracking;
 
 pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 9)");
 
@@ -212,6 +213,9 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     let mut array_irradiation = vec![];
     if w.horizon_applied { warnings.push(Note { code: "HORIZON_IN_WEATHER".into(), subject: String::new(), value: 0.0, text: "Weather beam irradiance already includes far-horizon shading; no additional horizon applied.".into() }); }
     let sun: Vec<spa::SolarPosition> = w.hours.iter().map(|h| spa::solar_position(h.unix_mid as f64, &obs, spa::delta_t_estimate(2025.0))).collect();
+    let iam_beam = |aoi: f64| iam::physical(aoi, 1.526, 4.0, 0.002);
+    let tracking_iam = p.arrays.iter().any(|a| a.tracking.is_some())
+        .then(|| tracking::DiffuseIam::new(iam_beam));
 
     // 1. Per array: plane-of-array irradiance, shading, cell temperature and module diode parameters.
     struct ArrayHours { params: Vec<Option<diode::DiodeParams>>, voc: Vec<f64>, shaded: Option<partial_shading::ShadedArray> }
@@ -219,8 +223,9 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     let mut dc_kwp = 0.0;
     for (ai, a) in p.arrays.iter().enumerate() {
         let module = p.library.module(&a.module_id.value).ok_or_else(|| SimError("module missing".into()))?;
-        let n_mod = assigned.get(&a.id).copied().unwrap_or(0) as f64;
-        if n_mod == 0.0 { continue; }
+        let installed_modules = assigned.get(&a.id).copied().unwrap_or(0);
+        if installed_modules == 0 { continue; }
+        let n_mod = f64::from(installed_modules);
         let mut irradiation = ArrayIrradiation { array_id: a.id.clone(), name: a.name.value.clone(), ..Default::default() };
         use partial_shading::ModuleCurve;
         let module_curve = match p.simulation.pv_model {
@@ -232,11 +237,15 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         let p_stc = n_mod * module.pmp_stc();
         dc_kwp += p_stc / 1000.0;
         area_tot += area;
-        let iam_beam = |aoi: f64| iam::physical(aoi, 1.526, 4.0, 0.002);
-        let iam_sky = iam::diffuse_average(iam_beam, a.tilt.value, true);
-        let iam_gnd = if a.tilt.value > 0.0 { iam::diffuse_average(iam_beam, a.tilt.value, false) } else { 0.0 };
+        let fixed_iam = if a.tracking.is_none() {
+            let sky = iam::diffuse_average(iam_beam, a.tilt.value, true);
+            let ground = if a.tilt.value > 0.0 { iam::diffuse_average(iam_beam, a.tilt.value, false) } else { 0.0 };
+            (sky, ground)
+        } else { (0.0, 0.0) };
         let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None };
-        let shade = if let Some((scene, field)) = bound_field(p, a)? {
+        let shade = if a.tracking.is_some() {
+            None
+        } else if let Some((scene, field)) = bound_field(p, a)? {
             let routes = partial_shading::routes(field, module, &elec, &a.id);
             let (summary, diagnostic, trace) = trace_field(scene, field, a, &sun, w, routes.is_ok(), module.half_cell)?;
             match (routes, trace) {
@@ -276,16 +285,34 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         } else {
             None
         };
+        let archived = a.archived_shading.as_ref()
+            .filter(|saved| shade.is_none() && saved.applies_to(a, &p.site, installed_modules));
+        if archived.is_some() {
+            warnings.push(Note { code: "ARCHIVED_3D_SHADING".into(), subject: a.name.value.clone(), value: 0.0,
+                text: "Saved 3D beam and diffuse shading are applied as field averages.".into() });
+        }
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
             let sp = &sun[k];
             let (ghi, dni, dhi) = (h.ghi.max(0.0), h.dni.max(0.0), h.dhi.max(0.0));
-            let geo = irr::Geometry { tilt: a.tilt.value, surface_azimuth: a.azimuth.value, zenith: sp.apparent_zenith, sun_azimuth: sp.azimuth };
+            let (tilt, surface_azimuth, (iam_sky, iam_gnd)) = match a.tracking.zip(tracking_iam.as_ref()) {
+                Some((tracker, optics)) => {
+                    let (tilt, surface_azimuth) = tracking::plane(tracker, sp, a.tilt.value, a.azimuth.value);
+                    (tilt, surface_azimuth, optics.at(tilt))
+                }
+                None => (a.tilt.value, a.azimuth.value, fixed_iam),
+            };
+            let geo = irr::Geometry { tilt, surface_azimuth, zenith: sp.apparent_zenith, sun_azimuth: sp.azimuth };
             let doy = solarcraft_pv::day_of_year_utc(h.unix_mid as f64) as f64;
             let comp = irr::Components { ghi, dni, dhi, dni_extra: irr::dni_extra(doy, 1366.1) };
             let poa = irr::poa(model, &geo, &comp, p.site.albedo.value);
             let aoi = irr::aoi_projection(geo.tilt, geo.surface_azimuth, geo.zenith, geo.sun_azimuth).clamp(-1.0, 1.0).acos().to_degrees();
-            let (beam_f, beam_geo, diff_f) = shade.as_ref().map_or((1.0, 1.0, 1.0), |s| (1.0 - s.beam_shaded[k] as f64, 1.0 - s.beam_area_shaded[k] as f64, s.diffuse_factor));
+            let (beam_f, beam_geo, diff_f) = if let Some(s) = &shade {
+                (1.0 - f64::from(s.beam_shaded[k]), 1.0 - f64::from(s.beam_area_shaded[k]), s.diffuse_factor)
+            } else if let Some(s) = archived {
+                let beam = 1.0 - f64::from(s.beam_loss[local_hour[k] as usize]);
+                (beam, beam, 1.0 - s.diffuse_loss)
+            } else { (1.0, 1.0, 1.0) };
             let dir_s = poa.direct * if ah.shaded.is_some() { beam_geo } else { beam_f };
             let sky_s = poa.sky_diffuse * diff_f;
             let after_geo = poa.direct * beam_geo + sky_s + poa.ground_diffuse;

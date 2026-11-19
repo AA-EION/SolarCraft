@@ -131,6 +131,7 @@
             <NumberBox x:Name="KwpBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/target_kwp" ValueChanged="OnNumber" />
             <NumberBox x:Name="TiltBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/tilt" ValueChanged="OnNumber" />
             <NumberBox x:Name="AzimuthBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/azimuth" ValueChanged="OnNumber" />
+            <StackPanel x:Name="TrackingPanel" Spacing="8" />
             <ComboBox x:Name="MountingBox" Width="220" SelectionChanged="OnMounting" />
             <ComboBox x:Name="PvModelBox" Width="220" SelectionChanged="OnPvModelChanged" />
             <NumberBox x:Name="MpsBox" Width="220" HorizontalAlignment="Left" Tag="/arrays/0/modules_per_string" ValueChanged="OnNumber" SpinButtonPlacementMode="Inline" Minimum="1" />

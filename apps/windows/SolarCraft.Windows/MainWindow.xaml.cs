@@ -201,6 +201,7 @@ public sealed partial class MainWindow : Window
         var detailed = p["mode"]!.GetValue<string>() == "detailed";
         ModeRadios.SelectedIndex = detailed ? 1 : 0;
         KwpBox.Value = Api.Num(a["target_kwp"]); TiltBox.Value = Api.Num(a["tilt"]); AzimuthBox.Value = Api.Num(a["azimuth"]);
+        BuildTrackingEditor(a);
         MountingBox.SelectedIndex = Api.Str(p["simulation"]!["mounting"]) switch { "open_rack" => 0, "integrated" => 2, _ => 1 };
         PvModelBox.SelectedIndex = p["simulation"]!["pv_model"]?.GetValue<string>() == "two_diode" ? 1 : 0;
         MpsBox.Value = Api.Num(a["modules_per_string"]); StringsBox.Value = Api.Num(a["strings"]);
@@ -486,7 +487,7 @@ public sealed partial class MainWindow : Window
     }
 
     // ---- Edits ----
-    private void Set(string pointer, object value)
+    private void Set(string pointer, object? value)
     {
         if (_loading || _file is null) return;
         if (Try(() => Api.Invoke("set_fields", new { file = _file, edits = new[] { new { pointer, value } } })))

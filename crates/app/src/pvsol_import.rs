@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
+mod archived_photo;
+mod archived_shade;
 mod island;
 
 use crate::{e, Result};
@@ -9,10 +11,10 @@ use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use solarcraft_model::{derive, plant::{BuckOptimizer, CatalogRef, Electrical, FeedIn, InverterUnit, LoadProfile, StringGroup},
-    DesignMode, Field, Project, TranspositionModel};
+    tracking::Tracker, Array, DesignMode, Field, Project, TranspositionModel};
 use solarcraft_store::{sha256_hex, InitialBlob, Store};
 use solarcraft_weather::{Hour, Provenance, Weather};
-use std::{collections::{BTreeMap, HashMap}, fs::File, io::{Cursor, Read}, path::Path};
+use std::{borrow::Cow, collections::{BTreeMap, HashMap}, fs::File, io::{Cursor, Read}, path::Path};
 use zip::ZipArchive;
 
 const HOURS: usize = 8760;
@@ -59,6 +61,12 @@ struct Reference {
     load_annual_kwh: Option<f64>,
     installed_modules: u32,
     inverters: usize,
+    #[serde(default)]
+    tracking_arrays: usize,
+    #[serde(default)]
+    archived_shade_arrays: usize,
+    #[serde(default)]
+    photoplan_arrays: usize,
     target_kwp: f64,
     initial_inputs_hash: String,
     warnings: Vec<String>,
@@ -69,6 +77,7 @@ struct Imported {
     project: Project,
     weather: Vec<u8>,
     load: Option<Vec<u8>>,
+    photo_blobs: Vec<archived_photo::PhotoBlob>,
     reference: Reference,
 }
 
@@ -86,6 +95,9 @@ pub fn import(source: &Path, destination: Option<&Path>) -> Result<Value> {
         if let Some(load) = &imported.load {
             blobs.push(InitialBlob { kind: "load_series", media_type: "application/json", data: load });
         }
+        blobs.extend(imported.photo_blobs.iter().map(|photo| InitialBlob {
+            kind: photo.kind, media_type: photo.media_type, data: &photo.bytes,
+        }));
         Store::create_with_blobs(path, &imported.project, "import PV*SOL project", &blobs)
             .map_err(|error| e("PROJECT_CREATE", error))?;
     }
@@ -136,6 +148,8 @@ fn overview(reference: &Reference) -> Value {
         "system_type":reference.system_type,"weather_member":reference.weather_member,"weather_diffuse":reference.weather_diffuse,
         "load_source":reference.load_source,"load_annual_kwh":reference.load_annual_kwh,
         "installed_modules":reference.installed_modules,"inverters":reference.inverters,"target_kwp":reference.target_kwp,
+        "tracking_arrays": reference.tracking_arrays, "archived_shade_arrays": reference.archived_shade_arrays,
+        "photoplan_arrays": reference.photoplan_arrays,
         "warnings":reference.warnings,"channels":channels})
 }
 
@@ -160,7 +174,7 @@ fn read(source: &Path) -> Result<Imported> {
     let db = member(&mut archive, "DB.json", 16 * 1024 * 1024)?.ok_or_else(|| bad("An embedded DB.json is required."))?;
     let db: Value = serde_json::from_slice(strip_bom(&db)).map_err(|error| e("PVSOL_IMPORT", error))?;
     let mut warnings = vec![
-        "The imported copy replays the editable PV design. EV, heat pump controls, financial settings, roof geometry and shading geometry require separate migration.".into(),
+        "The imported copy replays the editable PV design. EV and heat pump controls, financial settings, and unsupported layout assets require separate migration.".into(),
         "SolarCraft uses one-hour intervals on a reference non-leap standard-time calendar and estimates irradiance at the midpoint. Module temperature and electrical models may differ from the archived run.".into(),
     ];
     if !island {
@@ -236,8 +250,10 @@ fn read(source: &Path) -> Result<Imported> {
     });
     let (installed_modules, target_kwp) = electrical(&mut project, root, &db, &sha, &mut warnings)?;
     apply_field_settings(&mut project, root, &mut warnings);
+    let archived_shade_arrays = archived_shade::apply(&mut project, root, &mut archive, &mut warnings)?;
+    let photo_blobs = import_photos(&mut project, root, &mut archive, &mut warnings);
     if system.contains("3d") || system.contains("3D") {
-        warnings.push("3D fields retain angle and wired counts. The saved 3D geometry and shading coefficients were not imported.".into());
+        warnings.push("3D fields retain angle and wired counts. Editable scene geometry requires separate migration.".into());
     }
     project.grid.phases = number(root, &["ACNetz", "PhasenAnzahl"]).filter(|v| matches!(*v, 1 | 3)).unwrap_or(1);
     let minimum_bus_voltage = if island { 1.0 } else { 30.0 };
@@ -302,8 +318,37 @@ fn read(source: &Path) -> Result<Imported> {
     let reference = Reference { source_name: source_name.to_owned(), sha256: sha, format, system_type: system.to_owned(),
         weather_member, weather_diffuse, load_source, load_annual_kwh, installed_modules,
         inverters: project.electrical.inverters.len(), target_kwp,
+        tracking_arrays: project.arrays.iter().filter(|a| a.tracking.is_some()).count(),
+        archived_shade_arrays, photoplan_arrays: project.roof_photos.len(),
         initial_inputs_hash: solarcraft_engine::inputs_hash(&project, &weather_hash), warnings, channels: saved };
-    Ok(Imported { project, weather: bytes, load, reference })
+    Ok(Imported { project, weather: bytes, load, photo_blobs, reference })
+}
+
+fn import_photos(project: &mut Project, root: Node<'_, '_>, archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+                 warnings: &mut Vec<String>) -> Vec<archived_photo::PhotoBlob> {
+    let wired = derive::modules_by_array(&project.electrical);
+    let fields = path_node(root, &["PVModule"]).into_iter().flat_map(|p| children(p, "Modulfelder"));
+    let mut blobs = vec![];
+    for (area, array) in fields.zip(&mut project.arrays).filter(|(area, _)| flag(*area, &["HasPhotoPlan"])) {
+        let Some(module) = project.library.module(&array.module_id.value) else { continue; };
+        match archived_photo::import(archive, area, array, module) {
+            Ok(Some((photo, assets))) => {
+                if array.roof.as_ref().is_none_or(|roof| roof.modules.len() < wired.get(&array.id).copied().unwrap_or(0) as usize) {
+                    array.roof = None;
+                    warnings.push(format!("PhotoPlan for {} has fewer saved placements than wired modules.", array.name.value));
+                } else {
+                    project.roof_photos.push(photo);
+                    blobs.extend(assets);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => warnings.push(format!("PhotoPlan for {} was omitted. {}", array.name.value, error.message)),
+        }
+    }
+    if !project.roof_photos.is_empty() {
+        warnings.push(format!("Recovered calibration, source images and placed modules for {} PhotoPlan areas.", project.roof_photos.len()));
+    }
+    blobs
 }
 
 fn equipment_record<'a>(db: &'a Value, family: &str, keys: &[&str], id: Option<&str>, version: Option<i64>, sha: &str)
@@ -401,6 +446,30 @@ fn read_project_load(root: Node<'_, '_>) -> Result<Option<(Vec<f64>, u32)>> {
     }
     let values = read_load_values(value(*profile, &["Values"]).unwrap_or_default(), minutes, count)?;
     Ok(Some((values, minutes)))
+}
+
+fn read_tracking(array: &Array, node: Node<'_, '_>) -> Option<Tracker> {
+    let mode = number::<u32>(node, &["KindOfTracking"])?;
+    let limit = number::<f64>(node, &["RotationLimitOne"])?;
+    let azimuth_limit = || number::<f64>(node, &["RotationLimitTwo"]);
+    let gcr = if matches!(mode, 1 | 2) && flag(node, &["Backtracking"]) {
+        Some(number::<f64>(node, &["GroundUtilization"])?)
+    } else { None };
+    let tracker = match mode {
+        1 | 2 => Tracker::SingleAxis {
+            axis_azimuth_deg: if mode == 1 { array.azimuth.value } else { 90.0 },
+            axis_tilt_deg: array.tilt.value, max_rotation_deg: limit / 2.0, backtracking_gcr: gcr,
+        },
+        3 => Tracker::VerticalAxis {
+            center_azimuth_deg: if array.azimuth.value == 0.0 { 0.0 } else { 180.0 },
+            azimuth_travel_deg: limit,
+        },
+        4 => Tracker::DualAxis {
+            center_azimuth_deg: 180.0, max_tilt_deg: limit, azimuth_travel_deg: azimuth_limit()?,
+        },
+        _ => return None,
+    };
+    tracker.valid().then_some(tracker)
 }
 
 fn read_load_values(encoded: &str, minutes: u32, count: usize) -> Result<Vec<f64>> {
@@ -561,11 +630,21 @@ fn read_limited(input: impl Read, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn archive_path(name: &str) -> Cow<'_, str> {
+    if name.contains('\\') { Cow::Owned(name.replace('\\', "/")) } else { Cow::Borrowed(name) }
+}
+
 fn member(archive: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
-    if archive.file_names().filter(|n| n.as_deref().is_ok_and(|n| n == name)).count() > 1 {
-        return Err(e("PVSOL_IMPORT", format!("Duplicate project member {name}.")));
-    }
-    match archive.by_name(name) {
+    let raw = {
+        let mut matches = archive.file_names().filter_map(|n| n.ok())
+            .filter(|n| archive_path(n) == name);
+        let Some(raw) = matches.next() else { return Ok(None); };
+        if matches.next().is_some() {
+            return Err(e("PVSOL_IMPORT", format!("Duplicate project member {name}.")));
+        }
+        raw.into_owned()
+    };
+    match archive.by_name(&raw) {
         Ok(entry) if entry.size() <= limit && entry.is_file() => read_limited(entry, limit).map(Some),
         Ok(_) => Err(e("PVSOL_IMPORT", format!("Unexpected size or type for project member {name}."))),
         Err(zip::result::ZipError::FileNotFound) => Ok(None),
@@ -603,11 +682,13 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
             if module.bifaciality.is_some() { warnings.push(format!("{} is bifacial. Only its front-side PV model is replayed.", module.model)); }
             project.library.modules.push(module);
         }
-        if let Some(tracking) = number::<u32>(node, &["PVTracking", "KindOfTracking"]).filter(|mode| *mode != 0) {
-            warnings.push(format!("{} uses tracking mode {tracking}. This replay uses the saved fixed orientation.", array.name.value));
-        }
-        if flag(node, &["HasPhotoPlan"]) {
-            warnings.push(format!("{} uses PhotoPlan. The saved orientation is imported, while photo calibration and roof outlines require separate migration.", array.name.value));
+        if let Some(tracking) = path_node(node, &["PVTracking"]).filter(|n| number::<u32>(*n, &["KindOfTracking"]).is_some_and(|kind| kind != 0)) {
+            array.tracking = read_tracking(&array, tracking);
+            if array.tracking.is_none() {
+                warnings.push(format!("{} has unsupported tracking settings. This replay uses its fixed orientation.", array.name.value));
+            } else if flag(tracking, &["Backtracking"]) {
+                warnings.push(format!("{} uses SolarCraft's moving-row backtracking with the saved ground coverage ratio.", array.name.value));
+            }
         }
         project.arrays.push(array);
     }

@@ -51,7 +51,7 @@ fn decode_source(bytes: Vec<u8>) -> Result<Source> {
     Ok(Source { hash: solarcraft_store::sha256_hex(&bytes), bytes, mime, image: image.into_rgba8() })
 }
 
-fn png(image: RgbaImage) -> Result<Vec<u8>> {
+pub(crate) fn png(image: RgbaImage) -> Result<Vec<u8>> {
     let mut out = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(image).write_to(&mut out, ImageFormat::Png).map_err(photo_error)?;
     Ok(out.into_inner())
@@ -133,7 +133,7 @@ fn ring(calibration: &Calibration, points: &[P], width: f64, depth: f64) -> Resu
     Ok(plane)
 }
 
-fn rectify(source: &RgbaImage, calibration: &Calibration, width: f64, depth: f64) -> RgbaImage {
+pub(crate) fn rectify(source: &RgbaImage, calibration: &Calibration, width: f64, depth: f64) -> RgbaImage {
     let scale = 1000.0 / width.max(depth);
     let (w, h) = ((width * scale).round().max(1.0) as u32, (depth * scale).round().max(1.0) as u32);
     RgbaImage::from_fn(w, h, |x, y| {

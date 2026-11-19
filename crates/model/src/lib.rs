@@ -8,6 +8,7 @@
 //! fields whose origin is not [`Origin::User`].
 pub mod derive;
 pub mod equipment;
+pub mod tracking;
 pub mod plant;
 pub mod validate;
 pub mod workflow;
@@ -112,6 +113,41 @@ pub struct Array {
     /// Optional roof face with module layout (2D, roof-plane coordinates).
     #[serde(default)]
     pub roof: Option<RoofLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<tracking::Tracker>,
+    /// Hourly field-average losses carried in from a saved 3D calculation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_shading: Option<ArchivedShading>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArchivedShading {
+    pub beam_loss: Vec<f32>,
+    pub diffuse_loss: f64,
+    pub tilt_deg: f64,
+    pub azimuth_deg: f64,
+    /// Latitude, longitude and local standard-time offset at import.
+    pub site: [f64; 3],
+    pub module_id: String,
+    pub installed_modules: u32,
+}
+
+impl ArchivedShading {
+    pub fn valid(&self) -> bool {
+        self.beam_loss.len() == 8760 && self.beam_loss.iter().all(|v| (0.0..=1.0).contains(v))
+            && (0.0..=1.0).contains(&self.diffuse_loss)
+            && (0.0..=90.0).contains(&self.tilt_deg) && (0.0..360.0).contains(&self.azimuth_deg)
+            && (-90.0..=90.0).contains(&self.site[0]) && (-180.0..=180.0).contains(&self.site[1])
+            && (-14.0..=14.0).contains(&self.site[2])
+            && !self.module_id.is_empty() && self.installed_modules > 0
+    }
+
+    pub fn applies_to(&self, array: &Array, site: &Site, installed_modules: u32) -> bool {
+        array.tracking.is_none() && (self.tilt_deg - array.tilt.value).abs() < 1e-8
+            && (self.azimuth_deg - array.azimuth.value).abs() < 1e-8
+            && self.site == [site.latitude.value, site.longitude.value, site.utc_offset()]
+            && self.module_id == array.module_id.value && self.installed_modules == installed_modules
+    }
 }
 
 /// A roof face, its layout parameters and the computed placement.
@@ -265,7 +301,7 @@ impl Project {
                 strings: Field::default(0),
                 inverter_id: Field::default(String::new()),
                 inverter_count: Field::default(1),
-                roof: None,
+                roof: None, tracking: None, archived_shading: None,
             }],
             losses: Losses {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),
@@ -310,6 +346,17 @@ impl Project {
     pub fn set_by_pointer(&mut self, pointer: &str, value: serde_json::Value) -> Result<(), String> {
         if pointer.split('/').nth(1) == Some("network_fault_studies") {
             return Err("Use network fault studies to validate and save these inputs.".into());
+        }
+        let parts: Vec<_> = pointer.split('/').collect();
+        if let ["", "arrays", index, "tracking"] = parts.as_slice() {
+            let array = index.parse::<usize>().ok().and_then(|i| self.arrays.get_mut(i))
+                .ok_or_else(|| format!("no such field: {pointer}"))?;
+            let tracking: Option<tracking::Tracker> = serde_json::from_value(value).map_err(|err| err.to_string())?;
+            if tracking.is_some_and(|tracker| !tracker.valid()) {
+                return Err("Tracking requires valid rotation, axis and ground coverage values.".into());
+            }
+            array.tracking = tracking;
+            return Ok(());
         }
         let mut doc = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
         let target = doc.pointer_mut(pointer).ok_or_else(|| format!("no such field: {pointer}"))?;

@@ -28,6 +28,8 @@ pub fn add_array(path: &Path, name: Option<&str>) -> Result<Value> {
     array.id = format!("array-{suffix}");
     array.name = Field::user(name);
     array.roof = None;
+    array.tracking = None;
+    array.archived_shading = None;
     array.target_kwp = Field::default(array.target_kwp.value);
     array.modules_per_string = Field::default(0);
     array.strings = Field::default(0);

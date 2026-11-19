@@ -24,10 +24,28 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
     if !(-180.0..=180.0).contains(&p.site.longitude.value) { push("SITE_LON_RANGE", Severity::Error, "/site/longitude".into(), "Longitude must be between −180 and 180°.".into()); }
     if !(0.0..=1.0).contains(&p.site.albedo.value) { push("SITE_ALBEDO_RANGE", Severity::Error, "/site/albedo".into(), "Albedo must be between 0 and 1.".into()); }
     if p.weather.is_none() { push("WEATHER_MISSING", Severity::Error, "/weather".into(), "No weather data. Fetch PVGIS data or import a weather file.".into()); }
+    let archived_arrays = p.arrays.iter().any(|a| a.archived_shading.is_some());
+    let archived_counts = archived_arrays.then(|| crate::derive::modules_by_array(&crate::derive::electrical(p)));
     for (i, a) in p.arrays.iter().enumerate() {
         let base = format!("/arrays/{i}");
         if !(0.0..=90.0).contains(&a.tilt.value) { push("ARRAY_TILT_RANGE", Severity::Error, format!("{base}/tilt"), "Tilt must be between 0 and 90°.".into()); }
         if !(0.0..360.0).contains(&a.azimuth.value) { push("ARRAY_AZIMUTH_RANGE", Severity::Error, format!("{base}/azimuth"), "Azimuth must be in [0, 360)°, clockwise from north.".into()); }
+        if let Some(tracker) = a.tracking {
+            if !tracker.valid() {
+                push("ARRAY_TRACKING", Severity::Error, format!("{base}/tracking"), "Check the tracker axis, travel and ground coverage values.".into());
+            }
+            if a.roof.is_some() || p.scene.as_ref().is_some_and(|scene| scene.fields.iter().any(|field| field.array_id.as_deref() == Some(a.id.as_str()))) {
+                push("TRACKER_STATIC_GEOMETRY", Severity::Warning, format!("{base}/tracking"), "The tracker moves during simulation. Fixed roof and scene shading are skipped for this array.".into());
+            }
+        }
+        if let Some(shade) = &a.archived_shading {
+            let wired = archived_counts.as_ref().and_then(|counts| counts.get(&a.id)).copied().unwrap_or_default();
+            if !shade.valid() {
+                push("ARCHIVED_SHADE_INVALID", Severity::Error, format!("{base}/archived_shading"), "The saved shade data requires 8,760 hourly fractions and a valid orientation.".into());
+            } else if !shade.applies_to(a, &p.site, wired) {
+                push("ARCHIVED_SHADE_INPUTS", Severity::Warning, format!("{base}/archived_shading"), "Saved 3D shading is skipped when the site, array orientation, module or wired module count differs from the archive.".into());
+            }
+        }
         let Some(m) = p.library.module(&a.module_id.value) else { push("MODULE_MISSING", Severity::Error, format!("{base}/module_id"), format!("Module '{}' is not in the project library.", a.module_id.value)); continue };
         if let Some(mp) = &m.model_params {
             if !mp.fit_acceptable { push("MODULE_FIT_APPROX", Severity::Warning, format!("{base}/module_id"), format!("Module datasheet could only be fitted approximately (Pmp error {:.2} %, γ error {:.3} %/K). Check the datasheet values.", mp.pmp_rel_err * 100.0, mp.gamma_abs_err)); }
