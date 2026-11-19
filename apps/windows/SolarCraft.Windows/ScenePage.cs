@@ -211,6 +211,46 @@ public sealed partial class MainWindow
                     SceneEdit(new object[] { new { op = "update_object", id, kind } });
                 })));
             }
+            if (o["kind"] is JsonObject building && S(building, "type") == "building")
+            {
+                var eave = Num(T("eave_height"), N(building, "eave_height"), 138);
+                eave.Minimum = 0.001;
+                p.Children.Add(eave);
+                var roof = building["roof"];
+                var pitch = Num(T("pitch"), N(roof, "pitch_deg"), 138);
+                pitch.Minimum = 0;
+                pitch.Maximum = 75;
+                var setback = Num(T("ridge_setback"), N(roof, "ridge_setback_m"), 138);
+                setback.Minimum = 0.001;
+                if (S(roof, "type") != "flat") p.Children.Add(pitch);
+                if (S(roof, "type") == "hip_with_setback") p.Children.Add(setback);
+                p.Children.Add(Btn(T("apply_building"), () =>
+                {
+                    var kind = (JsonObject)building.DeepClone();
+                    kind["eave_height"] = eave.Value;
+                    if (S(roof, "type") != "flat") kind["roof"]!["pitch_deg"] = pitch.Value;
+                    if (S(roof, "type") == "hip_with_setback") kind["roof"]!["ridge_setback_m"] = setback.Value;
+                    SceneEdit(new object[] { new { op = "update_object", id, kind } });
+                }));
+            }
+            if (o["kind"] is JsonObject dormer && S(dormer, "type") == "dormer")
+            {
+                var width = Num(T("dormer_width"), N(dormer, "width"), 138);
+                var height = Num(T("dormer_front_height"), N(dormer, "front_height"), 138);
+                var pitch = Num(T("pitch"), N(dormer, "roof_pitch_deg"), 138);
+                width.Minimum = height.Minimum = 0.001;
+                pitch.Minimum = 0;
+                pitch.Maximum = Math.Max(0, N(dormer, "base_pitch_deg") - 0.001);
+                p.Children.Add(Row(width, height));
+                p.Children.Add(Row(pitch, Btn(T("apply_dormer"), () =>
+                {
+                    var kind = (JsonObject)dormer.DeepClone();
+                    kind["width"] = width.Value;
+                    kind["front_height"] = height.Value;
+                    kind["roof_pitch_deg"] = pitch.Value;
+                    SceneEdit(new object[] { new { op = "update_object", id, kind } });
+                })));
+            }
             if (hit.Contains("/roof-"))
             {
                 p.Children.Add(Btn(T("place_modules"), () =>

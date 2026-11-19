@@ -72,6 +72,7 @@ pub fn place_roof(path: &Path, face: &str) -> Result<Value> {
     array.roof = None;
     array.tracking = None;
     array.archived_shading = None;
+    array.bifacial_rows = None;
     let module = project.library.module(&array.module_id.value)
         .ok_or_else(|| e("SCENE_EDIT", "Select a PV module before placing a roof field."))?;
     let module_watts = module.pmp_stc();

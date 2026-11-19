@@ -132,6 +132,24 @@ pub struct ArrayIrradiation {
     pub name: String,
     pub poa_kwh_m2: [f64; 12],
     pub effective_kwh_m2: [f64; 12],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rear: Option<RearIrradiation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RearIrradiation {
+    pub source: RearSource,
+    /// Rear plane irradiance after geometric and mounting shade, before
+    /// incidence-angle correction and the module's bifaciality factor.
+    pub monthly_kwh_m2: [f64; 12],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RearSource {
+    SavedHourly,
+    SavedMonthly,
+    RowGeometry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -224,7 +242,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         voc: Vec<f64>,
         shaded: Option<partial_shading::ShadedArray>,
         archived: Option<archived_shading::ArchiveArray>,
-        saved_shade: bool,
+        area_average_shade: bool,
     }
     let mut arr_hours: std::collections::HashMap<String, ArrayHours> = Default::default();
     let mut dc_kwp = 0.0;
@@ -257,7 +275,30 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         let archived_iam_at_50 = archive.filter(|saved| saved.diffuse_baseline.is_some())
             .and_then(|_| module.unverified.get("iam").and_then(serde_json::Value::as_f64))
             .filter(|value| (0.01..=1.0).contains(value));
-        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None, saved_shade: archive.is_some(),
+        let bifaciality = module.bifaciality.filter(|f| *f > 0.0 && f.is_finite());
+        let rear_profile = archive.and_then(|saved| saved.rear.as_ref()).filter(|rear| {
+            bifaciality.is_some() && rear.weather_hash == weather_hash
+                && rear.albedo.is_none_or(|albedo| albedo == p.site.albedo.value)
+                && !a.bifacial_rows.is_some_and(|rows| rows.force_geometry)
+        });
+        let row_model = a.bifacial_rows.filter(|_| bifaciality.is_some() && a.tracking.is_none() && rear_profile.is_none())
+            .and_then(|rows| solarcraft_pv::bifacial::Rows::new(a.tilt.value, rows.slant_width_m, rows.row_pitch_m, rows.lower_edge_m)
+                .map(|model| (model, 1.0 - rows.mounting_shade)));
+        let rear_source = rear_profile.map(|profile| if profile.estimated_hourly { RearSource::SavedMonthly } else { RearSource::SavedHourly })
+            .or_else(|| row_model.as_ref().map(|_| RearSource::RowGeometry));
+        irradiation.rear = rear_source.map(|source| RearIrradiation { source, monthly_kwh_m2: [0.0; 12] });
+        let rear_diffuse_iam = row_model.as_ref().map(|_| {
+            (iam::diffuse_average(iam_beam, 180.0 - a.tilt.value, true),
+                iam::diffuse_average(iam_beam, 180.0 - a.tilt.value, false))
+        });
+        if row_model.is_some() {
+            warnings.push(Note { code: "BIFACIAL_REAR_ROWS".into(), subject: a.name.value.clone(), value: 0.0,
+                text: "Rear irradiance uses parallel rows over a horizontal reflecting surface. Nearby objects and finite row ends are outside this model.".into() });
+        } else if bifaciality.is_some() && rear_profile.is_none() {
+            warnings.push(Note { code: "BIFACIAL_REAR_MISSING".into(), subject: a.name.value.clone(), value: 0.0,
+                text: "Rear irradiance needs applicable saved readings or fixed-row geometry.".into() });
+        }
+        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None, area_average_shade: false,
             archived: archive.and_then(|saved| archived_shading::ArchiveArray::new(saved, &elec, &a.id, module, module_curve)) };
         let shade = if a.tracking.is_some() || archive.is_some() {
             None
@@ -301,6 +342,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         } else {
             None
         };
+        ah.area_average_shade = (archive.is_some() && ah.archived.is_none()) || (shade.is_some() && ah.shaded.is_none());
         if archive.is_some() {
             let treatment = if ah.archived.is_some() { "Saved Visual3D rates drive per-string I–V curves with module-level shading and diffuse residuals." }
                 else { "Saved Visual3D shading uses field averages for the current wiring." };
@@ -338,6 +380,15 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let mut ground = poa.ground_diffuse;
             let mut archived_light = None;
             let soiling = f(l.soiling_pct.value);
+            let (rear_poa, rear_effective) = if let Some(profile) = rear_profile {
+                let irradiance = f64::from(profile.w_m2[local_hour[k] as usize]);
+                (irradiance, irradiance * bifaciality.unwrap_or_default())
+            } else if let (Some((rows, transmission)), Some((sky_iam, ground_iam))) = (&row_model, rear_diffuse_iam) {
+                let rear = rows.irradiance(&geo, &comp, p.site.albedo.value);
+                let incident = transmission * (rear.direct + rear.sky + rear.reflected);
+                let absorbed = transmission * (rear.direct * iam_beam(180.0 - aoi) + rear.sky * sky_iam + rear.reflected * ground_iam);
+                (incident, absorbed * bifaciality.unwrap_or_default() * soiling)
+            } else { (0.0, 0.0) };
             if let Some((s, baseline)) = archive.and_then(|s| s.diffuse_baseline.map(|baseline| (s, baseline))) {
                 let mut sky_directional = irr::directional_sky(model, &geo, &comp).min(poa.sky_diffuse);
                 if let (irr::SkyModel::HayDavies, Some(bourges)) = (model, s.bourges_clear_sky) {
@@ -354,13 +405,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 let field_transmission = (1.0 - base) * (1.0 - residual);
                 sky_s = iso_unshaded * field_transmission;
                 ground *= field_transmission;
-                let rear = s.rear.as_ref().filter(|rear| rear.weather_hash == weather_hash)
-                    .and_then(|rear| module.bifaciality.map(|factor| factor * f64::from(rear.w_m2[local_hour[k] as usize])))
-                    .unwrap_or(0.0);
                 archived_light = Some(archived_shading::Light {
                     directional: directional * beam_iam * soiling,
                     isotropic: (iso_unshaded * iam_sky + poa.ground_diffuse * iam_gnd) * (1.0 - base) * soiling,
-                    rear, temperature: 0.0,
+                    rear: rear_effective, temperature: 0.0,
                 });
             }
             let dir_s = directional * if ah.shaded.is_some() { beam_geo } else { beam_f };
@@ -368,11 +416,13 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let after_shade = dir_s + sky_s + ground;
             let diffuse_iam = sky_s * iam_sky + ground * iam_gnd;
             let after_iam = dir_s * beam_iam + diffuse_iam;
-            let e_eff = after_iam * soiling + archived_light.map_or(0.0, |light| light.rear);
+            let e_eff = after_iam * soiling + rear_effective;
             for (s, v) in [ghi, poa.global, after_geo, after_shade, after_iam, after_iam * soiling, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
-            let tc = temperature::faiman(poa.global, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
+            let thermal_poa = poa.global + if row_model.is_some() { rear_poa } else { 0.0 };
+            let tc = temperature::faiman(thermal_poa, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             if let Some(shaded) = &mut ah.shaded {
-                shaded.hours[k] = partial_shading::Light { direct: poa.direct * beam_iam * f(l.soiling_pct.value), diffuse: diffuse_iam * f(l.soiling_pct.value), temperature: tc };
+                shaded.hours[k] = partial_shading::Light { direct: poa.direct * beam_iam * soiling,
+                    diffuse: diffuse_iam * soiling + rear_effective, temperature: tc };
             }
             if let (Some(shaded), Some(light)) = (&mut ah.archived, archived_light) {
                 shaded.hours[k] = archived_shading::Light { temperature: tc, ..light };
@@ -389,6 +439,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             monthly[month_of[k]].poa_kwh_m2 += poa.global * area / 1000.0;
             irradiation.poa_kwh_m2[month_of[k]] += poa.global / 1000.0;
             irradiation.effective_kwh_m2[month_of[k]] += e_eff / 1000.0;
+            if let Some(rear) = &mut irradiation.rear { rear.monthly_kwh_m2[month_of[k]] += rear_poa / 1000.0; }
             hourly.poa_w_m2[k] += (poa.global * area) as f32;
             hourly.t_cell_c[k] += (tc * area) as f32;
         }
@@ -449,6 +500,12 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let groups: Vec<_> = groups_with_keys.iter().map(|&(_, group)| group).collect();
             if groups.is_empty() { continue; }
             let composite = groups.iter().any(|g| g.series_chain.is_some() || g.optimizer.is_some());
+            let offsets: std::collections::HashMap<_, _> = groups_with_keys.iter().map(|&(key, group)| {
+                let start = route_offsets.entry((&group.array_id, group.modules_per_string)).or_default();
+                let old = *start;
+                *start += group.strings as usize;
+                (key, old)
+            }).collect();
             let strings: Vec<_> = if composite {
                 inputs().flat_map(|(mi, input)| {
                     solarcraft_model::plant::physical_strings(input).into_iter().map(move |positions| {
@@ -463,12 +520,6 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     }).collect::<Vec<_>>()
                 }).collect()
             } else { vec![] };
-            let offsets: Vec<_> = groups.iter().map(|group| {
-                let start = route_offsets.entry((&group.array_id, group.modules_per_string)).or_default();
-                let old = *start;
-                *start += group.strings as usize;
-                old
-            }).collect();
             let mi = members[0];
             let circuit_links = routed.dc.get(&(u.id.clone(), mi));
             let mut mr = MpptResult { index: mi as u32 + 1, ..Default::default() };
@@ -479,7 +530,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     let optimizer = g.optimizer.as_ref().map_or("", |o| o.model.as_str());
                     format!("{} {} {optimizer}", g.modules_per_string, area).trim().to_owned()
                 }).collect::<Vec<_>>().join(" in series with "))).collect::<Vec<_>>().join(" || ");
-                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.shaded.is_some() || (a.saved_shade && a.archived.is_none()))) {
+                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.area_average_shade)) {
                     warnings.push(Note { code: "COMPOSITE_STRING_SHADE_AVERAGE".into(), subject: u.name.clone(), value: 0.0,
                         text: "Series or optimizer segments without a verified physical shade route use area-average irradiance.".into() });
                 }
@@ -493,6 +544,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let v_max = ins.iter().map(|i| i.v_max).fold(f64::MAX, f64::min);
             let i_max: f64 = ins.iter().map(|i| i.i_max).sum();
             let p_max: f64 = if ins.iter().all(|i| i.p_max_w.is_some()) { ins.iter().filter_map(|i| i.p_max_w).sum() } else { f64::INFINITY };
+            let mut native_composite_hours = 0;
             for k in 0..n {
                 if k % 2190 == 0 && !progress(0.6 + 0.3 * (ui as f64 + k as f64 / n as f64) / nu as f64) { return Err(SimError("cancelled".into())); }
                 let state = |g: &solarcraft_model::plant::StringGroup| {
@@ -508,15 +560,21 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     let mut available = 0.0;
                     let mut curves = Vec::new();
                     let mut nonlinear = false;
+                    let mut native = false;
                     for chain in &strings {
-                        let active: Vec<_> = chain.iter().map(|&(_, group, _)| archived(group)).collect();
+                        let active: Vec<_> = chain.iter().map(|&(_, group, _)| (resolved(group), archived(group))).collect();
                         let copies = chain[0].1.strings;
-                        let detailed = active.iter().any(Option::is_some);
+                        let detailed = active.iter().any(|(local, saved)| local.is_some() || saved.is_some());
+                        native |= active.iter().any(|(local, _)| local.is_some());
                         nonlinear |= detailed;
                         let (iterations, multiplicity) = if detailed { (copies, 1.0) } else { (1, f64::from(copies)) };
                         for copy in 0..iterations {
-                            let profiles: Vec<_> = chain.iter().zip(&active).map(|(&(key, _, _), shaded)| {
-                                shaded.map(|a| a.module_curves(k, local_hour[k] as usize, key, copy as usize))
+                            let profiles: Vec<_> = chain.iter().zip(&active).map(|(&(key, group, _), &(local, saved))| {
+                                if let Some(a) = local {
+                                    Some(a.module_curves(k, group.modules_per_string, offsets[&key] + copy as usize))
+                                } else {
+                                    saved.map(|a| a.module_curves(k, local_hour[k] as usize, key, copy as usize))
+                                }
                             }).collect();
                             let mut segments = Vec::new();
                             for (&(_, group, bypass_drop), modules) in chain.iter().zip(&profiles) {
@@ -541,15 +599,16 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                         }
                     }
                     nonlinear_hours += usize::from(nonlinear);
+                    native_composite_hours += usize::from(native);
                     let mut point = electrical::operate_curves(&curves, v_min, v_max, i_max, p_max);
                     point.p_independent = point.p_independent.max(available);
                     point
                 } else if groups.iter().any(|group| resolved(group).is_some() || archived(group).is_some()) {
                     nonlinear_hours += 1;
                     let mut curves = vec![];
-                    for (&(key, group), &start) in groups_with_keys.iter().zip(&offsets) {
+                    for &(key, group) in &groups_with_keys {
                         if let Some(shaded) = resolved(group) {
-                            curves.extend(shaded.curves(k, group.modules_per_string, start, group.strings as usize));
+                            curves.extend(shaded.curves(k, group.modules_per_string, offsets[&key], group.strings as usize));
                         } else if let Some(shaded) = archived(group) {
                             curves.extend(shaded.curves(k, local_hour[k] as usize, group.modules_per_string, key));
                         } else if let Some(state) = state(group) {
@@ -581,6 +640,11 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 mr.dc_kwh += d / 1000.0;
                 dc[k] += d;
                 vw[k] += t.v_operating * d;
+            }
+            if native_composite_hours > 0 {
+                warnings.push(Note { code: "COMPOSITE_STRING_SHADE_GEOMETRY".into(),
+                    subject: format!("{} MPPT {}", u.name, mi + 1), value: native_composite_hours as f64,
+                    text: "Scene or roof substring shading drives the series and optimizer curves. Segment membership follows the layout's string order.".into() });
             }
             if mr.limited_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: format!("{} MPPT {}", u.name, mi + 1), value: mr.limited_hours as f64, text: format!("{} MPPT {}: {} h limited by the MPP voltage window or input current", u.name, mi + 1, mr.limited_hours) }); }
             ur.mppts.push(mr);

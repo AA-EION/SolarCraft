@@ -196,7 +196,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
         "library_count" => Ok(json!({"path": lib_path(params), "kinds": app::userlib::count(&lib_path(params))?.into_iter().map(|(k, n)| json!({"kind": k, "count": n})).collect::<Vec<_>>()})),
         "library_import" => Ok(json!({"items": app::userlib::import_file(&lib_path(params), &path(params, "source")?, params.get("source_kind").and_then(Value::as_str).unwrap_or("imported"))?})),
         "explain" => match app::latest_results(&path(params, "file")?)? {
-            Some(r) => Ok(json!({"annual": r.annual, "irradiance_kwh_m2": r.irradiance_ledger, "energy_kwh": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical})),
+            Some(r) => Ok(json!({"annual": r.annual, "irradiance_kwh_m2": r.irradiance_ledger, "energy_kwh": r.energy_ledger, "monthly": r.monthly, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical, "array_irradiation": r.array_irradiation})),
             None => Err(AppError { code: "NO_RESULTS", message: "No results yet; run the simulation first.".into() }),
         },
         "export_report" => {
@@ -258,6 +258,7 @@ pub fn dispatch(method: &str, params: &Value, progress: &mut dyn FnMut(f64) -> b
 /// Compact result summary (hourly series are fetched with `results_hours`).
 pub fn summary(r: &solarcraft_engine::SimResult) -> Value {
     json!({"annual": r.annual, "manifest": r.manifest, "warnings": r.warnings, "balance": r.balance, "electrical": r.electrical,
+           "array_irradiation": r.array_irradiation,
            "wiring": {"dc_kwh": r.hourly.dc_cable_wh.iter().map(|&w| f64::from(w)).sum::<f64>() / 1000.0,
                "ac_kwh": r.flows.ac_cable_loss.iter().map(|&w| f64::from(w)).sum::<f64>() / 1000.0},
            "ev": r.ev, "heating": r.heating, "island_finance": r.island_finance,

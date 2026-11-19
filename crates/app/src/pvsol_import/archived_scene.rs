@@ -13,6 +13,8 @@ use solarcraft_scene::{
 use std::{collections::{BTreeMap, HashMap, HashSet}, io::Cursor};
 use zip::ZipArchive;
 
+mod buildings;
+
 type Archive = ZipArchive<Cursor<Vec<u8>>>;
 const GEOMETRY: &str = "Visu3D/GeometrischeDaten.xml";
 const WIRING: &str = "Visu3D/Modul_Verschaltung.xml";
@@ -28,7 +30,12 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, archive: &mut Arc
             let strings = scene.fields.iter().map(|f| f.strings.len()).sum::<usize>();
             let meshes = scene.objects.iter().filter(|o| o.id.starts_with("visual3d-mesh-")).count();
             let trees = scene.objects.iter().filter(|o| matches!(o.kind, Kind::Tree { .. })).count();
-            warnings.push(format!("Restored {meshes} Visual3D meshes, {trees} editable trees, {fields} drawn roof fields, {modules} placed modules and {strings} saved string routes. Unsupported building, terrain and material data require separate migration."));
+            let buildings = scene.objects.iter().filter(|o| matches!(o.kind, Kind::Building { .. })).count();
+            let dormers = scene.objects.iter().filter(|o| matches!(o.kind, Kind::Dormer { .. })).count();
+            warnings.push(format!("Restored {meshes} Visual3D meshes, {trees} editable trees, {buildings} buildings, {dormers} dormers, {fields} drawn roof fields, {modules} placed modules and {strings} saved string routes."));
+            if buildings > 0 {
+                warnings.push("Imported buildings show the exterior shell. Roof thickness, doors, windows and material data are omitted.".into());
+            }
             if trees > 0 {
                 warnings.push("Imported tree crowns use an ellipsoid and mean opacity for local edits. The saved monthly opacity values are retained as object properties.".into());
             }
@@ -61,7 +68,20 @@ fn read_scene(project: &Project, root: Node<'_, '_>, archive: &mut Archive) -> R
     });
     let mut skipped_objects = 0;
     let mut triangles = 0;
-    for (index, node) in children(saved, "ZeichenObjekt").enumerate() {
+    let nodes: Vec<_> = children(saved, "ZeichenObjekt").collect();
+    let reference_objects: Vec<_> = nodes.iter().copied().enumerate().filter(|(_, node)| {
+        let ty = number::<u32>(*node, &["StandardDaten", "AnwObjTyp"]);
+        ty.is_some_and(|ty| ty != 4) && number::<i32>(*node, &["StandardDaten", "IstBezugsObj"]) == Some(-1)
+    }).map(|(i, _)| i + 1).collect();
+    for (index, node) in nodes.iter().copied().enumerate() {
+        if let Some(building) = path_node(node, &["SpezifDaten", "VarHaus"]) {
+            if let Some(object) = buildings::read_building(index + 1, node, building) {
+                scene.objects.push(object);
+            } else {
+                skipped_objects += 1;
+            }
+            continue;
+        }
         if let Some(tree) = path_node(node, &["SpezifDaten", "Baum"]) {
             if let Some(object) = read_tree(index + 1, node, tree) {
                 scene.objects.push(object);
@@ -73,6 +93,16 @@ fn read_scene(project: &Project, root: Node<'_, '_>, archive: &mut Archive) -> R
         let Some(mesh) = path_node(node, &["SpezifDaten", "MeshObj"]) else { continue; };
         if let Some(object) = read_object(index + 1, node, mesh, archive, MAX_TRIANGLES - triangles) {
             if let Kind::Mesh { faces, .. } = &object.kind { triangles += faces.len(); }
+            scene.objects.push(object);
+        } else {
+            skipped_objects += 1;
+        }
+    }
+    for (index, node) in nodes.iter().copied().enumerate() {
+        let Some(dormer) = path_node(node, &["SpezifDaten", "Gaube"]) else { continue; };
+        let parent = number::<usize>(node, &["Zuordn_XML", "Index_BezugsObj"]).and_then(|i| reference_objects.get(i))
+            .and_then(|i| scene.object(&format!("visual3d-building-{i}")));
+        if let Some(object) = parent.and_then(|parent| buildings::read_dormer(index + 1, node, dormer, parent)) {
             scene.objects.push(object);
         } else {
             skipped_objects += 1;

@@ -260,6 +260,22 @@ pub fn plan_with_source(scene: &Scene, imp: &Imported, relink: bool, source_key:
             if o.source.as_ref().is_some_and(|s| files.contains(&s.file)) && !seen.contains(&o.id) { notes.push(format!("{} is no longer in the source file; kept unchanged", o.id)); }
         }
     }
+    for edit in &mut edits {
+        let kind = match edit {
+            Edit::AddObject { kind, .. } | Edit::RelinkObject { kind, .. } => kind,
+            _ => continue,
+        };
+        if let Kind::Dormer { profile } = kind {
+            if let Some(parent) = &mut profile.parent {
+                if let Some(new_id) = host_ids.get(parent) {
+                    *parent = new_id.clone();
+                } else {
+                    notes.push(format!("Detached a dormer whose parent {parent} was absent from the imported objects."));
+                    profile.parent = None;
+                }
+            }
+        }
+    }
     let mut bound_arrays: std::collections::HashSet<_> = scene.fields.iter().filter_map(|field| field.array_id.clone()).collect();
     for f in &imp.fields {
         let source = source_key.map(|key| Source {

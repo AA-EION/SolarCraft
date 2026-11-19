@@ -108,47 +108,62 @@ pub(crate) struct ShadedArray {
     pub half_cell: bool,
 }
 
+type LightLevels = Vec<((u8, u8), u32)>;
+
 impl ShadedArray {
     pub(crate) fn active(&self, hour: usize) -> bool {
         self.hours[hour].direct > 0.0 && self.trace.shaded_at(hour)
     }
 
     pub(crate) fn curves(&self, hour: usize, length: u32, start: usize, count: usize) -> Vec<(IvCurve, f64)> {
-        let light = self.hours[hour];
         let routes = &self.routes[&length][start..start + count];
-        let mut distinct = BTreeMap::<Vec<((u8, u8), u32)>, u32>::new();
+        let mut distinct = BTreeMap::<LightLevels, u32>::new();
         for route in routes {
             let mut levels = BTreeMap::new();
-            for &module in route {
-                if let Some(transmissions) = self.trace.transmission(hour, module) {
-                    if self.half_cell {
-                        for pair in transmissions.chunks_exact(2) {
-                            let a = pair[0].min(pair[1]);
-                            let b = pair[0].max(pair[1]);
-                            *levels.entry((a, b)).or_default() += 1;
-                        }
-                    } else {
-                        for &factor in transmissions { *levels.entry((factor, factor)).or_default() += 1; }
-                    }
-                } else {
-                    *levels.entry((255, 255)).or_default() += self.diodes;
-                }
-            }
+            for &module in route { self.add_module_levels(hour, module, &mut levels); }
             *distinct.entry(levels.into_iter().collect()).or_default() += 1;
         }
         distinct.into_iter().filter_map(|(levels, multiplicity)| {
-            let at = |transmission| {
-                let irradiance = light.diffuse + light.direct * f64::from(transmission) / 255.0;
-                self.module.at(irradiance.max(1e-5), light.temperature)
-            };
-            let curve = if self.half_cell {
-                let params: Vec<_> = levels.into_iter().map(|((a, b), count)| (at(a), (a != b).then(|| at(b)), count)).collect();
-                IvCurve::parallel_substrings(&params, self.diodes, self.forward_v)
-            } else {
-                let params: Vec<_> = levels.into_iter().map(|((a, _), count)| (at(a), count)).collect();
-                IvCurve::substrings(&params, self.diodes, self.forward_v)
-            };
-            curve.map(|curve| (curve, f64::from(multiplicity)))
+            self.curve(hour, levels).map(|curve| (curve, f64::from(multiplicity)))
         }).collect()
+    }
+
+    pub(crate) fn module_curves(&self, hour: usize, length: u32, route: usize) -> Vec<(Option<IvCurve>, u32)> {
+        let mut distinct = BTreeMap::<LightLevels, u32>::new();
+        for &module in &self.routes[&length][route] {
+            let mut levels = BTreeMap::new();
+            self.add_module_levels(hour, module, &mut levels);
+            *distinct.entry(levels.into_iter().collect()).or_default() += 1;
+        }
+        distinct.into_iter().map(|(levels, count)| (self.curve(hour, levels), count)).collect()
+    }
+
+    fn add_module_levels(&self, hour: usize, module: usize, levels: &mut BTreeMap<(u8, u8), u32>) {
+        let Some(transmissions) = self.trace.transmission(hour, module) else {
+            *levels.entry((255, 255)).or_default() += self.diodes;
+            return;
+        };
+        if self.half_cell {
+            for pair in transmissions.chunks_exact(2) {
+                *levels.entry((pair[0].min(pair[1]), pair[0].max(pair[1]))).or_default() += 1;
+            }
+        } else {
+            for &factor in transmissions { *levels.entry((factor, factor)).or_default() += 1; }
+        }
+    }
+
+    fn curve(&self, hour: usize, levels: LightLevels) -> Option<IvCurve> {
+        let light = self.hours[hour];
+        let at = |transmission| {
+            let irradiance = light.diffuse + light.direct * f64::from(transmission) / 255.0;
+            self.module.at(irradiance.max(1e-5), light.temperature)
+        };
+        if self.half_cell {
+            let params: Vec<_> = levels.into_iter().map(|((a, b), count)| (at(a), (a != b).then(|| at(b)), count)).collect();
+            IvCurve::parallel_substrings(&params, self.diodes, self.forward_v)
+        } else {
+            let params: Vec<_> = levels.into_iter().map(|((a, _), count)| (at(a), count)).collect();
+            IvCurve::substrings(&params, self.diodes, self.forward_v)
+        }
     }
 }

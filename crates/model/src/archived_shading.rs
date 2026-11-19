@@ -36,12 +36,15 @@ pub struct RearIrradiance {
     /// True when the archive supplies only monthly totals.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub estimated_hourly: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub albedo: Option<f64>,
 }
 
 impl RearIrradiance {
     pub fn valid(&self) -> bool {
         self.weather_hash.len() == 64 && self.weather_hash.bytes().all(|v| v.is_ascii_hexdigit())
             && self.w_m2.len() == 8760 && self.w_m2.iter().all(|v| (0.0..=1800.0).contains(v))
+            && self.albedo.is_none_or(|v| (0.0..=1.0).contains(&v))
     }
 }
 

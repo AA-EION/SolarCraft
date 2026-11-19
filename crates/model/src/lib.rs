@@ -119,6 +119,31 @@ pub struct Array {
     /// Hourly field-average losses carried in from a saved 3D calculation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_shading: Option<ArchivedShading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bifacial_rows: Option<BifacialRows>,
+}
+
+/// Fixed, parallel bifacial racks above a horizontal reflecting surface.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BifacialRows {
+    pub slant_width_m: f64,
+    pub row_pitch_m: f64,
+    pub lower_edge_m: f64,
+    pub mounting_shade: f64,
+    /// Select the independent model even when an archived rear series applies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_geometry: bool,
+}
+
+impl BifacialRows {
+    pub fn valid(self, tilt_deg: f64) -> bool {
+        (0.0..=90.0).contains(&tilt_deg)
+            && (0.01..=1000.0).contains(&self.slant_width_m)
+            && (0.01..=1000.0).contains(&self.row_pitch_m)
+            && (0.0..=1000.0).contains(&self.lower_edge_m)
+            && (0.0..=1.0).contains(&self.mounting_shade)
+            && self.slant_width_m * tilt_deg.to_radians().cos() <= self.row_pitch_m
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,7 +344,7 @@ impl Project {
                 strings: Field::default(0),
                 inverter_id: Field::default(String::new()),
                 inverter_count: Field::default(1),
-                roof: None, tracking: None, archived_shading: None,
+                roof: None, tracking: None, archived_shading: None, bifacial_rows: None,
             }],
             losses: Losses {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),
@@ -375,6 +400,16 @@ impl Project {
                 return Err("Tracking requires valid rotation, axis and ground coverage values.".into());
             }
             array.tracking = tracking;
+            return Ok(());
+        }
+        if let ["", "arrays", index, "bifacial_rows"] = parts.as_slice() {
+            let array = index.parse::<usize>().ok().and_then(|i| self.arrays.get_mut(i))
+                .ok_or_else(|| format!("no such field: {pointer}"))?;
+            let rows: Option<BifacialRows> = serde_json::from_value(value).map_err(|err| err.to_string())?;
+            if rows.is_some_and(|rows| !rows.valid(array.tilt.value)) {
+                return Err("Bifacial rows need valid dimensions, with pitch covering the projected row width and shading between 0 and 1.".into());
+            }
+            array.bifacial_rows = rows;
             return Ok(());
         }
         let mut doc = serde_json::to_value(&*self).map_err(|e| e.to_string())?;

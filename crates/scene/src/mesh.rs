@@ -79,7 +79,7 @@ fn circle(c: P2, r: f64, n: u32) -> Vec<P2> {
 }
 
 /// Building with a gable or hip roof over a rectangle (validated before).
-fn pitched(id: &str, fp: &[P2], base: f64, eave: f64, pitch: f64, hip: bool, out: &mut Vec<Face>) {
+fn pitched(id: &str, fp: &[P2], base: f64, eave: f64, pitch: f64, hip: bool, setback: Option<f64>, out: &mut Vec<Face>) {
     let mut p = ccw(fp);
     let len = |a: P2, b: P2| ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
     // Ridge along the first edge for gables; along the longer side for hips.
@@ -108,11 +108,11 @@ fn pitched(id: &str, fp: &[P2], base: f64, eave: f64, pitch: f64, hip: bool, out
         out.push(face(id, "roof-0", Role::Roof, vec![tt[0], tt[1], r1, r0], 1.0));
         out.push(face(id, "roof-1", Role::Roof, vec![tt[2], tt[3], r0, r1], 1.0));
     } else {
-        let d = lb / 2.0;
+        let d = setback.unwrap_or(lb / 2.0);
         let ua = [(p[1][0] - p[0][0]) / la, (p[1][1] - p[0][1]) / la];
         let r0 = b3([m03[0] + ua[0] * d, m03[1] + ua[1] * d], h);
         let r1 = b3([m12[0] - ua[0] * d, m12[1] - ua[1] * d], h);
-        if (la - lb).abs() < 1e-9 {
+        if (la - 2.0 * d).abs() < 1e-9 {
             out.push(face(id, "roof-0", Role::Roof, vec![tt[0], tt[1], r0], 1.0));
             out.push(face(id, "roof-1", Role::Roof, vec![tt[1], tt[2], r0], 1.0));
             out.push(face(id, "roof-2", Role::Roof, vec![tt[2], tt[3], r0], 1.0));
@@ -183,12 +183,31 @@ pub fn faces(o: &Object) -> Vec<Face> {
                     let maxp = fp.iter().map(|p| p[0] * s + p[1] * c).fold(f64::MIN, f64::max);
                     prism(id, &fp, base, &|p: P2| top + (maxp - (p[0] * s + p[1] * c)) * t, Role::Wall, Role::Roof, &mut out)
                 }
-                Roof::Gable { pitch_deg } if fp.len() == 4 => pitched(id, &fp, base, *eave_height, *pitch_deg, false, &mut out),
-                Roof::Hip { pitch_deg } if fp.len() == 4 => pitched(id, &fp, base, *eave_height, *pitch_deg, true, &mut out),
+                Roof::Gable { pitch_deg } if fp.len() == 4 => pitched(id, &fp, base, *eave_height, *pitch_deg, false, None, &mut out),
+                Roof::Hip { pitch_deg } if fp.len() == 4 => pitched(id, &fp, base, *eave_height, *pitch_deg, true, None, &mut out),
+                Roof::HipWithSetback { pitch_deg, ridge_setback_m } if fp.len() == 4 => {
+                    pitched(id, &fp, base, *eave_height, *pitch_deg, true, Some(*ridge_setback_m), &mut out)
+                }
                 _ => prism(id, &fp, base, &|_| top, Role::Wall, Role::Roof, &mut out),
             }
             let extra = cut_openings(id, openings, &mut out);
             out.extend(extra);
+        }
+        Kind::Dormer { profile } => {
+            let Some(depth) = profile.depth() else { return out; };
+            let [a, b, c, d] = profile.footprint(depth);
+            let low = profile.base_z;
+            let front = low + profile.front_height;
+            let back = low + depth * profile.base_pitch_deg.to_radians().tan();
+            let (a0, b0, a1, b1, c1, d1) = (
+                [a[0], a[1], low], [b[0], b[1], low], [a[0], a[1], front], [b[0], b[1], front],
+                [c[0], c[1], back], [d[0], d[1], back],
+            );
+            out.push(face(id, "wall-0", Role::Wall, vec![a0, b0, b1, a1], 1.0));
+            out.push(face(id, "wall-1", Role::Wall, vec![b0, c1, b1], 1.0));
+            out.push(face(id, "wall-2", Role::Wall, vec![d1, a0, a1], 1.0));
+            out.push(face(id, "floor", Role::Floor, vec![d1, c1, b0, a0], 1.0));
+            out.push(face(id, "roof-0", Role::Roof, vec![a1, b1, c1, d1], 1.0));
         }
         Kind::Block { center, base_z, length, width, height, rotation_deg } => {
             let (s, c) = (rotation_deg.to_radians().sin(), rotation_deg.to_radians().cos());

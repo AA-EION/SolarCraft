@@ -38,6 +38,15 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
                 push("TRACKER_STATIC_GEOMETRY", Severity::Warning, format!("{base}/tracking"), "The tracker moves during simulation. Fixed roof and scene shading are skipped for this array.".into());
             }
         }
+        if let Some(rows) = a.bifacial_rows {
+            if !rows.valid(a.tilt.value) {
+                push("BIFACIAL_ROWS_INVALID", Severity::Error, format!("{base}/bifacial_rows"),
+                    "Bifacial rows require valid geometry and pitch at least as large as the projected row width.".into());
+            } else if a.tracking.is_some() {
+                push("BIFACIAL_ROWS_TRACKING", Severity::Warning, format!("{base}/bifacial_rows"),
+                    "The independent rear irradiance model uses fixed rows. Rear irradiance for this tracker is omitted.".into());
+            }
+        }
         if let Some(shade) = &a.archived_shading {
             let wired = archived_counts.as_ref().and_then(|counts| counts.get(&a.id)).copied().unwrap_or_default();
             if !shade.valid() {

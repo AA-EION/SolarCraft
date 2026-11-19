@@ -328,7 +328,7 @@ fn read(source: &Path) -> Result<Imported> {
             let profile = rear.or_else(|| distribute_monthly_rear(monthly_rear?, &weather.hours));
             if let Some(w_m2) = profile {
                 let rear = solarcraft_model::archived_shading::RearIrradiance {
-                    weather_hash: weather_hash.clone(), w_m2, estimated_hourly,
+                    weather_hash: weather_hash.clone(), w_m2, estimated_hourly, albedo: Some(project.site.albedo.value),
                 };
                 if rear.valid() {
                     warnings.push(if estimated_hourly {
@@ -341,9 +341,9 @@ fn read(source: &Path) -> Result<Imported> {
             }
         }
     }
-    if project.arrays.iter().any(|array| project.library.module(&array.module_id.value).is_some_and(|module| module.bifaciality.is_some())
+    if project.arrays.iter().any(|array| array.bifacial_rows.is_some()
         && array.archived_shading.as_ref().is_none_or(|shade| shade.rear.is_none())) {
-        warnings.push("Some bifacial arrays use front irradiance because an identifiable saved rear series is unavailable.".into());
+        warnings.push("Bifacial arrays with saved row geometry can estimate rear irradiance when a saved rear profile is unavailable.".into());
     }
     project.weather = Some(solarcraft_model::WeatherRef { hash: weather_hash.clone(), provider: weather.provenance.provider,
         summary: format!("{weather_member} · {HOURS} hours") });
@@ -506,6 +506,18 @@ fn read_tracking(array: &Array, node: Node<'_, '_>) -> Option<Tracker> {
         _ => return None,
     };
     tracker.valid().then_some(tracker)
+}
+
+fn read_bifacial_rows(array: &Array, node: Node<'_, '_>) -> Option<solarcraft_model::BifacialRows> {
+    if value(node, &["BacksideIrradianceModel", "Value"]) != Some("ViewFactor") { return None; }
+    let rows = solarcraft_model::BifacialRows {
+        slant_width_m: number(node, &["WidthOfMountingStructure", "Value"])?,
+        row_pitch_m: number(node, &["RowDistanceOfMountingStructure", "Value"])?,
+        lower_edge_m: number(node, &["HeightFromGroundOfMountingStructure", "Value"])?,
+        mounting_shade: number(node, &["ShadingByMountingStructure", "Value"])?,
+        force_geometry: false,
+    };
+    rows.valid(array.tilt.value).then_some(rows)
 }
 
 fn read_load_values(encoded: &str, minutes: u32, count: usize) -> Result<Vec<f64>> {
@@ -783,6 +795,9 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
         array.azimuth = Field::user(number::<f64>(node, &["Modulausrichtung"]).filter(|v| (-360.0..=360.0).contains(v))
             .ok_or_else(|| fail(format!("Missing or invalid azimuth for {}.", array.name.value)))?.rem_euclid(360.0));
         array.module_id = Field::user(module.id.clone());
+        if module.bifaciality.is_some() {
+            array.bifacial_rows = path_node(node, &["Bifaciality"]).and_then(|settings| read_bifacial_rows(&array, settings));
+        }
         if !project.library.modules.iter().any(|m| m.id == module.id) {
             project.library.modules.push(module);
         }

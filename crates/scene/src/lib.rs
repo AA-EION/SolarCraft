@@ -81,6 +81,56 @@ pub enum Roof {
     Gable { pitch_deg: f64 },
     /// Rectangular footprint; all four sides slope at `pitch_deg`.
     Hip { pitch_deg: f64 },
+    /// Rectangular footprint; the two end slopes run to the specified ridge inset.
+    HipWithSetback { pitch_deg: f64, ridge_setback_m: f64 },
+}
+
+/// Shed-roof dormer whose underside follows a steeper roof plane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dormer {
+    pub origin: P2,
+    pub base_z: f64,
+    pub width: f64,
+    pub front_height: f64,
+    pub facing_deg: f64,
+    pub base_pitch_deg: f64,
+    pub roof_pitch_deg: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+impl Dormer {
+    pub fn depth(&self) -> Option<f64> {
+        if !self.origin.iter().all(|v| v.is_finite()) || !self.base_z.is_finite()
+            || !(0.001..=1000.0).contains(&self.width) || !(0.001..=1000.0).contains(&self.front_height)
+            || !(0.0..360.0).contains(&self.facing_deg) || !(0.0..=75.0).contains(&self.base_pitch_deg)
+            || !(0.0..self.base_pitch_deg).contains(&self.roof_pitch_deg) {
+            return None;
+        }
+        let depth = self.front_height / (self.base_pitch_deg.to_radians().tan() - self.roof_pitch_deg.to_radians().tan());
+        (0.001..=1000.0).contains(&depth).then_some(depth)
+    }
+
+    pub fn footprint(&self, depth: f64) -> [P2; 4] {
+        let (s, c) = self.facing_deg.to_radians().sin_cos();
+        [[0.0, 0.0], [self.width, 0.0], [self.width, depth], [0.0, depth]].map(|[x, y]| {
+            [self.origin[0] - c * x - s * y, self.origin[1] + s * x - c * y]
+        })
+    }
+
+    fn fit_on(&self, parent: &Kind) -> Option<Self> {
+        let Kind::Building { footprint, base_z, eave_height, roof: Roof::Shed { pitch_deg, facing_deg }, .. } = parent
+            else { return None; };
+        let (s, c) = facing_deg.to_radians().sin_cos();
+        let projection = |[x, y]: P2| x * s + y * c;
+        let edge = footprint.iter().copied().map(projection).reduce(f64::max)?;
+        let mut fitted = self.clone();
+        fitted.base_z = base_z + eave_height + (edge - projection(self.origin)) * pitch_deg.to_radians().tan();
+        fitted.base_pitch_deg = *pitch_deg;
+        fitted.facing_deg = facing_deg.rem_euclid(360.0);
+        fitted.footprint(fitted.depth()?).into_iter()
+            .all(|point| solarcraft_geometry::poly::point_in_ring(point, footprint)).then_some(fitted)
+    }
 }
 
 /// A planar face of an imported mesh: outer ring and holes.
@@ -106,6 +156,7 @@ pub enum Kind {
         #[serde(default)]
         openings: Vec<Vec<P2>>,
     },
+    Dormer { #[serde(flatten)] profile: Dormer },
     /// Box standing on `base_z` (chimney, dormer block, parapet, wall).
     Block { center: P2, base_z: f64, length: f64, width: f64, height: f64, #[serde(default)] rotation_deg: f64 },
     /// Vertical cylinder (pole, vent, silo).
@@ -190,7 +241,7 @@ impl Scene {
 }
 
 fn prefix(k: &Kind) -> &'static str {
-    match k { Kind::Building { .. } => "bld", Kind::Block { .. } => "blk", Kind::Cylinder { .. } => "cyl", Kind::Tree { .. } => "tree", Kind::Terrain { .. } => "ter", Kind::Mesh { .. } => "mesh" }
+    match k { Kind::Building { .. } => "bld", Kind::Dormer { .. } => "dormer", Kind::Block { .. } => "blk", Kind::Cylinder { .. } => "cyl", Kind::Tree { .. } => "tree", Kind::Terrain { .. } => "ter", Kind::Mesh { .. } => "mesh" }
 }
 
 /// A scene edit. A list of edits is applied as one transaction: all or nothing.
@@ -232,6 +283,7 @@ fn shift(k: &mut Kind, d: V3) {
     let mv = |p: &mut P2| { p[0] += d[0]; p[1] += d[1]; };
     match k {
         Kind::Building { footprint, base_z, openings, .. } => { footprint.iter_mut().for_each(mv); openings.iter_mut().flatten().for_each(mv); *base_z += d[2]; }
+        Kind::Dormer { profile } => { mv(&mut profile.origin); profile.base_z += d[2]; }
         Kind::Block { center, base_z, .. } | Kind::Cylinder { center, base_z, .. } | Kind::Tree { center, base_z, .. } => { mv(center); *base_z += d[2]; }
         Kind::Terrain { origin, heights, .. } => { mv(origin); heights.iter_mut().for_each(|h| *h += d[2]); }
         Kind::Mesh { faces, .. } => for f in faces { for p in f.outer.iter_mut().chain(f.holes.iter_mut().flatten()) { for k in 0..3 { p[k] += d[k]; } } },
@@ -288,13 +340,28 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
             }
             Edit::Move { id, dx, dy, dz } => {
                 if locked(&s, id) { return Err(err("LAYER_LOCKED", format!("{id} is on a locked layer"), i)); }
+                let children: Vec<_> = s.objects.iter().filter(|o| matches!(&o.kind, Kind::Dormer { profile }
+                    if profile.parent.as_deref() == Some(id.as_str()))).map(|o| o.id.clone()).collect();
+                if let Some(child) = children.iter().find(|child| locked(&s, child)) {
+                    return Err(err("LAYER_LOCKED", format!("{child} is on a locked layer"), i));
+                }
                 let o = s.objects.iter_mut().find(|o| &o.id == id).ok_or_else(|| err("NOT_FOUND", format!("no object {id}"), i))?;
                 shift(&mut o.kind, [*dx, *dy, *dz]);
                 if let Some(source) = &mut o.source { source.local_geometry |= *dx != 0.0 || *dy != 0.0 || *dz != 0.0; }
+                for child in children {
+                    let o = s.objects.iter_mut().find(|o| o.id == child).unwrap();
+                    shift(&mut o.kind, [*dx, *dy, *dz]);
+                    if let Some(source) = &mut o.source { source.local_geometry |= *dx != 0.0 || *dy != 0.0 || *dz != 0.0; }
+                    touched.push(child);
+                }
                 touched.push(id.clone());
             }
             Edit::RemoveObject { id } => {
                 if locked(&s, id) { return Err(err("LAYER_LOCKED", format!("{id} is on a locked layer"), i)); }
+                if let Some(child) = s.objects.iter().find(|o| matches!(&o.kind, Kind::Dormer { profile }
+                    if profile.parent.as_deref() == Some(id.as_str()))) {
+                    return Err(err("IN_USE", format!("{id} carries dormer {}; remove or detach it first", child.id), i));
+                }
                 if let Some(f) = s.fields.iter().find(|f| f.mount.face().is_some_and(|x| x.split('/').next() == Some(id.as_str()))) {
                     return Err(err("IN_USE", format!("{id} carries module field {}; remove the field first", f.id), i));
                 }
@@ -374,6 +441,27 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
             }
         }
     }
+    let attachments: Vec<_> = s.objects.iter().filter_map(|o| {
+        let Kind::Dormer { profile } = &o.kind else { return None; };
+        let parent = profile.parent.as_ref()?;
+        (touched.contains(&o.id) || touched.contains(parent)).then_some((&o.id, profile, parent))
+    }).map(|(id, profile, parent)| {
+        let fitted = s.object(parent).and_then(|host| profile.fit_on(&host.kind))
+            .ok_or_else(|| err("DORMER_PARENT", format!("{id}: the dormer must fit on its parent shed roof {parent}"), edits.len().saturating_sub(1)))?;
+        Ok((id.clone(), fitted))
+    }).collect::<Result<_, EditError>>()?;
+    for (id, fitted) in attachments {
+        let object = s.objects.iter_mut().find(|o| o.id == id).unwrap();
+        let kind = Kind::Dormer { profile: fitted };
+        if object.kind != kind {
+            if s.layers.iter().any(|layer| layer.name == object.layer && layer.locked) {
+                return Err(err("LAYER_LOCKED", format!("{id} is on a locked layer"), edits.len().saturating_sub(1)));
+            }
+            object.kind = kind;
+            if let Some(source) = &mut object.source { source.local_geometry = true; }
+            if !touched.contains(&id) { touched.push(id); }
+        }
+    }
     Ok((s, touched))
 }
 
@@ -433,11 +521,20 @@ pub fn validate(s: &Scene) -> Vec<Issue> {
                 if footprint.len() < 3 || ring_area(footprint).abs() < 0.5 { out.push(issue("error", "SCENE_FOOTPRINT", id, format!("{id}: the footprint needs at least 3 corners and 0.5 m² of area"))); continue; }
                 if !simple_polygon(footprint) { out.push(issue("error", "SCENE_FOOTPRINT", id, format!("{id}: the footprint crosses itself"))); continue; }
                 if *eave_height <= 0.0 { out.push(issue("error", "SCENE_HEIGHT", id, format!("{id}: eave height must be positive"))); continue; }
-                let pitch = match roof { Roof::Flat => 0.0, Roof::Shed { pitch_deg, .. } | Roof::Gable { pitch_deg } | Roof::Hip { pitch_deg } => *pitch_deg };
+                let pitch = match roof { Roof::Flat => 0.0, Roof::Shed { pitch_deg, .. } | Roof::Gable { pitch_deg }
+                    | Roof::Hip { pitch_deg } | Roof::HipWithSetback { pitch_deg, .. } => *pitch_deg };
                 if !(0.0..=75.0).contains(&pitch) { out.push(issue("error", "SCENE_PITCH", id, format!("{id}: roof pitch {pitch}° is outside 0–75°"))); continue; }
-                if matches!(roof, Roof::Gable { .. } | Roof::Hip { .. }) && !is_rectangle(footprint) {
+                if matches!(roof, Roof::Gable { .. } | Roof::Hip { .. } | Roof::HipWithSetback { .. }) && !is_rectangle(footprint) {
                     out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: gable and hip roofs need a rectangular footprint; use a shed or flat roof, or import the roof as a mesh")));
                     continue;
+                }
+                if let Roof::HipWithSetback { ridge_setback_m, .. } = roof {
+                    let side = |a: P2, b: P2| (a[0] - b[0]).hypot(a[1] - b[1]);
+                    let half_run = 0.5 * side(footprint[0], footprint[1]).max(side(footprint[1], footprint[2]));
+                    if !(0.001..half_run).contains(ridge_setback_m) {
+                        out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: ridge setback must be shorter than half the longer footprint edge")));
+                        continue;
+                    }
                 }
                 for (k, op) in openings.iter().enumerate() {
                     if !op.iter().all(|&p| point_in_ring(p, footprint)) { out.push(issue("error", "SCENE_OPENING_OUTSIDE", id, format!("{id}: roof opening {k} is not inside the footprint"))); }
@@ -446,6 +543,18 @@ pub fn validate(s: &Scene) -> Vec<Issue> {
                 for (k, op) in openings.iter().enumerate() {
                     let inside = roofs.iter().any(|f| { let plan: Vec<P2> = f.outer.iter().map(|p| [p[0], p[1]]).collect(); op.iter().all(|&p| point_in_ring(p, &plan)) });
                     if !inside { out.push(issue("error", "SCENE_OPENING_SPLIT", id, format!("{id}: roof opening {k} crosses a ridge or hip line; split it per roof face"))); }
+                }
+            }
+            Kind::Dormer { profile } => {
+                if profile.depth().is_none() {
+                    out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: invalid dormer dimensions or roof slope")));
+                    continue;
+                }
+                if profile.parent.as_ref().is_some_and(|id| s.object(id).and_then(|parent| profile.fit_on(&parent.kind))
+                    .is_none_or(|fitted| (fitted.base_z - profile.base_z).abs() > 0.001
+                        || (fitted.base_pitch_deg - profile.base_pitch_deg).abs() > 0.001
+                        || (fitted.facing_deg - profile.facing_deg).abs() > 0.001)) {
+                    out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: the dormer must fit on its parent shed roof")));
                 }
             }
             Kind::Block { length, width, height, .. } => if *length <= 0.0 || *width <= 0.0 || *height <= 0.0 { out.push(issue("error", "SCENE_SIZE", id, format!("{id}: sizes must be positive"))); continue; },
