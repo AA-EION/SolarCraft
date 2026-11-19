@@ -216,6 +216,7 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
         models_text: s["models_text"].replace("%MODEL%", &model_name).replace("%PV_MODEL%", match r.manifest.pv_model {
             solarcraft_model::PvModel::SingleDiode => s["single_diode"],
             solarcraft_model::PvModel::TwoDiode => s["two_diode"],
+            solarcraft_model::PvModel::TwoDiodePvsol => s["two_diode_pvsol"],
         }),
         notes: r.warnings.iter().filter(|w| w.code != "HORIZON_IN_WEATHER").map(|w| match w.code.as_str() {
             "NEAR_SHADING" => s["note_shading"].replace("%S%", &w.subject),

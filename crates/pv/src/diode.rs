@@ -524,3 +524,98 @@ mod tests {
         assert!(((pm(50.0) - pm(10.0)) / 40.0 / pm(25.0) * 100.0 - d.gamma_pmp).abs() < 1e-5);
     }
 }
+
+/// Cell topology PV*SOL's two-diode model assumes for a module: series cells from
+/// Voc / 0.6 V rounded half to even and made even, unless the declared count is within
+/// four of it; parallel strings by exact divisibility of the declared count.
+pub fn pvsol_topology(v_oc: f64, declared_cells: u32) -> (u32, u32) {
+    let estimate = (v_oc / 0.6).round_ties_even() as i64;
+    let estimate = if estimate % 2 != 0 { estimate - 1 } else { estimate }.max(1) as u32;
+    let series = if declared_cells.abs_diff(estimate) < 5 { declared_cells } else { estimate };
+    let parallel = if series > 0 && declared_cells.is_multiple_of(series) { declared_cells / series } else { 1 };
+    (series.max(1), parallel.max(1))
+}
+
+/// PV*SOL's two-diode eligibility path: fit with [`pvsol_topology`] first and, for a
+/// half-cell module whose first topology fails, retry with half the declared cells in
+/// series and the strings that divide the declared count.
+pub fn fit_two_diode_pvsol_module(d: &Datasheet, declared_cells: u32, half_cell: bool) -> Result<TwoDiodeRef, FitError> {
+    let (series, parallel) = pvsol_topology(d.v_oc, declared_cells);
+    let first = fit_two_diode_pvsol(d, series, parallel);
+    if first.is_ok() || !half_cell || declared_cells < 2 { return first; }
+    let series = declared_cells / 2;
+    fit_two_diode_pvsol(d, series, if declared_cells.is_multiple_of(series) { declared_cells / series } else { 1 })
+}
+
+/// PV*SOL's preferred standard-parameter two-diode fit (2026 R4, as documented in the
+/// private behaviour specification; independent implementation). Anchors are
+/// normalised to one cell; idealities 1 and 2. For Rs = 0.1 mΩ, 0.2 mΩ, … (< 0.1 Ω)
+/// solve the short-circuit, MPP and slope equations for Is₁, Is₂ and 1/Rp, where the
+/// slope condition uses Imp/Vmp at the terminal voltage. The third Rs with
+/// 0 < Is₂ < 10⁻⁵ A and Rp > 0 is used if Is₁ ≥ 0 and Rp ≤ 500 Ω.
+pub fn fit_two_diode_pvsol(d: &Datasheet, series: u32, parallel: u32) -> Result<TwoDiodeRef, FitError> {
+    if series == 0 || parallel == 0 || !(d.v_oc > d.v_mp && d.v_mp > 0.0 && d.i_sc > d.i_mp && d.i_mp > 0.0) || d.alpha_sc < 0.0 {
+        return Err(FitError::InvalidDatasheet);
+    }
+    let (ns, np) = (f64::from(series), f64::from(parallel));
+    let (voc, vmp, isc, imp) = (d.v_oc / ns, d.v_mp / ns, d.i_sc / np, d.i_mp / np);
+    let ut = K_EV * T_REF;
+    let e = |x: f64, m: f64| (x / (m * ut)).exp_m1();
+    let mut found = 0;
+    for step in 1..1000 {
+        let rs = f64::from(step) * 1e-4;
+        let (xsc, xmp) = (isc * rs, vmp + imp * rs);
+        let matrix = [
+            [e(voc, 1.0) - e(xsc, 1.0), e(voc, 2.0) - e(xsc, 2.0), voc - xsc],
+            [e(voc, 1.0) - e(xmp, 1.0), e(voc, 2.0) - e(xmp, 2.0), voc - xmp],
+            [e(xmp, 1.0) / ut, e(xmp, 2.0) / (2.0 * ut), 1.0],
+        ];
+        let Some([is1, is2, g]) = solve_n(matrix, [isc, imp, imp / vmp]) else { continue };
+        if !(is2 > 0.0 && is2 < 1e-5 && g > 0.0) { continue; }
+        found += 1;
+        if found < 3 { continue; }
+        let rp = g.recip();
+        if is1 < 0.0 || rp > 500.0 { return Err(FitError::NoConvergence); }
+        let iph = is1 * e(voc, 1.0) + is2 * e(voc, 2.0) + voc * g;
+        let at_stc = DiodeParams { i_l: iph * np, i_0: is1 * np, i_02: is2 * np, r_s: rs * ns / np, r_sh: rp * ns / np, n_ns_vth: ut * ns };
+        return Ok(TwoDiodeRef { at_stc, alpha_sc: d.alpha_sc });
+    }
+    Err(FitError::NoConvergence)
+}
+
+#[cfg(test)]
+mod pvsol_fit_tests {
+    use super::*;
+    /// The documented reference case: 60-cell 200 Wp module, Voc 36.1 V, Isc 7.7 A,
+    /// Vmp 28.3 V, Imp 7.07 A → third accepted Rs 7 mΩ per cell, Rp 2.7471415847 Ω,
+    /// Is₂ 6.6293009136e-6 A.
+    #[test]
+    fn reproduces_the_documented_reference_fit() {
+        let d = Datasheet { v_oc: 36.1, i_sc: 7.7, v_mp: 28.3, i_mp: 7.07, alpha_sc: 0.0026, beta_voc: -0.12, cells_in_series: 60, gamma_pmp: -0.4 };
+        assert_eq!(pvsol_topology(36.1, 60), (60, 1));
+        let f = fit_two_diode_pvsol(&d, 60, 1).unwrap();
+        let p = f.at(1000.0, 25.0);
+        assert!((p.r_s / 60.0 - 0.007).abs() < 1e-12, "Rs {}", p.r_s / 60.0);
+        // Boltzmann/charge constants differ by CODATA edition; allow 1 ppm.
+        assert!((p.r_sh / 60.0 / 2.7471415847 - 1.0).abs() < 1e-6, "Rp {}", p.r_sh / 60.0);
+        assert!((p.i_02 / 6.6293009136e-6 - 1.0).abs() < 1e-5, "Is2 {}", p.i_02);
+        let (_, _, pmp) = p.mpp();
+        assert!((pmp - 200.144).abs() < 0.05, "Pmp {pmp}");
+    }
+
+    /// A 156 half-cell module whose Voc estimate (92 cells) fails is retried as 78 × 2.
+    #[test]
+    fn half_cell_modules_retry_with_half_the_declared_cells() {
+        let d = Datasheet { v_oc: 56.09, i_sc: 14.46, v_mp: 46.55, i_mp: 13.75, alpha_sc: 0.00651, beta_voc: -0.14, cells_in_series: 78, gamma_pmp: -0.29 };
+        assert_eq!(pvsol_topology(d.v_oc, 156), (92, 1));
+        assert!(fit_two_diode_pvsol(&d, 92, 1).is_err());
+        assert!(fit_two_diode_pvsol_module(&d, 156, false).is_err());
+        let fit = fit_two_diode_pvsol_module(&d, 156, true).unwrap();
+        let stc = fit.at(1000.0, 25.0);
+        assert!((stc.mpp().2 - 640.0).abs() < 1.0);
+        // The low-light shunt rise lowers relative efficiency at 200 W/m².
+        let relative = fit.at(200.0, 25.0).mpp().2 * 5.0 / stc.mpp().2;
+        assert!((0.95..0.99).contains(&relative), "{relative}");
+    }
+}
+

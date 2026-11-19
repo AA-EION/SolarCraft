@@ -309,6 +309,7 @@ struct DesignPage: View {
                 Picker(m.t("pv_model"), selection: Binding(get: { p.simulation.pv_model }, set: { m.set("/simulation/pv_model", $0) })) {
                     Text(m.t("single_diode")).tag("single_diode")
                     Text(m.t("two_diode")).tag("two_diode")
+                    Text(m.t("two_diode_pvsol")).tag("two_diode_pvsol")
                 }
                 if p.mode == "detailed" {
                     IntRow(label: m.t("modules_per_string"), field: a.modules_per_string, pointer: arrayPath + "/modules_per_string").id(arrayPath + "/modules_per_string")

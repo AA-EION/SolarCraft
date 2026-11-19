@@ -86,6 +86,11 @@ pub struct ModelParams {
 impl ModuleSpec {
     pub fn pmp_stc(&self) -> f64 { self.v_mp * self.i_mp }
     pub fn area(&self) -> f64 { self.length_m * self.width_m }
+    /// Cell count as a catalog declares it (half-cell modules count each half cell).
+    pub fn declared_cells(&self) -> u32 {
+        if self.half_cell { self.cells_in_series.saturating_mul(2) } else { self.cells_in_series }
+    }
+
     pub fn datasheet(&self) -> Datasheet {
         Datasheet { v_oc: self.v_oc, i_sc: self.i_sc, v_mp: self.v_mp, i_mp: self.i_mp, alpha_sc: self.alpha_sc, beta_voc: self.beta_voc, cells_in_series: self.cells_in_series, gamma_pmp: self.gamma_pmp }
     }

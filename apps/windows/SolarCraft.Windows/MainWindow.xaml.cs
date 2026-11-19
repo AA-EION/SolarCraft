@@ -66,7 +66,7 @@ public sealed partial class MainWindow : Window
         KwpBox.Header = T("target_kwp"); TiltBox.Header = T("tilt"); AzimuthBox.Header = T("azimuth"); MountingBox.Header = T("mounting");
         MountingBox.ItemsSource = new[] { T("open_rack"), T("roof_mounted"), T("integrated") };
         PvModelBox.Header = T("pv_model");
-        PvModelBox.ItemsSource = new[] { T("single_diode"), T("two_diode") };
+        PvModelBox.ItemsSource = new[] { T("single_diode"), T("two_diode"), T("two_diode_pvsol") };
         MpsBox.Header = T("modules_per_string"); StringsBox.Header = T("strings"); IssuesHeader.Text = T("issues");
         NoResults.Text = T("no_results"); MonthlyHeader.Text = T("monthly_energy"); LossesHeader.Text = T("losses");
         RoofShapeBox.Header = T("roof_shape");
@@ -204,7 +204,7 @@ public sealed partial class MainWindow : Window
         KwpBox.Value = Api.Num(a["target_kwp"]); TiltBox.Value = Api.Num(a["tilt"]); AzimuthBox.Value = Api.Num(a["azimuth"]);
         BuildTrackingEditor(a);
         MountingBox.SelectedIndex = Api.Str(p["simulation"]!["mounting"]) switch { "open_rack" => 0, "integrated" => 2, _ => 1 };
-        PvModelBox.SelectedIndex = p["simulation"]!["pv_model"]?.GetValue<string>() == "two_diode" ? 1 : 0;
+        PvModelBox.SelectedIndex = p["simulation"]!["pv_model"]?.GetValue<string>() switch { "two_diode" => 1, "two_diode_pvsol" => 2, _ => 0 };
         MpsBox.Value = Api.Num(a["modules_per_string"]); StringsBox.Value = Api.Num(a["strings"]);
         MpsBox.IsEnabled = detailed; StringsBox.IsEnabled = detailed;
         foreach (var (box, key) in new[] { (KwpBox, "target_kwp"), (TiltBox, "tilt"), (AzimuthBox, "azimuth"), (MpsBox, "modules_per_string"), (StringsBox, "strings") })
@@ -536,7 +536,7 @@ public sealed partial class MainWindow : Window
     }
     private void OnPvModelChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (PvModelBox.SelectedIndex >= 0) Set("/simulation/pv_model", PvModelBox.SelectedIndex == 1 ? "two_diode" : "single_diode");
+        if (PvModelBox.SelectedIndex >= 0) Set("/simulation/pv_model", PvModelBox.SelectedIndex switch { 1 => "two_diode", 2 => "two_diode_pvsol", _ => "single_diode" });
     }
     private void OnMode(object sender, SelectionChangedEventArgs e)
     {

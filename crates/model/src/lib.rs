@@ -93,6 +93,8 @@ pub enum PvModel {
     #[default]
     SingleDiode,
     TwoDiode,
+    /// Two-diode model with PV*SOL's preferred standard-parameter fit and cell topology.
+    TwoDiodePvsol,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

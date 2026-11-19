@@ -520,6 +520,7 @@ ui! {
     pv_model => ["PV module model", "Modelo del módulo FV", "PV-Modulmodell", "Modelo do módulo FV"],
     single_diode => ["Single diode (CEC)", "Un diodo (CEC)", "Eindiodenmodell (CEC)", "Um diodo (CEC)"],
     two_diode => ["Two diodes", "Dos diodos", "Zweidiodenmodell", "Dois diodos"],
+    two_diode_pvsol => ["Two diodes (PV*SOL fit)", "Dos diodos (ajuste PV*SOL)", "Zweidiodenmodell (PV*SOL-Anpassung)", "Dois diodos (ajuste PV*SOL)"],
     customer_short => ["Customer Short", "Cliente breve", "Kundenkurzbericht", "Cliente breve"],
     customer_extended => ["Customer Extended", "Cliente detallado", "Kundenlangbericht", "Cliente detalhado"],
     system_planner => ["System Planner", "Diseño del sistema", "Anlagenplaner", "Projeto do sistema"],

@@ -275,6 +275,13 @@ fn read(source: &Path) -> Result<Imported> {
         _ => { warnings.push("The source transposition model has no verified binding; using SolarCraft Perez.".into()); TranspositionModel::Perez }
     });
     let (installed_modules, target_kwp) = electrical(&mut project, root, &db, &sha, &mut warnings)?;
+    // PV*SOL simulates modules flagged for standard part-load operation with its two-diode
+    // model (when the fit accepts them) and the others with its one-diode model.
+    let standard_part_load = |m: &solarcraft_model::equipment::ModuleSpec| m.unverified.get("standardPartLoadOperation").and_then(serde_json::Value::as_bool) == Some(true);
+    if !project.library.modules.is_empty() && project.library.modules.iter().all(|m| standard_part_load(m) && m.declared_cells() > 10) {
+        project.simulation.pv_model = solarcraft_model::PvModel::TwoDiodePvsol;
+        warnings.push("Modules with standard part-load operation use the two-diode model with PV*SOL's preferred parameter fit.".into());
+    }
     if !island {
         grid_storage::apply(&mut project, root, &db, &sha, &mut warnings)?;
     }

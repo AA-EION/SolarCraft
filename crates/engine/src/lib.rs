@@ -257,6 +257,14 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             solarcraft_model::PvModel::SingleDiode => ModuleCurve::Single(module.desoto().ok_or_else(|| SimError("module not fitted".into()))?),
             solarcraft_model::PvModel::TwoDiode => ModuleCurve::Two(diode::fit_two_diode(&module.datasheet()).map_err(|error|
                 SimError(format!("Module '{} {}' could not be fitted with the two-diode model ({error:?}).", module.manufacturer, module.model)))?),
+
+            solarcraft_model::PvModel::TwoDiodePvsol => {
+                match diode::fit_two_diode_pvsol_module(&module.datasheet(), module.declared_cells(), module.half_cell) {
+                    Ok(fit) => ModuleCurve::Two(fit),
+                    // PV*SOL keeps its one-diode model for modules its two-diode fit rejects.
+                    Err(_) => ModuleCurve::Single(module.desoto().ok_or_else(|| SimError("module not fitted".into()))?),
+                }
+            }
         };
         let area = n_mod * module.area();
         let p_stc = n_mod * module.pmp_stc();
