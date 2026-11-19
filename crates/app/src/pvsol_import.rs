@@ -525,8 +525,8 @@ fn read_load_values(encoded: &str, minutes: u32, count: usize) -> Result<Vec<f64
     let packed = STANDARD.decode(encoded).map_err(|error| e("PVSOL_IMPORT", error))?;
     let data = read_limited(GzDecoder::new(&packed[..]), (count * 8) as u64)?;
     if data.len() != count * 8 { return Err(e("PVSOL_IMPORT", "The embedded load profile length does not match its interval count.")); }
-    data.chunks_exact(8).map(|b| {
-        let watts = f64::from_le_bytes(b.try_into().unwrap());
+    data.as_chunks::<8>().0.iter().map(|b| {
+        let watts = f64::from_le_bytes(*b);
         (0.0..=1e12).contains(&watts).then_some(watts * f64::from(minutes) / 60_000.0)
     }).collect::<Option<Vec<_>>>().ok_or_else(|| e("PVSOL_IMPORT", "The embedded load profile contains an invalid power reading."))
 }
@@ -552,7 +552,7 @@ fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f6
     let start = days_from_civil(year, 1, 1) * 86400 - (tz * 3600.0).round() as i64;
     let observer = Observer::new(lat, lon, elevation);
     let mut hours = Vec::with_capacity(HOURS);
-    for (index, row) in bytes[HEADER..].chunks_exact(12).enumerate() {
+    for (index, row) in bytes[HEADER..].as_chunks::<12>().0.iter().enumerate() {
         let at = |i| f64::from(f32::from_le_bytes(row[i..i + 4].try_into().unwrap()));
         let (temp_air, ghi, wind) = (at(0), at(4), at(8));
         if !(-100.0..=100.0).contains(&temp_air) || !(0.0..=1800.0).contains(&ghi) || !(0.0..=100.0).contains(&wind) {

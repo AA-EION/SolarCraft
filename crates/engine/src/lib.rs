@@ -970,6 +970,7 @@ fn trace_field(sc: &solarcraft_scene::Scene, f: &solarcraft_scene::place::Module
     Ok((near, field, trace))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shade_summary(fs: solarcraft_scene::shade::FieldShading, array: &solarcraft_model::Array, weights: &[f64],
     obstacles: usize, scene: bool, diodes: u32, nonlinear: bool, half_cell: bool) -> (NearShading, FieldShade)
 {

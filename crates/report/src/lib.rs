@@ -182,8 +182,8 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
     let pct = |v: f64| format!("{} %", n(v, 1));
     let wire_pct = |manual: f64, hourly: Option<f64>, dc: bool| {
         if p.hourly_cables.routed.iter().any(|circuit| circuit.is_dc() == dc) {
-            return format!("{} · {}", tr(l, "Linked circuits", "Circuitos vinculados", "Verknüpfte Stromkreise", "Circuitos vinculados"),
-                format!("{} {}", pct(manual), tr(l, "for unlinked paths", "en líneas sin enlace", "für unverknüpfte Leitungen", "em linhas sem vínculo")));
+            return format!("{} · {} {}", tr(l, "Linked circuits", "Circuitos vinculados", "Verknüpfte Stromkreise", "Circuitos vinculados"),
+                pct(manual), tr(l, "for unlinked paths", "en líneas sin enlace", "für unverknüpfte Leitungen", "em linhas sem vínculo"));
         }
         hourly.map_or_else(|| pct(manual), |v| {
             format!("{} · {}", pct(v), tr(l, "design point (hourly)", "punto de diseño (horario)", "Auslegungspunkt (stündlich)", "ponto de projeto (horário)"))

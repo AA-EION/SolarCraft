@@ -57,8 +57,8 @@ fn read(
     if diffuse.len() != 4 + 4 * slots || i32_at(&diffuse, 0) != Some(slots as i32) {
         return Err(error("Saved diffuse and direct shade slot counts do not match."));
     }
-    let diffuse: Vec<_> = diffuse[4..].chunks_exact(4).map(|bytes| {
-        let pct = i32::from_le_bytes(bytes.try_into().unwrap());
+    let diffuse: Vec<_> = diffuse[4..].as_chunks::<4>().0.iter().map(|bytes| {
+        let pct = i32::from_le_bytes(*bytes);
         (pct <= 100).then_some(pct.max(0) as u8)
     }).collect::<Option<_>>().ok_or_else(|| error("Saved tilted diffuse percentages exceed 100."))?;
 
@@ -209,7 +209,7 @@ fn effective_rows(data: &[u8], slots: usize) -> Result<Vec<ShadeRow<'_>>> {
     let mut active = ShadeRow::Uniform([data[1].min(100), data[2].min(100)]);
     for (hour, row) in data.chunks_exact(slots * 3).enumerate() {
         let mut complete = true;
-        for (slot, bytes) in row.chunks_exact(3).enumerate() {
+        for (slot, bytes) in row.as_chunks::<3>().0.iter().enumerate() {
             match (bytes[1], bytes[2]) {
                 (0xfe, 0xfe) if slot + 1 < slots => complete = false,
                 (0xfe, 0xfe) | (0xfc, 0xfc) | (0xfd, 0xfd) | (0..=100, 0..=100) => {}

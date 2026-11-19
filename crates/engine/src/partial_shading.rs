@@ -144,7 +144,7 @@ impl ShadedArray {
             return;
         };
         if self.half_cell {
-            for pair in transmissions.chunks_exact(2) {
+            for pair in transmissions.as_chunks::<2>().0 {
                 *levels.entry((pair[0].min(pair[1]), pair[0].max(pair[1]))).or_default() += 1;
             }
         } else {

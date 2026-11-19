@@ -142,7 +142,10 @@ pub fn import_load_for(path: &Path, file: &Path, unit: &str, island: Option<&str
     Ok(serde_json::json!({"name": name, "values": series.values.len(), "step_minutes": series.step_minutes, "annual_kwh": total, "local_year": series.local_year}))
 }
 
-pub(crate) fn load_series(s: &Store, p: &Project) -> Result<(Option<Vec<f64>>, Vec<Option<Vec<f64>>>)> {
+/// The project's consumption series and one optional series per island cluster.
+pub(crate) type LoadSeries = (Option<Vec<f64>>, Vec<Option<Vec<f64>>>);
+
+pub(crate) fn load_series(s: &Store, p: &Project) -> Result<LoadSeries> {
     let islands = if p.workflow.system.islanded() { p.island_clusters.as_slice() } else { &[] };
     let base = if islands.is_empty() || islands.iter().any(|c| c.load.is_none()) { read_load(s, &p.loads.profile)? } else { None };
     let profiles = islands.iter().map(|c| c.load.as_ref().map_or(Ok(None), |load| read_load(s, &load.profile))).collect::<Result<_>>()?;

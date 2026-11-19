@@ -92,8 +92,7 @@ struct NetworkFaultPlanner: View {
                 let faults = dicts(study["faults"])
                 ForEach(faults.indices, id: \.self) { index in
                     let fault = faults[index]
-                    DisclosureGroup(str(fault,"bus") + " · " + status(fault) + " · " + m.t("network_fault_min_max")
-                        + " " + number(fault,"minimum_ka") + " / " + number(fault,"maximum_ka")) {
+                    DisclosureGroup("\(str(fault, "bus")) · \(status(fault)) · \(m.t("network_fault_min_max")) \(number(fault, "minimum_ka")) / \(number(fault, "maximum_ka"))") {
                         details(fault)
                     }
                 }
@@ -114,12 +113,12 @@ struct NetworkFaultPlanner: View {
                 ForEach(stages.indices, id: \.self) { index in
                     let stage = stages[index]
                     let opened = (stage["open_links"] as? [String] ?? []).joined(separator: ", ")
-                    DisclosureGroup(number(stage,"elapsed_seconds") + " s · " + opened + " · " + status(stage)) {
+                    DisclosureGroup("\(number(stage, "elapsed_seconds")) s · \(opened) · \(status(stage))") {
                         Text(m.t("network_fault_remaining") + " " + number(stage,"remaining_maximum_ka"))
                         let devices = dicts(stage["devices"])
                         ForEach(devices.indices, id: \.self) { i in
                             let device = devices[i]
-                            Text(str(device,"link") + " · " + status(device) + " · " + number(device,"maximum_ka") + " kA")
+                            Text("\(str(device, "link")) · \(status(device)) · \(number(device, "maximum_ka")) kA")
                         }
                     }
                 }
@@ -127,22 +126,19 @@ struct NetworkFaultPlanner: View {
             let sources = dicts(fault["sources"])
             ForEach(sources.indices, id: \.self) { index in
                 let source = sources[index]
-                Text(m.t("network_fault_source") + " " + str(source,"name") + " · " + m.t("network_fault_min_max")
-                    + " " + number(source,"minimum_state_ka") + " / " + number(source,"maximum_state_ka"))
+                Text("\(m.t("network_fault_source")) \(str(source, "name")) · \(m.t("network_fault_min_max")) \(number(source, "minimum_state_ka")) / \(number(source, "maximum_state_ka"))")
             }
             let devices = dicts(fault["devices"])
             ForEach(devices.indices, id: \.self) { index in
                 let device = devices[index]
-                Text(str(device,"link") + " · " + str(device,"model") + " · " + status(device)
-                    + " · " + m.t("network_fault_peak") + " " + number(device,"peak_ka"))
+                Text("\(str(device, "link")) · \(str(device, "model")) · \(status(device)) · \(m.t("network_fault_peak")) \(number(device, "peak_ka"))")
                 SimpleTable(header: ["code_protection", "network_fault_status", "code_actual", "code_threshold"].map { m.t($0) },
                     rows: dicts(device["checks"]).map { [m.t("check_" + str($0,"id")), status($0), number($0,"actual"), number($0,"limit")] })
             }
             let pairs = dicts(fault["coordination"])
             ForEach(pairs.indices, id: \.self) { index in
                 let pair = pairs[index]
-                Text(str(pair,"backup_link") + " → " + str(pair,"primary_link") + " · " + status(pair)
-                    + " · " + m.t("network_fault_ratio") + " " + number(pair,"time_ratio"))
+                Text("\(str(pair, "backup_link")) → \(str(pair, "primary_link")) · \(status(pair)) · \(m.t("network_fault_ratio")) \(number(pair, "time_ratio"))")
             }
         }
     }

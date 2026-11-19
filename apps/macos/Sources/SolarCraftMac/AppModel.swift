@@ -242,7 +242,7 @@ final class AppModel: ObservableObject {
 
     func setRoof(array: Int, outline: [[Double]]?, obstacles: [[[Double]]], heights: [Double], setback: Double, clearance: Double) {
         run {
-            var params: [String: Any] = ["file": file, "array": array, "array": 0]
+            var params: [String: Any] = ["file": file, "array": array]
             if let o = outline {
                 params["outline"] = o
                 params["obstacles"] = obstacles

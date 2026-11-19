@@ -169,8 +169,8 @@ fn read_fpl(prefix: &[u8]) -> Result<SavedCalibration> {
         for p in &mut guides {
             rest = rest.strip_prefix(DIRECTION)?;
             let (points, tail) = rest.split_at_checked(32)?;
-            for (target, bytes) in p.iter_mut().flatten().zip(points.chunks_exact(8)) {
-                *target = f64::from_le_bytes(bytes.try_into().ok()?);
+            for (target, bytes) in p.iter_mut().flatten().zip(points.as_chunks::<8>().0) {
+                *target = f64::from_le_bytes(*bytes);
             }
             // CItmDirection's serialized flags are zero in the supported layout.
             rest = tail.strip_prefix(&[0; 4])?;
@@ -199,7 +199,7 @@ fn read_fpl(prefix: &[u8]) -> Result<SavedCalibration> {
         if !(3..=128).contains(&count) { return None; }
         let first = outline_at + 2;
         let raster_outline = plane.get(first..first + 16 * count)?
-            .chunks_exact(16)
+            .as_chunks::<16>().0.iter()
             .map(|point| {
                 let x = f64::from_le_bytes(point[..8].try_into().ok()?);
                 let y = f64::from_le_bytes(point[8..].try_into().ok()?);
