@@ -23,6 +23,7 @@ pub mod io;
 pub mod mesh;
 pub mod place;
 pub mod shade;
+pub mod rear;
 pub mod view;
 
 pub type P2 = [f64; 2];
@@ -96,7 +97,17 @@ pub struct Dormer {
     pub base_pitch_deg: f64,
     pub roof_pitch_deg: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gable: Option<DormerGable>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_clearance_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DormerGable {
+    pub rise_m: f64,
+    pub ridge_width_m: f64,
 }
 
 impl Dormer {
@@ -104,32 +115,53 @@ impl Dormer {
         if !self.origin.iter().all(|v| v.is_finite()) || !self.base_z.is_finite()
             || !(0.001..=1000.0).contains(&self.width) || !(0.001..=1000.0).contains(&self.front_height)
             || !(0.0..360.0).contains(&self.facing_deg) || !(0.0..=75.0).contains(&self.base_pitch_deg)
-            || !(0.0..self.base_pitch_deg).contains(&self.roof_pitch_deg) {
+            || self.host_clearance_m.is_some_and(|v| !(-0.05..=0.05).contains(&v)) {
             return None;
         }
-        let depth = self.front_height / (self.base_pitch_deg.to_radians().tan() - self.roof_pitch_deg.to_radians().tan());
+        let pitch = self.base_pitch_deg.to_radians().tan();
+        let depth = if let Some(gable) = self.gable {
+            if !(0.001..=1000.0).contains(&gable.rise_m) || !(0.001..self.width).contains(&gable.ridge_width_m) {
+                return None;
+            }
+            (self.front_height + gable.rise_m) / pitch
+        } else {
+            if !(0.0..self.base_pitch_deg).contains(&self.roof_pitch_deg) { return None; }
+            self.front_height / (pitch - self.roof_pitch_deg.to_radians().tan())
+        };
         (0.001..=1000.0).contains(&depth).then_some(depth)
     }
 
-    pub fn footprint(&self, depth: f64) -> [P2; 4] {
-        let (s, c) = self.facing_deg.to_radians().sin_cos();
-        [[0.0, 0.0], [self.width, 0.0], [self.width, depth], [0.0, depth]].map(|[x, y]| {
-            [self.origin[0] - c * x - s * y, self.origin[1] + s * x - c * y]
-        })
+    pub fn footprint(&self, depth: f64) -> Vec<P2> {
+        let corners = if let Some(gable) = self.gable {
+            let inset = (self.width - gable.ridge_width_m) * 0.5;
+            let eave_depth = self.front_height / self.base_pitch_deg.to_radians().tan();
+            vec![[0.0, 0.0], [self.width, 0.0], [self.width, eave_depth],
+                [self.width - inset, depth], [inset, depth], [0.0, eave_depth]]
+        } else {
+            vec![[0.0, 0.0], [self.width, 0.0], [self.width, depth], [0.0, depth]]
+        };
+        corners.into_iter().map(|point| self.point(point)).collect()
     }
 
-    fn fit_on(&self, parent: &Kind) -> Option<Self> {
-        let Kind::Building { footprint, base_z, eave_height, roof: Roof::Shed { pitch_deg, facing_deg }, .. } = parent
-            else { return None; };
-        let (s, c) = facing_deg.to_radians().sin_cos();
-        let projection = |[x, y]: P2| x * s + y * c;
-        let edge = footprint.iter().copied().map(projection).reduce(f64::max)?;
-        let mut fitted = self.clone();
-        fitted.base_z = base_z + eave_height + (edge - projection(self.origin)) * pitch_deg.to_radians().tan();
-        fitted.base_pitch_deg = *pitch_deg;
-        fitted.facing_deg = facing_deg.rem_euclid(360.0);
-        fitted.footprint(fitted.depth()?).into_iter()
-            .all(|point| solarcraft_geometry::poly::point_in_ring(point, footprint)).then_some(fitted)
+    pub(crate) fn point(&self, [x, y]: P2) -> P2 {
+        let (s, c) = self.facing_deg.to_radians().sin_cos();
+        [self.origin[0] - c * x - s * y, self.origin[1] + s * x - c * y]
+    }
+
+    pub fn fit_on(&self, parent: &Object) -> Option<Self> {
+        if !matches!(parent.kind, Kind::Building { .. }) { return None; }
+        mesh::faces(parent).into_iter().filter(|face| face.role == mesh::Role::Roof).find_map(|face| {
+            let (pitch, facing) = place::tilt_azimuth(mesh::normal(&face.outer));
+            let daz = ((facing - self.facing_deg + 180.0).rem_euclid(360.0) - 180.0).abs();
+            if daz > 90.0 { return None; }
+            let roof: Vec<_> = face.outer.iter().map(|p| [p[0], p[1]]).collect();
+            let mut fitted = self.clone();
+            fitted.base_z = mesh::plane_z(&face.outer)?(self.origin) + self.host_clearance_m.unwrap_or(0.0);
+            fitted.base_pitch_deg = pitch;
+            fitted.facing_deg = facing;
+            fitted.footprint(fitted.depth()?).into_iter()
+                .all(|p| solarcraft_geometry::poly::point_in_ring(p, &roof)).then_some(fitted)
+        })
     }
 }
 
@@ -268,6 +300,7 @@ pub enum Edit {
     RestorePlacement { field: String, modules: Vec<place::PlacedModule>, #[serde(default)] strings: Vec<place::StringRoute>, #[serde(default)] inverter_at: Option<V3> },
     /// Serpentine string routing with `modules_per_string` modules per string.
     RouteStrings { field: String, modules_per_string: u32, #[serde(default)] inverter_at: Option<V3> },
+    BindStringRoutes { array: String, bindings: Vec<place::RouteAssignment> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -287,6 +320,29 @@ fn shift(k: &mut Kind, d: V3) {
         Kind::Block { center, base_z, .. } | Kind::Cylinder { center, base_z, .. } | Kind::Tree { center, base_z, .. } => { mv(center); *base_z += d[2]; }
         Kind::Terrain { origin, heights, .. } => { mv(origin); heights.iter_mut().for_each(|h| *h += d[2]); }
         Kind::Mesh { faces, .. } => for f in faces { for p in f.outer.iter_mut().chain(f.holes.iter_mut().flatten()) { for k in 0..3 { p[k] += d[k]; } } },
+    }
+}
+
+fn translate_roof_fields(s: &mut Scene, hosts: &std::collections::HashSet<&str>, delta: V3, touched: &mut Vec<String>) {
+    if delta == [0.0; 3] { return; }
+    for field in &mut s.fields {
+        if !field.mount.face().and_then(|f| f.split_once('/')).is_some_and(|(host, _)| hosts.contains(host)) {
+            continue;
+        }
+        for module in &mut field.modules {
+            module.corners = module.corners.map(|point| mesh::add(point, delta));
+        }
+        if let Some(inverter) = field.inverter_at {
+            let centers: std::collections::HashMap<_, _> = field.modules.iter().map(|m| (m.id.as_str(), m.center())).collect();
+            for route in &mut field.strings {
+                if let Some((a, b)) = route.modules.first().zip(route.modules.last())
+                    .and_then(|(a,b)| centers.get(a.as_str()).zip(centers.get(b.as_str()))) {
+                    route.home_run_m = mesh::dist(*a, inverter) + mesh::dist(*b, inverter);
+                }
+            }
+        }
+        if let Some(source) = &mut field.source { source.local_geometry = true; }
+        if !touched.contains(&field.id) { touched.push(field.id.clone()); }
     }
 }
 
@@ -342,18 +398,20 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
                 if locked(&s, id) { return Err(err("LAYER_LOCKED", format!("{id} is on a locked layer"), i)); }
                 let children: Vec<_> = s.objects.iter().filter(|o| matches!(&o.kind, Kind::Dormer { profile }
                     if profile.parent.as_deref() == Some(id.as_str()))).map(|o| o.id.clone()).collect();
+                let owners: std::collections::HashSet<_> = children.iter().map(String::as_str).chain([id.as_str()]).collect();
                 if let Some(child) = children.iter().find(|child| locked(&s, child)) {
                     return Err(err("LAYER_LOCKED", format!("{child} is on a locked layer"), i));
                 }
                 let o = s.objects.iter_mut().find(|o| &o.id == id).ok_or_else(|| err("NOT_FOUND", format!("no object {id}"), i))?;
                 shift(&mut o.kind, [*dx, *dy, *dz]);
                 if let Some(source) = &mut o.source { source.local_geometry |= *dx != 0.0 || *dy != 0.0 || *dz != 0.0; }
-                for child in children {
-                    let o = s.objects.iter_mut().find(|o| o.id == child).unwrap();
+                for child in &children {
+                    let o = s.objects.iter_mut().find(|o| &o.id == child).unwrap();
                     shift(&mut o.kind, [*dx, *dy, *dz]);
                     if let Some(source) = &mut o.source { source.local_geometry |= *dx != 0.0 || *dy != 0.0 || *dz != 0.0; }
-                    touched.push(child);
+                    touched.push(child.clone());
                 }
+                translate_roof_fields(&mut s, &owners, [*dx, *dy, *dz], &mut touched);
                 touched.push(id.clone());
             }
             Edit::RemoveObject { id } => {
@@ -439,6 +497,32 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
                 place::route_strings(f, *modules_per_string);
                 touched.push(field.clone());
             }
+            Edit::BindStringRoutes { array, bindings } => {
+                let mut proposed = std::collections::HashMap::new();
+                let mut slots = std::collections::HashSet::new();
+                for assignment in bindings {
+                    if proposed.insert(assignment.route.as_str(), &assignment.binding).is_some()
+                        || !slots.insert(&assignment.binding) {
+                        return Err(err("MPPT_BINDING", "A route or electrical string copy was assigned twice".into(), i));
+                    }
+                }
+                let fields: Vec<_> = s.fields.iter_mut().filter(|f| f.array_id.as_deref() == Some(array)).collect();
+                if fields.is_empty() {
+                    return Err(err("NOT_FOUND", format!("No fields feed array {array}"), i));
+                }
+                for field in fields {
+                    for route in &mut field.strings {
+                        route.binding = proposed.remove(route.id.as_str()).cloned();
+                        if !bindings.is_empty() && route.binding.is_none() {
+                            return Err(err("MPPT_BINDING", format!("Missing electrical assignment for {}", route.id), i));
+                        }
+                    }
+                    touched.push(field.id.clone());
+                }
+                if !proposed.is_empty() {
+                    return Err(err("MPPT_BINDING", format!("A route does not feed array {array}"), i));
+                }
+            }
         }
     }
     let attachments: Vec<_> = s.objects.iter().filter_map(|o| {
@@ -446,12 +530,18 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
         let parent = profile.parent.as_ref()?;
         (touched.contains(&o.id) || touched.contains(parent)).then_some((&o.id, profile, parent))
     }).map(|(id, profile, parent)| {
-        let fitted = s.object(parent).and_then(|host| profile.fit_on(&host.kind))
-            .ok_or_else(|| err("DORMER_PARENT", format!("{id}: the dormer must fit on its parent shed roof {parent}"), edits.len().saturating_sub(1)))?;
+        let fitted = s.object(parent).and_then(|host| profile.fit_on(host))
+            .ok_or_else(|| err("DORMER_PARENT", format!("{id}: the dormer must fit on a face of its parent roof {parent}"), edits.len().saturating_sub(1)))?;
         Ok((id.clone(), fitted))
     }).collect::<Result<_, EditError>>()?;
     for (id, fitted) in attachments {
         let object = s.objects.iter_mut().find(|o| o.id == id).unwrap();
+        let Kind::Dormer { profile } = &object.kind else { unreachable!() };
+        let dz = if (fitted.base_pitch_deg - profile.base_pitch_deg).abs() < 1e-9
+            && (fitted.facing_deg - profile.facing_deg).abs() < 1e-9
+        {
+            fitted.base_z - profile.base_z
+        } else { 0.0 };
         let kind = Kind::Dormer { profile: fitted };
         if object.kind != kind {
             if s.layers.iter().any(|layer| layer.name == object.layer && layer.locked) {
@@ -459,7 +549,8 @@ pub fn apply(scene: &Scene, edits: &[Edit]) -> Result<(Scene, Vec<String>), Edit
             }
             object.kind = kind;
             if let Some(source) = &mut object.source { source.local_geometry = true; }
-            if !touched.contains(&id) { touched.push(id); }
+            if !touched.contains(&id) { touched.push(id.clone()); }
+            translate_roof_fields(&mut s, &std::collections::HashSet::from([id.as_str()]), [0.0, 0.0, dz], &mut touched);
         }
     }
     Ok((s, touched))
@@ -550,11 +641,11 @@ pub fn validate(s: &Scene) -> Vec<Issue> {
                     out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: invalid dormer dimensions or roof slope")));
                     continue;
                 }
-                if profile.parent.as_ref().is_some_and(|id| s.object(id).and_then(|parent| profile.fit_on(&parent.kind))
+                if profile.parent.as_ref().is_some_and(|id| s.object(id).and_then(|parent| profile.fit_on(parent))
                     .is_none_or(|fitted| (fitted.base_z - profile.base_z).abs() > 0.001
                         || (fitted.base_pitch_deg - profile.base_pitch_deg).abs() > 0.001
                         || (fitted.facing_deg - profile.facing_deg).abs() > 0.001)) {
-                    out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: the dormer must fit on its parent shed roof")));
+                    out.push(issue("error", "SCENE_ROOF_SHAPE", id, format!("{id}: the dormer must fit on its parent roof")));
                 }
             }
             Kind::Block { length, width, height, .. } => if *length <= 0.0 || *width <= 0.0 || *height <= 0.0 { out.push(issue("error", "SCENE_SIZE", id, format!("{id}: sizes must be positive"))); continue; },

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Connects scene string routes and traced substring transmittance to tracker curves.
 use crate::electrical::IvCurve;
-use solarcraft_model::{equipment::ModuleSpec, plant::Electrical};
+use solarcraft_model::{archived_shading::RouteKey, equipment::ModuleSpec, plant::{check_mppt_bindings, Electrical}};
 use solarcraft_pv::diode::{self, DiodeParams};
 use solarcraft_scene::{place::ModuleField, shade::SubstringTrace};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -24,12 +24,14 @@ impl ModuleCurve {
 /// One electrical string per route. Within each string length, use the scene's
 /// route order and the design's inverter/MPPT order to match physical strings.
 pub(crate) fn routes(field: &ModuleField, module: &ModuleSpec, electrical: &Electrical, array: &str)
-    -> Result<BTreeMap<u32, Vec<Vec<usize>>>, &'static str>
+    -> Result<Routes, &'static str>
 {
     check_wiring(module, field.module.bypass_diodes)?;
+    let explicit = check_mppt_bindings(electrical, array, &field.strings)?;
     let by_id: HashMap<_, _> = field.modules.iter().enumerate().map(|(i, m)| (m.id.as_str(), i)).collect();
     let mut assigned = HashSet::new();
     let mut routes = BTreeMap::<u32, Vec<Vec<usize>>>::new();
+    let mut bound = BTreeMap::<String, BTreeMap<(usize, usize), BTreeMap<usize, Vec<usize>>>>::new();
     for route in &field.strings {
         let mut indices = vec![];
         for id in &route.modules {
@@ -38,16 +40,26 @@ pub(crate) fn routes(field: &ModuleField, module: &ModuleSpec, electrical: &Elec
             indices.push(index);
         }
         if indices.is_empty() { return Err("an empty string route was found"); }
-        routes.entry(indices.len() as u32).or_default().push(indices);
+        if let Some(binding) = &route.binding {
+            bound.entry(binding.unit_id.clone()).or_default().entry((binding.input, binding.group)).or_default()
+                .insert(binding.copy, indices);
+        } else {
+            routes.entry(indices.len() as u32).or_default().push(indices);
+        }
     }
     if assigned.len() != field.modules.len() {
         return Err("the placed field has unrouted modules");
+    }
+    if explicit {
+        let ordered = bound.into_iter().map(|(unit, groups)| (unit, groups.into_iter()
+            .map(|(group, copies)| (group, copies.into_values().collect())).collect())).collect();
+        return Ok(Routes::Explicit(ordered));
     }
     let expected = string_counts(electrical, array);
     if expected != routes.iter().map(|(length, strings)| (*length, strings.len())).collect() {
         return Err("the scene routes do not match the electrical stringing");
     }
-    Ok(routes)
+    Ok(Routes::Sequential(routes))
 }
 
 fn check_wiring(module: &ModuleSpec, diodes: u32) -> Result<(), &'static str> {
@@ -100,7 +112,7 @@ pub(crate) struct Light {
 
 pub(crate) struct ShadedArray {
     pub trace: SubstringTrace,
-    pub routes: BTreeMap<u32, Vec<Vec<usize>>>,
+    pub routes: Routes,
     pub module: ModuleCurve,
     pub hours: Vec<Light>,
     pub diodes: u32,
@@ -109,14 +121,31 @@ pub(crate) struct ShadedArray {
 }
 
 type LightLevels = Vec<((u8, u8), u32)>;
+type BoundGroups = BTreeMap<(usize, usize), Vec<Vec<usize>>>;
+
+pub(crate) enum Routes {
+    Sequential(BTreeMap<u32, Vec<Vec<usize>>>),
+    Explicit(BTreeMap<String, BoundGroups>),
+}
+
+impl Routes {
+    fn group(&self, (unit, input, group): RouteKey<'_>, length: u32, start: usize, count: usize) -> &[Vec<usize>] {
+        match self {
+            Self::Sequential(routes) => &routes[&length][start..start + count],
+            Self::Explicit(routes) => &routes[unit][&(input, group)],
+        }
+    }
+
+    pub(crate) fn explicit(&self) -> bool { matches!(self, Self::Explicit(_)) }
+}
 
 impl ShadedArray {
     pub(crate) fn active(&self, hour: usize) -> bool {
         self.hours[hour].direct > 0.0 && self.trace.shaded_at(hour)
     }
 
-    pub(crate) fn curves(&self, hour: usize, length: u32, start: usize, count: usize) -> Vec<(IvCurve, f64)> {
-        let routes = &self.routes[&length][start..start + count];
+    pub(crate) fn curves(&self, hour: usize, key: RouteKey<'_>, length: u32, start: usize, count: usize) -> Vec<(IvCurve, f64)> {
+        let routes = self.routes.group(key, length, start, count);
         let mut distinct = BTreeMap::<LightLevels, u32>::new();
         for route in routes {
             let mut levels = BTreeMap::new();
@@ -128,9 +157,11 @@ impl ShadedArray {
         }).collect()
     }
 
-    pub(crate) fn module_curves(&self, hour: usize, length: u32, route: usize) -> Vec<(Option<IvCurve>, u32)> {
+    pub(crate) fn module_curves(&self, hour: usize, key: RouteKey<'_>, length: u32, start: usize, count: usize, copy: usize)
+        -> Vec<(Option<IvCurve>, u32)>
+    {
         let mut distinct = BTreeMap::<LightLevels, u32>::new();
-        for &module in &self.routes[&length][route] {
+        for &module in &self.routes.group(key, length, start, count)[copy] {
             let mut levels = BTreeMap::new();
             self.add_module_levels(hour, module, &mut levels);
             *distinct.entry(levels.into_iter().collect()).or_default() += 1;

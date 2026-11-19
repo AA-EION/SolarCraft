@@ -195,9 +195,28 @@ pub fn faces(o: &Object) -> Vec<Face> {
         }
         Kind::Dormer { profile } => {
             let Some(depth) = profile.depth() else { return out; };
-            let [a, b, c, d] = profile.footprint(depth);
+            let footprint = profile.footprint(depth);
             let low = profile.base_z;
             let front = low + profile.front_height;
+            if let Some(gable) = profile.gable {
+                let [a, b, e1, r1, r0, e0]: [P2; 6] = footprint.try_into().unwrap();
+                let b3 = |p: P2, z| [p[0], p[1], z];
+                let ridge_z = front + gable.rise_m;
+                let inset = (profile.width - gable.ridge_width_m) * 0.5;
+                let (a0, b0, a1, b1) = (b3(a, low), b3(b, low), b3(a, front), b3(b, front));
+                let (e0, e1, r0, r1) = (b3(e0, front), b3(e1, front), b3(r0, ridge_z), b3(r1, ridge_z));
+                let (a2, b2) = (b3(profile.point([inset, 0.0]), ridge_z),
+                    b3(profile.point([profile.width - inset, 0.0]), ridge_z));
+                out.push(face(id, "wall-0", Role::Wall, vec![a0, b0, b1, b2, a2, a1], 1.0));
+                out.push(face(id, "wall-1", Role::Wall, vec![b0, e1, b1], 1.0));
+                out.push(face(id, "wall-2", Role::Wall, vec![e0, a0, a1], 1.0));
+                out.push(face(id, "floor", Role::Floor, vec![e0, r0, r1, e1, b0, a0], 1.0));
+                out.push(face(id, "roof-0", Role::Roof, vec![a1, a2, r0, e0], 1.0));
+                out.push(face(id, "roof-1", Role::Roof, vec![a2, b2, r1, r0], 1.0));
+                out.push(face(id, "roof-2", Role::Roof, vec![b2, b1, e1, r1], 1.0));
+                return out;
+            }
+            let [a, b, c, d]: [P2; 4] = footprint.try_into().unwrap();
             let back = low + depth * profile.base_pitch_deg.to_radians().tan();
             let (a0, b0, a1, b1, c1, d1) = (
                 [a[0], a[1], low], [b[0], b[1], low], [a[0], a[1], front], [b[0], b[1], front],

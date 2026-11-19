@@ -14,6 +14,7 @@ use std::{collections::{BTreeMap, HashMap, HashSet}, io::Cursor};
 use zip::ZipArchive;
 
 mod buildings;
+mod flush_fields;
 
 type Archive = ZipArchive<Cursor<Vec<u8>>>;
 const GEOMETRY: &str = "Visu3D/GeometrischeDaten.xml";
@@ -34,7 +35,7 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, archive: &mut Arc
             let dormers = scene.objects.iter().filter(|o| matches!(o.kind, Kind::Dormer { .. })).count();
             warnings.push(format!("Restored {meshes} Visual3D meshes, {trees} editable trees, {buildings} buildings, {dormers} dormers, {fields} drawn roof fields, {modules} placed modules and {strings} saved string routes."));
             if buildings > 0 {
-                warnings.push("Imported buildings show the exterior shell. Roof thickness, doors, windows and material data are omitted.".into());
+                warnings.push("Imported buildings show the exterior shell. Roof overhangs, thickness, doors, windows and material data are omitted.".into());
             }
             if trees > 0 {
                 warnings.push("Imported tree crowns use an ellipsoid and mean opacity for local edits. The saved monthly opacity values are retained as object properties.".into());
@@ -120,6 +121,13 @@ fn read_scene(project: &Project, root: Node<'_, '_>, archive: &mut Archive) -> R
         if let Some((carrier, field)) = read_field(project, root, saved, *only_plane, archive) {
             scene.objects.push(carrier);
             scene.fields.push(field);
+            skipped_fields = 0;
+        }
+    }
+    if scene.fields.is_empty() {
+        let fields = flush_fields::read(project, root, &nodes, &reference_objects, &scene, archive);
+        if let Some(fields) = fields {
+            scene.fields.extend(fields);
             skipped_fields = 0;
         }
     }
@@ -374,6 +382,7 @@ fn read_field(project: &Project, root: Node<'_, '_>, scene: Node<'_, '_>, carrie
     let mut modules = Vec::with_capacity(installed);
     let mut strings = vec![];
     let wire_root = path_node(wiring, &["Verschaltung"])?;
+    let bindings = super::archived_routes::bindings(project, wiring, &HashMap::from([(area_id.clone(), 0)]))?;
     for node in children(wire_root, "TeilAnlage").flat_map(|part| children(part, "WechselRichter")) {
         let inverter = number::<u32>(node, &["AllgDaten", "Nummer"])?;
         for tracker in children(node, "MPP_Tracker") {
@@ -385,10 +394,14 @@ fn read_field(project: &Project, root: Node<'_, '_>, scene: Node<'_, '_>, carrie
                 let route_index = strings.len() as u32;
                 let first = modules.len();
                 let mut ids = vec![];
+                let mut binding = None;
                 for (index, node) in children(string, "Modul").enumerate() {
                     let id = normalized_guid(value(node, &["Zugehoerigkeit", "GUID_Modul"])?);
                     let slot = number::<usize>(node, &["AbschGrad", "Index_SchattenArray"])?;
                     if saved_guids.get(&id) != Some(&slot) { return None; }
+                    let address = bindings.get(&slot)?;
+                    if binding.as_ref().is_some_and(|previous| previous != address) { return None; }
+                    binding = Some(address.clone());
                     let label = labels.get(&[inverter, input, string_number, index as u32 + 1])?;
                     let candidate = match_panel([label[0] - offset[0], label[1] - offset[1]], &panels, width)?;
                     if !nearest.insert(candidate) { return None; }
@@ -401,7 +414,7 @@ fn read_field(project: &Project, root: Node<'_, '_>, scene: Node<'_, '_>, carrie
                 if ids.is_empty() { return None; }
                 let jumper_m = modules[first..].windows(2).map(|w| dist(w[0].center(), w[1].center())).sum();
                 strings.push(StringRoute { id: format!("visual3d-field-1/route-{inverter}-{input}-{string_number}"),
-                    index: route_index, modules: ids, jumper_m, home_run_m: 0.0 });
+                    index: route_index, modules: ids, jumper_m, home_run_m: 0.0, binding });
             }
         }
     }

@@ -79,15 +79,27 @@ fn scene_issues(p: &Project, push: &mut impl FnMut(&'static str, Severity, Strin
         let sev = match i.severity.as_str() { "error" => Severity::Error, "warning" => Severity::Warning, _ => Severity::Info };
         push(solarcraft_scene::static_code(&i.code), sev, format!("/scene/{}", i.subject), i.message);
     }
-    let assigned = crate::derive::modules_by_array(&crate::derive::electrical(p));
+    let electrical = crate::derive::electrical(p);
+    let assigned = crate::derive::modules_by_array(&electrical);
+    for a in &p.arrays {
+        let routes = sc.fields.iter().filter(|f| f.array_id.as_deref() == Some(&a.id)).flat_map(|f| &f.strings);
+        if let Err(reason) = crate::plant::check_mppt_bindings(&electrical, &a.id, routes) {
+            push("SCENE_MPPT_BINDING", Severity::Error, "/scene/fields".into(), format!("{}: {reason}.", a.name.value));
+        }
+    }
+    let mut placed = std::collections::HashMap::new();
+    for f in &sc.fields {
+        if let Some(aid) = &f.array_id { *placed.entry(aid.as_str()).or_insert(0) += f.modules.len(); }
+    }
     for (k, f) in sc.fields.iter().enumerate() {
         let Some(aid) = &f.array_id else { continue };
         let ptr = format!("/scene/fields/{k}");
         let Some(a) = p.arrays.iter().find(|a| &a.id == aid) else { push("SCENE_FIELD_ARRAY", Severity::Error, ptr, format!("Field {} feeds array {aid}, which does not exist.", f.id)); continue };
         if f.modules.is_empty() { continue; }
         let strung = assigned.get(aid).copied().unwrap_or(0) as usize;
-        if strung != f.modules.len() {
-            push("SCENE_FIELD_COUNT", Severity::Warning, ptr.clone(), format!("Field {} holds {} modules but array {} is strung for {strung}; the simulation uses the strung count and the field's shading.", f.id, f.modules.len(), a.name.value));
+        let scene_count = placed[aid.as_str()];
+        if strung != scene_count {
+            push("SCENE_FIELD_COUNT", Severity::Warning, ptr.clone(), format!("The scene holds {scene_count} modules for array {} with {strung} wired modules. Check the bound fields and wiring.", a.name.value));
         }
         if let Some((t, az)) = sc.field_orientation(f) {
             let daz = ((az - a.azimuth.value + 540.0) % 360.0 - 180.0).abs();

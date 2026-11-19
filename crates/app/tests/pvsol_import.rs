@@ -8,10 +8,8 @@ fn call(method: &str, args: Value) -> Value {
     app::api::dispatch(method, &args, &mut |_| true).unwrap()
 }
 
-fn archive(path: &Path) { archive_with(path, false) }
-
-/// `battery`: add a DC generator-coupled battery system and an absolute 2.5 kW feed-in limit.
-fn archive_with(path: &Path, battery: bool) {
+/// Use the saved DC generator flag for both catalog topologies to cover the stale AC flag.
+fn archive_with(path: &Path, storage_enabled: bool, catalog_coupling: Option<i32>) {
     let mut zip = ZipWriter::new(File::create(path).unwrap());
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut add = |name, data: &[u8]| {
@@ -32,7 +30,7 @@ fn archive_with(path: &Path, battery: bool) {
         <Haeufigkeit>1</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><Straenge>
           <ModulfeldId>area</ModulfeldId><AnzahlInReihe>7</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings>
         </Straenge><Straenge>
-          <ModulfeldId>area</ModulfeldId><AnzahlInReihe>0</AnzahlInReihe><AnzahlStrings>0</AnzahlStrings>
+          <ModulfeldId>00000000-0000-0000-0000-000000000000</ModulfeldId><AnzahlInReihe>0</AnzahlInReihe><AnzahlStrings>0</AnzahlStrings>
         </Straenge></PolyStringVerschaltung></ModulfeldTeil><MPPListe>0</MPPListe></MPPListe>
       </WRObj></Verschaltung><Verschaltung><WRObj><InverterID>i</InverterID><InverterVersion>3</InverterVersion>
         <Haeufigkeit>1</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><StraengeInReihe>true</StraengeInReihe>
@@ -42,16 +40,19 @@ fn archive_with(path: &Path, battery: bool) {
       </WRObj></Verschaltung></Wechselrichter>
     </PVData>"#;
     let mut xml = String::from_utf8(xml.to_vec()).unwrap();
-    if battery {
+    if storage_enabled {
+        xml = xml.replace("OnGridPVAdvanced", "OnGridPVWithBatteries");
         xml = xml.replace("</PVData>", r#"<ACNetz><NetzSpannung><Value>120</Value></NetzSpannung>
           <IstProzentualeAbregelung>true</IstProzentualeAbregelung><AbregelungAmWR>false</AbregelungAmWR>
           <ProzentualeAbregelung><Value>0.025</Value></ProzentualeAbregelung>
-          <IsClippingRelativeToInstalledDCPower>false</IsClippingRelativeToInstalledDCPower></ACNetz>
-          <Batteriesystem><BatSys><AnzahlBatterieSysteme>1</AnzahlBatterieSysteme><ConnectedWrOrMppIndex>0</ConnectedWrOrMppIndex>
+          <IsClippingRelativeToInstalledDCPower>false</IsClippingRelativeToInstalledDCPower></ACNetz></PVData>"#);
+    }
+    // PV-only projects also save this template, with no battery record in DB.json.
+    xml = xml.replace("</PVData>", r#"<Batteriesystem><BatSys>
+          <AnzahlBatterieSysteme>1</AnzahlBatterieSysteme><ConnectedWrOrMppIndex>0</ConnectedWrOrMppIndex>
           <BatteryDBId>bs</BatteryDBId><IsAcKopplung>false</IsAcKopplung><IsDcKopplungGenerator>true</IsDcKopplungGenerator>
           <IsDcKopplungZwischenkreis>false</IsDcKopplungZwischenkreis><TimedChargeEnabled>false</TimedChargeEnabled>
           <TimedDischargeEnabled>false</TimedDischargeEnabled></BatSys></Batteriesystem></PVData>"#);
-    }
     add("Project.xml", xml.as_bytes());
     let mut db = json!({
         "PVModules":[{"Id":"m","Version":2,"Name":"Synthetic module","Company":{"Name":"Fixture"},
@@ -62,8 +63,8 @@ fn archive_with(path: &Path, battery: bool) {
             "MPPT1_NrOf":1,"MPPT1_U_MPP_Min":100,"MPPT1_U_MPP_Max":500,"MPPT1_MaxCurrent":18,
             "MPPT1_MaxShortCircuitCurrent":25,"MaxInputVoltageDC":600,"MaxAC_Power":2800,"E50":0.96}]
     });
-    if battery {
-        db["BatterySystems"] = json!([{"Id":"bs","Version":1,"Name":"Synthetic battery system","Company":{"Name":"Fixture"},
+    if let Some(coupling) = catalog_coupling {
+        db["BatterySystems"] = json!([{"Id":"bs","Version":1,"Coupling":coupling,"Name":"Synthetic battery system","Company":{"Name":"Fixture"},
             "NominalPower":5000,"MaxCharge":5000,"MaxDischarge":7500,"SocMin":0.0,"NumberOfBatteriesPerString":1,"NumberOfBatteryStrings":1,
             "E0":0.8,"E5":0.82,"E10":0.83,"E20":0.87,"E30":0.9,"E50":0.95,"E75":0.97,"E100":0.98,
             "Battery":{"Id":"b","Version":1,"Name":"Synthetic LFP","BatteryType":201,"RatedVoltage":3.2,"NumberOfCellsSerie":16,
@@ -102,7 +103,7 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     fs::create_dir_all(&dir).unwrap();
     let source = dir.join("source.pvprj");
     let destination = dir.join("copy.solarcraft");
-    archive(&source);
+    archive_with(&source, false, None);
     let before = fs::read(&source).unwrap();
     let preview = call("import_pvsol", json!({"source": source}));
     assert_eq!(preview["reference"]["installed_modules"], 14);
@@ -111,6 +112,8 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     assert!(!destination.exists());
     call("import_pvsol", json!({"source": source,"file": destination}));
     let reopened = app::get_project(&destination).unwrap();
+    assert!(reopened.storage.is_none());
+    assert!(reopened.library.inverters.iter().all(|i| i.battery_port.is_none()));
     assert_eq!(reopened.site.longitude.value, -74.1);
     assert_eq!(reopened.site.utc_offset(), -5.0);
     assert_eq!(reopened.library.modules[0].catalog_ref.as_ref().unwrap().version, 2);
@@ -150,7 +153,7 @@ fn dc_coupled_battery_system_and_absolute_feed_in_limit_are_migrated() {
     fs::create_dir_all(&dir).unwrap();
     let source = dir.join("battery.pvprj");
     let destination = dir.join("battery.solarcraft");
-    archive_with(&source, true);
+    archive_with(&source, true, Some(2));
     call("import_pvsol", json!({"source": source, "file": destination}));
     let p = app::get_project(&destination).unwrap();
     assert_eq!(p.grid.export_limit_kw, Some(2.5), "absolute limit stored as kW / 100");
@@ -169,6 +172,49 @@ fn dc_coupled_battery_system_and_absolute_feed_in_limit_are_migrated() {
     app::simulate(&destination, |_| true).unwrap();
     let result = call("compare_pvsol", json!({"file": destination}));
     assert!(result["comparison"]["inverter_ac"]["solarcraft_basis"].as_str().unwrap().starts_with("PV and battery delivered"));
+    for file in [source, destination] { fs::remove_file(file).unwrap(); }
+    fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn ac_battery_catalog_overrides_stale_dc_flag_and_keeps_pv_meter() {
+    use solarcraft_model::plant::Coupling;
+    let dir = std::env::temp_dir().join(format!("SolarCraft-PVPRJ-ac-battery-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("battery.pvprj");
+    let destination = dir.join("battery.solarcraft");
+    archive_with(&source, true, Some(1));
+    let imported = call("import_pvsol", json!({"source": source, "file": destination}));
+    let p = app::get_project(&destination).unwrap();
+    let storage = p.storage.as_ref().expect("battery system migrated");
+    assert_eq!(storage.coupling, Coupling::Integrated);
+    assert!(p.library.inverters.iter().all(|i| i.battery_port.is_none()));
+    let converter = p.library.battery(&storage.battery_id).unwrap().converter.as_ref().unwrap();
+    assert_eq!((converter.p_rated_w, converter.p_charge_max_w, converter.p_discharge_max_w), (5000.0, 5000.0, 7500.0));
+    assert_eq!(converter.efficiency_curve.len(), 8);
+    assert!(imported["reference"]["warnings"].as_array().unwrap().iter()
+        .any(|warning| warning.as_str().unwrap().contains("conflicting saved DC flag")));
+    app::simulate(&destination, |_| true).unwrap();
+    let result = call("compare_pvsol", json!({"file": destination}));
+    assert_eq!(result["comparison"]["inverter_ac"]["solarcraft_basis"], "inverter AC output");
+    for file in [source, destination] { fs::remove_file(file).unwrap(); }
+    fs::remove_dir(dir).unwrap();
+}
+
+#[test]
+fn missing_active_battery_revision_preserves_the_pv_design() {
+    let dir = std::env::temp_dir().join(format!("SolarCraft-PVPRJ-missing-battery-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("battery.pvprj");
+    let destination = dir.join("battery.solarcraft");
+    archive_with(&source, true, None);
+    let imported = call("import_pvsol", json!({"source": source, "file": destination}));
+    assert_eq!(imported["reference"]["installed_modules"], 14);
+    assert!(imported["reference"]["warnings"].as_array().unwrap().iter()
+        .any(|warning| warning.as_str().unwrap().contains("one identifiable embedded revision")));
+    let p = app::get_project(&destination).unwrap();
+    assert!(p.storage.is_none());
+    assert!(p.library.inverters.iter().all(|i| i.battery_port.is_none()));
     for file in [source, destination] { fs::remove_file(file).unwrap(); }
     fs::remove_dir(dir).unwrap();
 }

@@ -238,18 +238,28 @@ public sealed partial class MainWindow
                 var width = Num(T("dormer_width"), N(dormer, "width"), 138);
                 var height = Num(T("dormer_front_height"), N(dormer, "front_height"), 138);
                 var pitch = Num(T("pitch"), N(dormer, "roof_pitch_deg"), 138);
+                var cap = dormer["gable"];
+                var rise = Num(T("dormer_rise"), N(cap, "rise_m"), 138);
+                var ridge = Num(T("dormer_ridge_width"), N(cap, "ridge_width_m"), 138);
+                rise.Minimum = ridge.Minimum = 0.001;
                 width.Minimum = height.Minimum = 0.001;
                 pitch.Minimum = 0;
                 pitch.Maximum = Math.Max(0, N(dormer, "base_pitch_deg") - 0.001);
                 p.Children.Add(Row(width, height));
-                p.Children.Add(Row(pitch, Btn(T("apply_dormer"), () =>
+                p.Children.Add(cap is null ? pitch : Row(rise, ridge));
+                p.Children.Add(Btn(T("apply_dormer"), () =>
                 {
                     var kind = (JsonObject)dormer.DeepClone();
                     kind["width"] = width.Value;
                     kind["front_height"] = height.Value;
-                    kind["roof_pitch_deg"] = pitch.Value;
+                    if (cap is null) kind["roof_pitch_deg"] = pitch.Value;
+                    else
+                    {
+                        kind["gable"]!["rise_m"] = rise.Value;
+                        kind["gable"]!["ridge_width_m"] = ridge.Value;
+                    }
                     SceneEdit(new object[] { new { op = "update_object", id, kind } });
-                })));
+                }));
             }
             if (hit.Contains("/roof-"))
             {
@@ -265,6 +275,7 @@ public sealed partial class MainWindow
             p.Children.Add(Note($"{S(f, "name")} · {f["modules"]} modules · {f["strings"]} strings · array {S(f, "array_id")}"));
             var mps = Num(T("modules_per_string"), 8, 200);
             var storedField = Arr(_project?["scene"]?["fields"]).FirstOrDefault(row => S(row, "id") == fid);
+            AddMpptRouteEditor(p, S(storedField, "array_id"));
             var point = Arr(storedField?["inverter_at"]);
             var toInverter = new CheckBox { Content = T("workflow_home_run"), IsChecked = point.Count == 3 };
             double Coordinate(int index) => point.Count == 3 ? point[index]!.GetValue<double>() : 0.0;
@@ -287,6 +298,71 @@ public sealed partial class MainWindow
             if (hit.Contains("/m")) p.Children.Add(Btn("Remove " + hit.Split('/').Last(), () => SceneEdit(new object[] { new { op = "remove_modules", field = fid, modules = new[] { hit } } })));
             p.Children.Add(Btn(T("delete_selected"), () => { _hit = null; SceneEdit(new object[] { new { op = "remove_field", id = fid } }); }));
         }
+    }
+
+    private void AddMpptRouteEditor(StackPanel inspector, string arrayId)
+    {
+        if (string.IsNullOrEmpty(arrayId)) return;
+        var routes = Arr(_project?["scene"]?["fields"]).Where(field => S(field, "array_id") == arrayId)
+            .SelectMany(field => Arr(field?["strings"])).ToList();
+        if (routes.Count == 0) return;
+        var targets = new List<(string Unit, int Input, int Group, int Copy, int Length, string Label)>();
+        foreach (var record in Arr(_stringing?["inverters"]))
+        {
+            var unit = record?["unit"];
+            var inputs = Arr(unit?["mppts"]);
+            for (int mi = 0; mi < inputs.Count; mi++)
+            {
+                var groups = Arr(inputs[mi]);
+                for (int gi = 0; gi < groups.Count; gi++)
+                {
+                    var group = groups[gi];
+                    if (S(group, "array_id") != arrayId) continue;
+                    for (int copy = 0; copy < N(group, "strings"); copy++)
+                        targets.Add((S(unit, "id"), mi, gi, copy, (int)N(group, "modules_per_string"),
+                            $"{S(unit, "name")} · MPPT {mi + 1} · {gi + 1}/{copy + 1}"));
+                }
+            }
+        }
+        if (targets.Count == 0) return;
+        var content = new StackPanel { Spacing = 5 };
+        var inputsByRoute = new List<(string Route, ComboBox Selection)>();
+        foreach (var route in routes)
+        {
+            int length = Arr(route?["modules"]).Count;
+            var options = new List<(string, string)> { ("", T("route_unassigned")) };
+            string current = "";
+            var binding = route?["binding"];
+            for (int t = 0; t < targets.Count; t++)
+            {
+                var target = targets[t];
+                if (target.Length != length) continue;
+                options.Add((t.ToString(), target.Label));
+                if (binding is not null && S(binding, "unit_id") == target.Unit && N(binding, "input") == target.Input
+                    && N(binding, "group") == target.Group && N(binding, "copy") == target.Copy)
+                    current = t.ToString();
+            }
+            var select = Combo(S(route, "id"), options, current);
+            inputsByRoute.Add((S(route, "id"), select));
+            content.Children.Add(select);
+        }
+        content.Children.Add(Row(Btn(T("apply"), () =>
+        {
+            var bindings = new List<object>();
+            foreach (var (route, selection) in inputsByRoute)
+            {
+                if (!int.TryParse(Sel(selection), out int index))
+                {
+                    ShowError(T("route_assignment_required"));
+                    return;
+                }
+                var t = targets[index];
+                bindings.Add(new { route, binding = new { unit_id = t.Unit, input = t.Input, group = t.Group, copy = t.Copy } });
+            }
+            SceneEdit(new object[] { new { op = "bind_string_routes", array = arrayId, bindings } });
+        }), Btn(T("route_clear_assignments"), () =>
+            SceneEdit(new object[] { new { op = "bind_string_routes", array = arrayId, bindings = Array.Empty<object>() } }))));
+        inspector.Children.Add(new Expander { Header = T("route_assignments"), Content = content });
     }
 
     private StackPanel BuildSceneAdder()

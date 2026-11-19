@@ -38,6 +38,14 @@ pub fn edit(path: &Path, edits: &Value, preview: bool) -> Result<Value> {
     let (mut st, mut p) = open(path)?;
     let before = scene_of(&p);
     let (s, touched) = apply(&before, &edits).map_err(|x| e("SCENE_EDIT", x))?;
+    let electrical = solarcraft_model::derive::electrical(&p);
+    for edit in &edits {
+        if let Edit::BindStringRoutes { array, .. } = edit {
+            solarcraft_model::plant::check_mppt_bindings(&electrical, array,
+                s.fields.iter().filter(|f| f.array_id.as_deref() == Some(array)).flat_map(|f| &f.strings))
+                .map_err(|reason| e("SCENE_MPPT_BINDING", reason))?;
+        }
+    }
     let mut out = summary(&s, &touched);
     out["preview"] = Value::from(preview);
     if !preview {
@@ -147,6 +155,18 @@ pub fn bind(path: &Path, field: &str, array_id: &str, match_array: bool) -> Resu
     let mut s = scene_of(&p);
     let ai = p.arrays.iter().position(|a| a.id == array_id).ok_or_else(|| e("NOT_FOUND", format!("no array {array_id}")))?;
     let fi = s.fields.iter().position(|f| f.id == field).ok_or_else(|| e("NOT_FOUND", format!("no field {field}")))?;
+    let other_field = s.fields.iter().find(|other| other.array_id.as_deref() == Some(array_id) && other.id != field);
+    if match_array && other_field.is_some() {
+        return Err(e("SCENE_FIT", "The array already spans multiple fields. Place and route each roof separately."));
+    }
+    let shared = other_field.is_some();
+    if let Some(other) = other_field {
+        if let Some(((tilt, az), (t, a))) = s.field_orientation(other).zip(s.field_orientation(&s.fields[fi])) {
+            if (tilt - t).abs() > 1.0 || ((az - a + 180.0).rem_euclid(360.0) - 180.0).abs() > 1.0 {
+                return Err(e("SCENE_FIT", "Fields sharing an array need matching tilt and azimuth."));
+            }
+        }
+    }
     if let Some(m) = p.library.module(&p.arrays[ai].module_id.value) {
         let f = &mut s.fields[fi];
         let (l, w) = (m.length_m.max(m.width_m), m.length_m.min(m.width_m));
@@ -167,15 +187,15 @@ pub fn bind(path: &Path, field: &str, array_id: &str, match_array: bool) -> Resu
         more.push(Edit::RouteStrings { field: field.into(), modules_per_string: mps, inverter_at: s1.fields[fi].inverter_at });
         s = apply(&s1, &more).map_err(|x| e("SCENE_EDIT", x))?.0;
     }
-    if let Some(other) = s.fields.iter().find(|other| other.array_id.as_deref() == Some(array_id) && other.id != field) {
-        return Err(e("SCENE_ARRAY_BOUND", format!("Array {array_id} already belongs to field {}.", other.id)));
+    if s.fields[fi].array_id.as_deref() != Some(array_id) {
+        for route in &mut s.fields[fi].strings { route.binding = None; }
     }
     s.fields[fi].array_id = Some(array_id.into());
     let f = s.fields[fi].clone();
     let orient = s.field_orientation(&f);
     p.scene = Some(s);
     p.use_archived_scene_shading = false;
-    if let Some((tilt, az)) = orient {
+    if let Some((tilt, az)) = orient.filter(|_| !shared) {
         let set = |p: &mut Project, k: &str, v: Value| p.set_by_pointer(&format!("/arrays/{ai}/{k}"), v).map_err(|x| e("INVALID_ARGUMENT", x));
         set(&mut p, "tilt", json!((tilt * 100.0).round() / 100.0))?;
         set(&mut p, "azimuth", json!(((az * 100.0).round() / 100.0).rem_euclid(360.0)))?;

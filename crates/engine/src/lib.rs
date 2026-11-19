@@ -150,6 +150,7 @@ pub enum RearSource {
     SavedHourly,
     SavedMonthly,
     RowGeometry,
+    SceneGeometry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -289,17 +290,27 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 && rear.albedo.is_none_or(|albedo| albedo == p.site.albedo.value)
                 && !a.bifacial_rows.is_some_and(|rows| rows.force_geometry)
         });
-        let row_model = a.bifacial_rows.filter(|_| bifaciality.is_some() && a.tracking.is_none() && rear_profile.is_none())
+        let estimate_rear = bifaciality.is_some() && a.tracking.is_none() && rear_profile.is_none();
+        let finite_rows = p.scene.as_ref().filter(|_| estimate_rear).and_then(|scene| {
+            let suns: Vec<_> = sun.iter().map(|sp| (sp.apparent_elevation, sp.azimuth)).collect();
+            solarcraft_scene::rear::ground_racks(scene, &a.id, &suns)
+        });
+        let row_model = a.bifacial_rows.filter(|_| estimate_rear && finite_rows.is_none())
             .and_then(|rows| solarcraft_pv::bifacial::Rows::new(a.tilt.value, rows.slant_width_m, rows.row_pitch_m, rows.lower_edge_m)
                 .map(|model| (model, 1.0 - rows.mounting_shade)));
         let rear_source = rear_profile.map(|profile| if profile.estimated_hourly { RearSource::SavedMonthly } else { RearSource::SavedHourly })
+            .or_else(|| finite_rows.as_ref().map(|_| RearSource::SceneGeometry))
             .or_else(|| row_model.as_ref().map(|_| RearSource::RowGeometry));
         irradiation.rear = rear_source.map(|source| RearIrradiation { source, monthly_kwh_m2: [0.0; 12] });
-        let rear_diffuse_iam = row_model.as_ref().map(|_| {
+        let modeled_rear = row_model.is_some() || finite_rows.is_some();
+        let rear_diffuse_iam = modeled_rear.then(|| {
             (iam::diffuse_average(iam_beam, 180.0 - a.tilt.value, true),
                 iam::diffuse_average(iam_beam, 180.0 - a.tilt.value, false))
         });
-        if row_model.is_some() {
+        if finite_rows.is_some() {
+            warnings.push(Note { code: "BIFACIAL_REAR_SCENE".into(), subject: a.name.value.clone(), value: 0.0,
+                text: "Rear irradiance uses the placed finite rows and nearby scene shadows. Single-bounce reflection uses horizontal ground.".into() });
+        } else if row_model.is_some() {
             warnings.push(Note { code: "BIFACIAL_REAR_ROWS".into(), subject: a.name.value.clone(), value: 0.0,
                 text: "Rear irradiance uses parallel rows over a horizontal reflecting surface. Nearby objects and finite row ends are outside this model.".into() });
         } else if bifaciality.is_some() && rear_profile.is_none() {
@@ -310,9 +321,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             archived: archive.and_then(|saved| archived_shading::ArchiveArray::new(saved, &elec, &a.id, module, module_curve)) };
         let shade = if a.tracking.is_some() || archive.is_some() {
             None
-        } else if let Some((scene, field)) = bound_field(p, a)? {
+        } else if let Some((scene, index)) = bound_field(p, a)? {
+            let field = &scene.fields[index];
             let routes = partial_shading::routes(field, module, &elec, &a.id);
-            let (summary, diagnostic, trace) = trace_field(scene, field, a, &sun, w, routes.is_ok(), module.half_cell)?;
+            let (summary, diagnostic, trace) = trace_field(&scene, field, a, &sun, w, routes.is_ok(), module.half_cell)?;
             match (routes, trace) {
                 (Ok(routes), Some(trace)) => {
                     ah.shaded = Some(partial_shading::ShadedArray {
@@ -335,7 +347,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     let (summary, diagnostic, trace) = trace_roof(a, roof, &sun, w, &routes, diodes, module.half_cell);
                     module_shading.push(diagnostic);
                     ah.shaded = Some(partial_shading::ShadedArray {
-                        trace, routes, module: module_curve, hours: vec![partial_shading::Light::default(); n], diodes,
+                        trace, routes: partial_shading::Routes::Sequential(routes), module: module_curve, hours: vec![partial_shading::Light::default(); n], diodes,
                         forward_v: module.bypass_diode_voltage_v.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.5),
                         half_cell: module.half_cell,
                     });
@@ -391,8 +403,15 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let (rear_poa, rear_effective) = if let Some(profile) = rear_profile {
                 let irradiance = f64::from(profile.w_m2[local_hour[k] as usize]);
                 (irradiance, irradiance * bifaciality.unwrap_or_default())
-            } else if let (Some((rows, transmission)), Some((sky_iam, ground_iam))) = (&row_model, rear_diffuse_iam) {
-                let rear = rows.irradiance(&geo, &comp, p.site.albedo.value);
+            } else if let Some((sky_iam, ground_iam)) = rear_diffuse_iam {
+                let (rear, transmission) = if let Some(rows) = &finite_rows {
+                    let beam_horizontal = dni * geo.zenith.to_radians().cos().max(0.0);
+                    (solarcraft_pv::bifacial::RearPoa { direct: dni * rows.beam[k], sky: dhi * rows.sky,
+                        reflected: p.site.albedo.value * (dhi * rows.ground_diffuse + beam_horizontal * rows.ground_beam[k]) },
+                        a.bifacial_rows.map_or(1.0, |rows| 1.0 - rows.mounting_shade))
+                } else if let Some((model, transmission)) = &row_model {
+                    (model.irradiance(&geo, &comp, p.site.albedo.value), *transmission)
+                } else { unreachable!("modeled rear source must exist") };
                 let incident = transmission * (rear.direct + rear.sky + rear.reflected);
                 let absorbed = transmission * (rear.direct * iam_beam(180.0 - aoi) + rear.sky * sky_iam + rear.reflected * ground_iam);
                 (incident, absorbed * bifaciality.unwrap_or_default() * soiling)
@@ -426,7 +445,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let after_iam = dir_s * beam_iam + diffuse_iam;
             let e_eff = after_iam * soiling + rear_effective;
             for (s, v) in [ghi, poa.global, after_geo, after_shade, after_iam, after_iam * soiling, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
-            let thermal_poa = poa.global + if row_model.is_some() { rear_poa } else { 0.0 };
+            let thermal_poa = poa.global + if modeled_rear { rear_poa } else { 0.0 };
             let tc = temperature::faiman(thermal_poa, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             if let Some(shaded) = &mut ah.shaded {
                 shaded.hours[k] = partial_shading::Light { direct: poa.direct * beam_iam * soiling,
@@ -579,7 +598,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                         for copy in 0..iterations {
                             let profiles: Vec<_> = chain.iter().zip(&active).map(|(&(key, group, _), &(local, saved))| {
                                 if let Some(a) = local {
-                                    Some(a.module_curves(k, group.modules_per_string, offsets[&key] + copy as usize))
+                                    Some(a.module_curves(k, key, group.modules_per_string, offsets[&key], group.strings as usize, copy as usize))
                                 } else {
                                     saved.map(|a| a.module_curves(k, local_hour[k] as usize, key, copy as usize))
                                 }
@@ -616,7 +635,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     let mut curves = vec![];
                     for &(key, group) in &groups_with_keys {
                         if let Some(shaded) = resolved(group) {
-                            curves.extend(shaded.curves(k, group.modules_per_string, offsets[&key], group.strings as usize));
+                            curves.extend(shaded.curves(k, key, group.modules_per_string, offsets[&key], group.strings as usize));
                         } else if let Some(shaded) = archived(group) {
                             curves.extend(shaded.curves(k, local_hour[k] as usize, group.modules_per_string, key));
                         } else if let Some(state) = state(group) {
@@ -650,9 +669,12 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 vw[k] += t.v_operating * d;
             }
             if native_composite_hours > 0 {
+                let explicit = groups.iter().filter_map(|group| arr_hours.get(&group.array_id)?.shaded.as_ref())
+                    .all(|layout| layout.routes.explicit());
                 warnings.push(Note { code: "COMPOSITE_STRING_SHADE_GEOMETRY".into(),
                     subject: format!("{} MPPT {}", u.name, mi + 1), value: native_composite_hours as f64,
-                    text: "Scene or roof substring shading drives the series and optimizer curves. Segment membership follows the layout's string order.".into() });
+                    text: if explicit { "Scene substring shading drives the series and optimizer curves through explicit MPPT assignments." }
+                        else { "Scene or roof substring shading drives the series and optimizer curves. Some segment memberships follow the layout's string order." }.into() });
             }
             if mr.limited_hours > 0 { warnings.push(Note { code: "MPP_WINDOW_HOURS".into(), subject: format!("{} MPPT {}", u.name, mi + 1), value: mr.limited_hours as f64, text: format!("{} MPPT {}: {} h limited by the MPP voltage window or input current", u.name, mi + 1, mr.limited_hours) }); }
             ur.mppts.push(mr);
@@ -910,19 +932,36 @@ pub fn near_shading(a: &solarcraft_model::Array, sun: &[spa::SolarPosition]) -> 
 /// Shading of an array from the 3D scene field bound to it (module samples per
 /// bypass-diode substring, every scene object and module as occluder).
 pub fn scene_shading(p: &Project, a: &solarcraft_model::Array, sun: &[spa::SolarPosition], w: &Weather) -> Result<Option<(NearShading, FieldShade)>, SimError> {
-    let Some((scene, field)) = bound_field(p, a)? else { return Ok(None) };
-    let (summary, diagnostic, _) = trace_field(scene, field, a, sun, w, false, false)?;
+    let Some((scene, index)) = bound_field(p, a)? else { return Ok(None) };
+    let (summary, diagnostic, _) = trace_field(&scene, &scene.fields[index], a, sun, w, false, false)?;
     Ok(Some((summary, diagnostic)))
 }
 
-fn bound_field<'a>(p: &'a Project, a: &solarcraft_model::Array) -> Result<Option<(&'a solarcraft_scene::Scene, &'a solarcraft_scene::place::ModuleField)>, SimError> {
+fn bound_field<'a>(p: &'a Project, a: &solarcraft_model::Array) -> Result<Option<(std::borrow::Cow<'a, solarcraft_scene::Scene>, usize)>, SimError> {
+    use std::borrow::Cow;
     let Some(sc) = &p.scene else { return Ok(None) };
-    let mut fields = sc.fields.iter().filter(|f| f.array_id.as_deref() == Some(a.id.as_str()) && !f.modules.is_empty());
-    let Some(f) = fields.next() else { return Ok(None) };
-    if fields.next().is_some() {
-        return Err(SimError(format!("Array {} has multiple scene fields. Assign each field to a separate array.", a.id)));
+    let matches = |f: &solarcraft_scene::place::ModuleField| f.array_id.as_deref() == Some(a.id.as_str()) && !f.modules.is_empty();
+    let mut fields = sc.fields.iter().enumerate().filter(|(_, f)| matches(f));
+    let Some((index, first)) = fields.next() else { return Ok(None) };
+    let mut others = fields.map(|(_, f)| f).peekable();
+    if others.peek().is_none() { return Ok(Some((Cow::Borrowed(sc), index))); }
+    let mut merged = first.clone();
+    let (tilt, azimuth) = sc.field_orientation(first).ok_or_else(|| SimError(format!("Field {} has no module orientation.", first.id)))?;
+    for f in others {
+        if f.module != first.module || sc.field_orientation(f).is_none_or(|(t, az)| {
+            (tilt - t).abs() > 1.0 || ((az - azimuth + 180.0).rem_euclid(360.0) - 180.0).abs() > 1.0
+        }) {
+            return Err(SimError(format!("Array {} needs matching module sizes and orientations across its roof fields.", a.id)));
+        }
+        let route_start = merged.strings.len() as u32;
+        merged.modules.extend(f.modules.iter().cloned().map(|mut m| { m.string = m.string.map(|s| s + route_start); m }));
+        merged.strings.extend(f.strings.iter().cloned().map(|mut r| { r.index += route_start; r }));
     }
-    Ok(Some((sc, f)))
+    let mut scene = sc.clone();
+    scene.fields.retain(|f| !matches(f));
+    let index = scene.fields.len();
+    scene.fields.push(merged);
+    Ok(Some((Cow::Owned(scene), index)))
 }
 
 fn trace_roof(a: &solarcraft_model::Array, roof: &solarcraft_model::RoofLayout, sun: &[spa::SolarPosition],

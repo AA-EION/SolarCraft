@@ -13,7 +13,7 @@ use flate2::read::GzDecoder;
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use solarcraft_model::{derive, plant::{BuckOptimizer, CatalogRef, Electrical, FeedIn, InverterUnit, LoadProfile, StringGroup},
+use solarcraft_model::{derive, plant::{BuckOptimizer, CatalogRef, Coupling, Electrical, FeedIn, InverterUnit, LoadProfile, StringGroup},
     tracking::Tracker, Array, DesignMode, Field, Project, TranspositionModel};
 use solarcraft_store::{sha256_hex, InitialBlob, Store};
 use solarcraft_weather::{Hour, Provenance, Weather};
@@ -74,6 +74,8 @@ struct Reference {
     archived_scene_fields: usize,
     #[serde(default)]
     photoplan_arrays: usize,
+    #[serde(default)]
+    dc_hybrid: bool,
     target_kwp: f64,
     initial_inputs_hash: String,
     warnings: Vec<String>,
@@ -120,13 +122,15 @@ pub fn compare(path: &Path) -> Result<Value> {
     let Some(run) = crate::current_results(&store, &project)? else {
         return Ok(json!({"reference": overview(&saved), "comparison": null}));
     };
-    // With storage, PV*SOL's AC generator energy is what PV and battery deliver to the AC side
-    // (to the load, the grid and the feed-in limiter), not the inverter's PV-only output.
+    // The archived generator-side hybrid comparison includes storage delivery through
+    // the shared inverter. A separate AC battery converter has its own meter.
     let f = &run.flows;
-    let with_storage = project.storage.is_some() && [&f.pv_to_load, &f.battery_to_load, &f.export, &f.curtailed]
+    let hybrid_output = saved.dc_hybrid
+        && project.storage.as_ref().is_some_and(|storage| matches!(storage.coupling, Coupling::DcHybrid { .. }))
+        && [&f.pv_to_load, &f.battery_to_load, &f.export, &f.curtailed, &f.ev_to_grid]
         .iter().all(|v| v.len() == HOURS) && run.local_hour.len() == HOURS;
-    let delivered: Vec<f32> = if with_storage {
-        (0..HOURS).map(|k| f.pv_to_load[k] + f.battery_to_load[k] + f.export[k] + f.curtailed[k]).collect()
+    let delivered: Vec<f32> = if hybrid_output {
+        (0..HOURS).map(|k| f.pv_to_load[k] + f.battery_to_load[k] + f.export[k] - f.ev_to_grid[k] + f.curtailed[k]).collect()
     } else { vec![] };
     let delivered_monthly = {
         let mut m = vec![0.0; 12];
@@ -135,7 +139,7 @@ pub fn compare(path: &Path) -> Result<Value> {
         }
         m
     };
-    let (ac_hours, ac_months, ac_basis) = if with_storage {
+    let (ac_hours, ac_months, ac_basis) = if hybrid_output {
         (&delivered, delivered_monthly, "PV and battery delivered to the AC side (load, grid, feed-in limiter)")
     } else {
         (&run.hourly.ac_w, run.monthly.iter().map(|m| m.ac_kwh).collect::<Vec<_>>(), "inverter AC output")
@@ -282,8 +286,11 @@ fn read(source: &Path) -> Result<Imported> {
         project.simulation.pv_model = solarcraft_model::PvModel::TwoDiodePvsol;
         warnings.push("Modules with standard part-load operation use the two-diode model with PV*SOL's preferred parameter fit.".into());
     }
-    if !island {
-        grid_storage::apply(&mut project, root, &db, &sha, &mut warnings)?;
+    // Non-storage designs can still contain a populated BatSys template.
+    if system.starts_with("OnGridPVWithBatteries") {
+        if let Err(error) = grid_storage::apply(&mut project, root, &db, &sha, &mut warnings) {
+            warnings.push(format!("The saved battery system could not be imported: {}", error.message));
+        }
     }
     apply_field_settings(&mut project, root, &mut warnings);
     let archived_shade_arrays = archived_shade::apply(&mut project, root, &mut archive, &mut warnings)?;
@@ -393,6 +400,8 @@ fn read(source: &Path) -> Result<Imported> {
             .filter(|a| a.archived_shading.as_ref().is_some_and(|s| s.strings.is_some())).count(),
         archived_scene_fields,
         archived_shade_arrays, photoplan_arrays: project.roof_photos.len(),
+        dc_hybrid: project.storage.as_ref().is_some_and(|storage| matches!(storage.coupling, Coupling::DcHybrid { .. }))
+            && !island,
         initial_inputs_hash: solarcraft_engine::inputs_hash(&project, &weather_hash), warnings, channels: saved };
     Ok(Imported { project, weather: bytes, load, photo_blobs, reference })
 }
@@ -949,14 +958,15 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
                     let chain = flag(set, &["StraengeInReihe"]).then_some(mppts[slot].len() as u32);
                     let mut chain_count = None;
                     for string in children(set, "Straenge") {
+                        // An unoccupied MPPT can have a 0 × 0 placeholder and no PV area.
+                        let modules = number::<u32>(string, &["AnzahlInReihe"]);
+                        let strings = number::<u32>(string, &["AnzahlStrings"]);
+                        if (modules, strings) == (Some(0), Some(0)) { continue; }
                         let area_id = value(string, &["ModulfeldId"]).filter(|id| ids.contains_key(id))
                             .ok_or_else(|| fail("A string points to an unknown PV area.".into()))?;
                         let i = ids[area_id];
-                        // An unoccupied MPPT is saved as a 0 × 0 placeholder string.
-                        if number::<u32>(string, &["AnzahlInReihe"]) == Some(0) && number::<u32>(string, &["AnzahlStrings"]) == Some(0) { continue; }
-                        let modules = number::<u32>(string, &["AnzahlInReihe"]).filter(|n| (1..=1000).contains(n));
-                        let strings = number::<u32>(string, &["AnzahlStrings"]).filter(|n| (1..=1000).contains(n));
-                        let (modules, strings) = modules.zip(strings).ok_or_else(|| fail("Invalid saved string dimensions.".into()))?;
+                        let (modules, strings) = modules.zip(strings).filter(|(m, s)| (1..=1000).contains(m) && (1..=1000).contains(s))
+                            .ok_or_else(|| fail("Invalid saved string dimensions.".into()))?;
                         if chain.is_some() && *chain_count.get_or_insert(strings) != strings {
                             return Err(fail("Series-connected segments require equal parallel string counts.".into()));
                         }

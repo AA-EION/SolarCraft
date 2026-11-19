@@ -98,6 +98,33 @@ pub struct Electrical {
     pub inverters: Vec<InverterUnit>,
 }
 
+/// A scene can use inferred route order or an exact, complete assignment for
+/// an array. Partial or stale explicit assignments must be repaired first.
+pub fn check_mppt_bindings<'a>(
+    electrical: &Electrical, array: &str, routes: impl IntoIterator<Item = &'a solarcraft_scene::place::StringRoute>,
+) -> Result<bool, &'static str> {
+    let routes: Vec<_> = routes.into_iter().collect();
+    if routes.iter().all(|route| route.binding.is_none()) { return Ok(false); }
+    let mut slots = std::collections::HashSet::new();
+    let mut units = std::collections::HashMap::new();
+    for unit in &electrical.inverters {
+        if units.insert(unit.id.as_str(), unit).is_some() { return Err("the inverter identifier is ambiguous"); }
+    }
+    for route in routes {
+        let binding = route.binding.as_ref().ok_or("every route for the array needs an assignment")?;
+        let group = units.get(binding.unit_id.as_str()).and_then(|u| u.mppts.get(binding.input))
+            .and_then(|groups| groups.get(binding.group)).ok_or("an inverter, MPPT or group no longer exists")?;
+        if group.array_id != array || route.modules.len() != group.modules_per_string as usize || binding.copy >= group.strings as usize {
+            return Err("a route's array, module count or string copy differs from its assigned electrical group");
+        }
+        if !slots.insert(binding) { return Err("an electrical string copy is bound more than once"); }
+    }
+    let expected: usize = electrical.inverters.iter().flat_map(|u| u.mppts.iter().flatten())
+        .filter(|g| g.array_id == array).map(|g| g.strings as usize).sum();
+    if slots.len() != expected { return Err("some electrical strings have no route"); }
+    Ok(true)
+}
+
 // ---------------------------------------------------------------- grid
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

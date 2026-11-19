@@ -90,6 +90,23 @@ pub struct StringRoute {
     pub jumper_m: f64,
     /// Both conductors from the string ends to the inverter, metres (0 without an inverter location).
     pub home_run_m: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<MpptBinding>,
+}
+
+/// The physical string copy within a single electrical group. Indices are zero-based.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MpptBinding {
+    pub unit_id: String,
+    pub input: usize,
+    pub group: usize,
+    pub copy: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteAssignment {
+    pub route: String,
+    pub binding: MpptBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,7 +300,7 @@ pub fn route_strings(f: &mut ModuleField, mps: u32) {
         let jumper = centers.windows(2).map(|w| dist(w[0], w[1])).sum();
         let home = f.inverter_at.map_or(0.0, |inv| dist(centers[0], inv) + dist(centers[centers.len() - 1], inv));
         for &i in chunk { f.modules[i].string = Some(s as u32); }
-        f.strings.push(StringRoute { id: format!("{}/s{}", f.id, s), index: s as u32, modules: chunk.iter().map(|&i| f.modules[i].id.clone()).collect(), jumper_m: jumper, home_run_m: home });
+        f.strings.push(StringRoute { id: format!("{}/s{}", f.id, s), index: s as u32, modules: chunk.iter().map(|&i| f.modules[i].id.clone()).collect(), jumper_m: jumper, home_run_m: home, binding: None });
     }
 }
 

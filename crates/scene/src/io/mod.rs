@@ -306,7 +306,14 @@ pub fn plan_with_source(scene: &Scene, imp: &Imported, relink: bool, source_key:
             notes.push(format!("Field {id} arrived unbound because its array already has a field."));
         }
         edits.push(Edit::AddField { id: Some(id.clone()), name: f.name.clone(), array_id, mount, module: f.module.clone(), layout: f.layout.clone(), source });
-        if !f.modules.is_empty() { edits.push(Edit::RestorePlacement { field: id, modules: f.modules.clone(), strings: f.strings.clone(), inverter_at: f.inverter_at }); }
+        if !f.modules.is_empty() {
+            let mut strings = f.strings.clone();
+            if strings.iter().any(|route| route.binding.is_some()) {
+                for route in &mut strings { route.binding = None; }
+                notes.push(format!("Field {id} needs new MPPT assignments in this project."));
+            }
+            edits.push(Edit::RestorePlacement { field: id, modules: f.modules.clone(), strings, inverter_at: f.inverter_at });
+        }
     }
     (edits, map, notes)
 }

@@ -3,11 +3,28 @@
 use super::{children, number, path_node, value};
 use roxmltree::Node;
 use solarcraft_model::{archived_shading::Route as ArchivedShadeRoute, plant::physical_strings, Project};
+use solarcraft_scene::place::MpptBinding;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 type OptimizerProduct = (String, i64);
 type StringShape = Vec<(usize, usize, Option<OptimizerProduct>)>;
 type WireSlots = Vec<Vec<usize>>;
+
+pub(super) fn bindings(project: &Project, wiring: Node<'_, '_>, area_ids: &HashMap<String, usize>)
+    -> Option<HashMap<usize, MpptBinding>>
+{
+    let routes = bind(project, wiring, area_ids)?;
+    let mut result = HashMap::new();
+    for route in routes.into_iter().flatten() {
+        for (copy, slots) in route.strings.into_iter().enumerate() {
+            let address = MpptBinding { unit_id: route.unit_id.clone(), input: route.input, group: route.group, copy };
+            for slot in slots {
+                if result.insert(slot, address.clone()).is_some() { return None; }
+            }
+        }
+    }
+    Some(result)
+}
 
 pub(super) fn bind(
     project: &Project, wiring: Node<'_, '_>, area_ids: &HashMap<String, usize>,

@@ -89,7 +89,7 @@ impl SubstringTrace {
     }
 }
 
-const MODULE_OWNER: u32 = 1 << 24;
+pub(crate) const MODULE_OWNER: u32 = 1 << 24;
 
 /// Triangles of everything that can cast shade.
 pub fn occluders(scene: &Scene) -> Vec<Triangle> {
@@ -143,7 +143,7 @@ fn samples(m: &PlacedModule, diodes: u32, opt: &ShadeOptions, split_halves: bool
 }
 
 /// Cosine-weighted directions over the hemisphere around `n`.
-fn hemisphere(n: V3, rings: usize, sectors: usize) -> Vec<V3> {
+pub(crate) fn hemisphere(n: V3, rings: usize, sectors: usize) -> Vec<V3> {
     let up = if n[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
     let t1 = norm(cross(up, n));
     let t2 = cross(n, t1);

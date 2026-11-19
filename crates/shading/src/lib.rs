@@ -79,6 +79,7 @@ impl Bvh {
     /// True if a ray from `o` along `d` hits any opaque triangle not owned by `skip`
     /// (partly transparent triangles are ignored here; see [`Bvh::transmittance`]).
     pub fn occluded(&self, o: V3, d: V3, skip: u32) -> bool {
+        if self.is_empty() { return false; }
         let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
         let mut stack = [0u32; 64];
         let mut sp = 1;
@@ -104,6 +105,10 @@ impl Bvh {
 }
 
 fn hit(t: &Tri, o: V3, d: V3) -> bool {
+    hit_before(t, o, d, f64::INFINITY)
+}
+
+fn hit_before(t: &Tri, o: V3, d: V3, max_t: f64) -> bool {
     let p = cross(d, t.e2);
     let det = dot(t.e1, p);
     if det.abs() < 1e-12 { return false; }
@@ -114,7 +119,8 @@ fn hit(t: &Tri, o: V3, d: V3) -> bool {
     let q = cross(s, t.e1);
     let v = dot(d, q) * inv;
     if v < 0.0 || u + v > 1.0 { return false; }
-    dot(t.e2, q) * inv > 1e-9
+    let distance = dot(t.e2, q) * inv;
+    distance > 1e-9 && distance < max_t
 }
 
 
@@ -138,6 +144,12 @@ impl Bvh {
     /// distinct partly transparent objects crossed (an object counts once,
     /// however many of its faces the ray crosses).
     pub fn transmittance(&self, o: V3, d: V3, skip: u32) -> f64 {
+        self.transmittance_to(o, d, skip, f64::INFINITY)
+    }
+
+    /// Transmittance up to a receiver at `o + d * distance`.
+    pub fn transmittance_to(&self, o: V3, d: V3, skip: u32, distance: f64) -> f64 {
+        if self.is_empty() || distance <= 0.0 { return 1.0; }
         let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
         let mut stack = [0u32; 64];
         let mut sp = 1;
@@ -145,7 +157,7 @@ impl Bvh {
         while sp > 0 {
             sp -= 1;
             let n = &self.nodes[stack[sp] as usize];
-            let (mut t0, mut t1) = (0.0f64, f64::INFINITY);
+            let (mut t0, mut t1) = (0.0f64, distance);
             for k in 0..3 {
                 let (a, b) = ((n.lo[k] - o[k]) * inv[k], (n.hi[k] - o[k]) * inv[k]);
                 t0 = t0.max(a.min(b)); t1 = t1.min(a.max(b));
@@ -153,7 +165,7 @@ impl Bvh {
             if t0 > t1 { continue; }
             if n.count > 0 {
                 for t in &self.tris[n.left as usize..(n.left + n.count) as usize] {
-                    if t.owner == skip || t.opacity <= 0.0 || !hit(t, o, d) { continue; }
+                    if t.owner == skip || t.opacity <= 0.0 || !hit_before(t, o, d, distance) { continue; }
                     if t.opacity >= 1.0 { return 0.0; }
                     if !seen.iter().any(|s| s.0 == t.owner) { seen.push((t.owner, t.opacity)); }
                 }
@@ -195,5 +207,15 @@ mod tests {
         let tr = bvh.transmittance([0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 0);
         assert!((tr - 0.3 * 0.5).abs() < 1e-6, "{tr}");
         assert!(!bvh.occluded([0.0, 0.0, 1.0], [0.0, -1.0, 0.0], 0), "transparent objects never fully occlude");
+    }
+
+    #[test]
+    fn ground_probe_ignores_hits_past_the_reflecting_plane() {
+        let deep = Triangle::opaque([-2.0,-2.0,-1.0], [2.0,-2.0,-1.0], [0.0,2.0,-1.0], 1);
+        let bvh = Bvh::from_triangles(&[deep]);
+        let (origin, ray) = ([0.0,0.0,1.0], [0.0,0.0,-1.0]);
+        assert_eq!(bvh.transmittance(origin, ray, 0), 0.0);
+        assert_eq!(bvh.transmittance_to(origin, ray, 0, 1.0), 1.0);
+        assert_eq!(Bvh::from_triangles(&[]).transmittance(origin, ray, 0), 1.0);
     }
 }
