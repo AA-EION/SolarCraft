@@ -180,6 +180,7 @@ public sealed partial class MainWindow
         if (_hit["object"] is JsonNode o && o is JsonObject)
         {
             var id = S(o, "id");
+            o = Arr(_project?["scene"]?["objects"]).FirstOrDefault(item => S(item, "id") == id) ?? o;
             p.Children.Add(Note($"{S(o, "name")} · {S(o["kind"], "type")} · {S(o, "layer")}"));
             p.Children.Add(Row(
                 Btn("←", () => SceneEdit(new object[] { new { op = "move", id, dx = -0.5, dy = 0.0 } })),
@@ -187,6 +188,29 @@ public sealed partial class MainWindow
                 Btn("↓", () => SceneEdit(new object[] { new { op = "move", id, dx = 0.0, dy = -0.5 } })),
                 Btn("↑", () => SceneEdit(new object[] { new { op = "move", id, dx = 0.0, dy = 0.5 } })),
                 Btn(T("delete_selected"), () => { _hit = null; SceneEdit(new object[] { new { op = "remove_object", id } }); })));
+            if (o["kind"] is JsonObject tree && S(tree, "type") == "tree")
+            {
+                var trunkHeight = Num(T("tree_trunk_height"), N(tree, "trunk_height"), 138);
+                var trunkRadius = Num(T("tree_trunk_radius"), N(tree, "trunk_radius"), 138);
+                var crownHeight = Num(T("tree_crown_height"), N(tree, "crown_height"), 138);
+                var crownRadius = Num(T("tree_crown_radius"), N(tree, "crown_radius"), 138);
+                var transparency = Num(T("transparency"), N(tree, "transparency"), 138);
+                trunkHeight.Minimum = transparency.Minimum = 0;
+                trunkRadius.Minimum = crownHeight.Minimum = crownRadius.Minimum = 0.001;
+                transparency.Maximum = 1;
+                p.Children.Add(Row(trunkHeight, trunkRadius));
+                p.Children.Add(Row(crownHeight, crownRadius));
+                p.Children.Add(Row(transparency, Btn(T("apply_tree"), () =>
+                {
+                    var kind = (JsonObject)tree.DeepClone();
+                    kind["trunk_height"] = trunkHeight.Value;
+                    kind["trunk_radius"] = trunkRadius.Value;
+                    kind["crown_height"] = crownHeight.Value;
+                    kind["crown_radius"] = crownRadius.Value;
+                    kind["transparency"] = transparency.Value;
+                    SceneEdit(new object[] { new { op = "update_object", id, kind } });
+                })));
+            }
             if (hit.Contains("/roof-"))
             {
                 p.Children.Add(Btn(T("place_modules"), () =>

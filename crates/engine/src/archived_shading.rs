@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::{electrical::{IvCurve, StringState}, partial_shading::ModuleCurve};
-use solarcraft_model::{equipment::ModuleSpec, plant::Electrical, ArchivedShading};
+use solarcraft_model::{archived_shading::RouteKey, equipment::ModuleSpec, plant::Electrical, ArchivedShading};
 use solarcraft_pv::diode::DiodeParams;
 use std::collections::BTreeMap;
 
@@ -21,13 +21,15 @@ impl Light {
     }
 }
 
+type InputRoutes = BTreeMap<(usize, usize), Vec<Vec<usize>>>;
+
 pub(crate) struct ArchiveArray {
     rates: Vec<u8>,
     rows: Vec<u16>,
     shaded_pattern: Vec<bool>,
     residuals: Vec<u8>,
     varying_diffuse: bool,
-    routes: BTreeMap<u32, Vec<Vec<usize>>>,
+    routes: BTreeMap<String, InputRoutes>,
     curve: ModuleCurve,
     diodes: u32,
     forward_v: f64,
@@ -38,7 +40,10 @@ pub(crate) struct ArchiveArray {
 impl ArchiveArray {
     pub fn new(archive: &ArchivedShading, electrical: &Electrical, id: &str, module: &ModuleSpec, curve: ModuleCurve) -> Option<Self> {
         let detail = archive.strings.as_ref()?;
-        let routes = detail.ordered_routes(id, electrical)?;
+        let mut routes: BTreeMap<String, InputRoutes> = BTreeMap::new();
+        for ((unit, input, group), strings) in detail.checked_routes(id, electrical)? {
+            routes.entry(unit.into()).or_default().insert((input, group), strings.to_vec());
+        }
         let diodes = module.bypass_diodes.filter(|d| (1..=12).contains(d))?;
         let baseline = archive.diffuse_baseline?;
         let width = detail.diffuse_percent.len();
@@ -63,11 +68,19 @@ impl ArchiveArray {
             || (light.directional > 0.0 && self.shaded_pattern[self.rows[local_hour] as usize])
     }
 
-    pub fn curves(&self, hour: usize, local_hour: usize, length: u32, start: usize, count: usize) -> Vec<(IvCurve, f64)> {
-        let light = self.hours[hour];
+    fn row(&self, local_hour: usize) -> &[u8] {
         let first = usize::from(self.rows[local_hour]) * self.residuals.len();
-        let row = &self.rates[first..first + self.residuals.len()];
-        let routes = &self.routes[&length][start..start + count];
+        &self.rates[first..first + self.residuals.len()]
+    }
+
+    fn strings(&self, (unit, input, group): RouteKey<'_>) -> &[Vec<usize>] {
+        &self.routes[unit][&(input, group)]
+    }
+
+    pub fn curves(&self, hour: usize, local_hour: usize, length: u32, key: RouteKey<'_>) -> Vec<(IvCurve, f64)> {
+        let light = self.hours[hour];
+        let row = self.row(local_hour);
+        let routes = self.strings(key);
         let mut distinct = BTreeMap::<Vec<((u8, u8), u32)>, u32>::new();
         for route in routes {
             let mut levels = BTreeMap::new();
@@ -92,6 +105,27 @@ impl ArchiveArray {
                 self.build_curve(levels, &mut at)
             } else { self.build_curve(levels, &mut at) };
             curve.map(|curve| (curve, f64::from(multiplicity)))
+        }).collect()
+    }
+
+    /// Keep one I–V per distinct module profile within a single physical
+    /// segment. Series copy indices are shared across the segment routes.
+    pub fn module_curves(&self, hour: usize, local_hour: usize, key: RouteKey<'_>, copy: usize) -> Vec<(Option<IvCurve>, u32)> {
+        let light = self.hours[hour];
+        let row = self.row(local_hour);
+        let mut profiles = BTreeMap::<(u8, u8), u32>::new();
+        for &slot in &self.strings(key)[copy] {
+            *profiles.entry((row[slot], self.residuals[slot])).or_default() += 1;
+        }
+        let mut params = BTreeMap::new();
+        let mut at = |residual, diffuse_only| *params.entry((residual, diffuse_only))
+            .or_insert_with(|| light.params(self.curve, diffuse_only, residual));
+        profiles.into_iter().map(|((rate, residual), count)| {
+            let (groups, halves) = (u32::from(rate / 3), rate % 3);
+            let mut levels = Vec::with_capacity(2);
+            if groups < self.diodes { levels.push(((residual, 0), self.diodes - groups)); }
+            if groups > 0 { levels.push(((residual, halves), groups)); }
+            (self.build_curve(levels, &mut at), count)
         }).collect()
     }
 

@@ -387,7 +387,9 @@ impl Project {
             *target = value;
         }
         let mut updated: Project = serde_json::from_value(doc).map_err(|e| format!("invalid value for {pointer}: {e}"))?;
-        if pointer.split('/').nth(1) == Some("scene") && updated.scene != self.scene {
+        if pointer.split('/').nth(1) == Some("scene") && updated.scene != self.scene
+            && [self.scene.as_ref(), updated.scene.as_ref()].into_iter().flatten()
+                .any(solarcraft_scene::Scene::has_bound_modules) {
             updated.use_archived_scene_shading = false;
         }
         // Easy mode: the kWp target is authoritative, so editing it hands the

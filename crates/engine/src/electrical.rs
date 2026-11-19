@@ -70,10 +70,54 @@ pub(crate) struct IvCurve {
 }
 
 pub(crate) struct SeriesSegment<'a> {
-    pub module: Option<&'a DiodeParams>,
+    pub module: Option<ModuleIv<'a>>,
     pub modules: f64,
     pub bypass_drop: f64,
     pub optimizer: Option<&'a BuckOptimizer>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ModuleIv<'a> {
+    Uniform(&'a DiodeParams),
+    Shaded(&'a IvCurve),
+}
+
+impl ModuleIv<'_> {
+    fn voc(self) -> f64 {
+        match self { Self::Uniform(d) => d.voc(), Self::Shaded(c) => c.voc() }
+    }
+
+    fn current(self, voltage: f64) -> f64 {
+        match self { Self::Uniform(d) => d.current(voltage), Self::Shaded(c) => c.current(voltage) }
+    }
+
+    fn voltage(self, current: f64) -> f64 {
+        match self {
+            Self::Uniform(d) => d.voltage(current),
+            Self::Shaded(c) => {
+                let next = c.knots.partition_point(|&(_, i)| i > current);
+                if next == 0 { return c.knots[0].0; }
+                if next == c.knots.len() { return c.voc(); }
+                let (v1, i1) = c.knots[next - 1];
+                let (v2, i2) = c.knots[next];
+                v1 + (v2 - v1) * ((i1 - current) / (i1 - i2))
+            }
+        }
+    }
+
+    fn mpp_voltage(self, lo: f64, hi: f64) -> f64 {
+        match self {
+            Self::Uniform(d) => d.mpp().0.clamp(lo, hi),
+            Self::Shaded(c) => curve_max(&[(c, 1.0)], lo, hi, f64::INFINITY).0.clamp(lo, hi),
+        }
+    }
+
+    pub(crate) fn max_power(self) -> f64 {
+        match self {
+            Self::Uniform(d) => d.mpp().2,
+            Self::Shaded(c) => curve_max(&[(c, 1.0)], 0.0, c.voc(), f64::INFINITY).1,
+        }
+    }
 }
 
 impl SeriesSegment<'_> {
@@ -82,7 +126,7 @@ impl SeriesSegment<'_> {
         let lo = o.mppt_min_v.max(d.voltage(o.input_max_a));
         let hi = o.mppt_max_v.min(d.voc());
         if lo >= hi { return None; }
-        let input_v = d.mpp().0.clamp(lo, hi);
+        let input_v = d.mpp_voltage(lo, hi);
         let input_a = d.current(input_v).clamp(0.0, o.input_max_a);
         let power = input_a * input_v;
         let eta = curve_efficiency(&o.efficiency_curve, power / o.rated_w);
@@ -106,6 +150,19 @@ pub(crate) fn series_curve(segments: &[SeriesSegment<'_>]) -> Option<IvCurve> {
         Some(knee.min(hard_limit))
     }).collect();
     knees.extend(controls.iter().flatten().map(|(_, current, _)| current.min(hard_limit)));
+    for (segment, control) in segments.iter().zip(&controls) {
+        if let Some(ModuleIv::Shaded(curve)) = segment.module {
+            if let Some((voltage, knee, _)) = control {
+                let input_current = curve.current(*voltage);
+                if input_current > 0.0 {
+                    knees.extend(curve.knots.iter().map(|&(_, i)| i * knee / input_current)
+                        .filter(|&i| i < *knee && i < hard_limit));
+                }
+            } else if segment.optimizer.is_none() {
+                knees.extend(curve.knots.iter().map(|&(_, i)| i.min(hard_limit)));
+            }
+        }
+    }
     let mut curve = IvCurve::series(&knees, |i| {
         if i > hard_limit { return -1.0; }
         segments.iter().zip(&controls).map(|(segment, input)| {
@@ -129,7 +186,7 @@ pub(crate) fn series_curve(segments: &[SeriesSegment<'_>]) -> Option<IvCurve> {
         // exceed their true output. Retain the physical power bound.
         curve.power_ceiling_w = Some(segments.iter().zip(controls).map(|(segment, input)| {
             let power = if segment.optimizer.is_some() { input.map_or(0.0, |(_, _, p)| p) }
-                else { segment.module.map_or(0.0, |module| module.mpp().2) };
+                else { segment.module.map_or(0.0, ModuleIv::max_power) };
             power * segment.modules
         }).sum());
     }
@@ -156,7 +213,7 @@ impl IvCurve {
     pub(crate) fn substrings(levels: &[(DiodeParams, u32)], count_per_module: u32, forward_v: f64) -> Option<Self> {
         let count_per_module = f64::from(count_per_module);
         let knees: Vec<_> = levels.iter().map(|(p, _)| p.current(-forward_v * count_per_module)).collect();
-        Self::series(&knees, |i| levels.iter().zip(&knees).map(|((p, count), knee)| {
+        Self::series_knots(&knees, true, |i| levels.iter().zip(&knees).map(|((p, count), knee)| {
             let v = if i >= *knee { -forward_v } else { (p.voltage(i) / count_per_module).max(-forward_v) };
             v * f64::from(*count)
         }).sum())
@@ -181,7 +238,7 @@ impl IvCurve {
             (first, knot_table, knee, *count)
         }).collect();
         let knees: Vec<_> = pairs.iter().map(|p| p.2).collect();
-        Self::series(&knees, |i| pairs.iter().map(|(first, table, knee, count)| {
+        Self::series_knots(&knees, true, |i| pairs.iter().map(|(first, table, knee, count)| {
             let v = if i >= *knee {
                 clamp
             } else if let Some(knots) = table {
@@ -197,6 +254,10 @@ impl IvCurve {
     }
 
     fn series(knees: &[f64], at_current: impl Fn(f64) -> f64) -> Option<Self> {
+        Self::series_knots(knees, false, at_current)
+    }
+
+    fn series_knots(knees: &[f64], retain_bypass: bool, at_current: impl Fn(f64) -> f64) -> Option<Self> {
         let largest = knees.iter().copied().fold(0.0, f64::max);
         if largest <= 1e-9 { return None; }
         let mut currents: Vec<_> = (0..=40).map(|k| largest * f64::from(k) / 40.0).collect();
@@ -208,15 +269,16 @@ impl IvCurve {
         let mut knots: Vec<(f64, f64)> = vec![];
         for i in currents {
             let v = at_current(i);
-            if v <= 0.0 {
-                let &(previous_v, previous_i) = knots.last()?;
+            let &(previous_v, previous_i) = knots.last().unwrap_or(&(0.0, 0.0));
+            if v <= 0.0 && previous_v > 0.0 {
                 knots.push((0.0, previous_i + (i - previous_i) * previous_v / (previous_v - v)));
-                break;
+                if !retain_bypass { break; }
             }
+            if v <= previous_v && knots.last().is_some_and(|&(voltage, _)| v == voltage) { continue; }
             knots.push((v, i));
         }
         knots.reverse();
-        (knots.len() >= 2).then_some(Self { knots, power_ceiling_w: None })
+        (knots.len() >= 2 && knots.last()?.0 > 0.0).then_some(Self { knots, power_ceiling_w: None })
     }
 
     fn current(&self, v: f64) -> f64 {
@@ -358,13 +420,39 @@ mod tests {
             output_max_v: 90.0, output_max_a: 15.0, efficiency_curve: vec![[0.0, 0.95], [1.0, 0.95]],
         };
         let two_areas = [3.0, 4.0].map(|modules| SeriesSegment {
-            module: Some(&module), modules, bypass_drop: 1.5, optimizer: Some(&o),
+            module: Some(ModuleIv::Uniform(&module)), modules, bypass_drop: 1.5, optimizer: Some(&o),
         });
         let curve = series_curve(&two_areas).unwrap();
         assert!(curve.knots.iter().all(|&(_, current)| current <= o.output_max_a));
         let tracked = operate_curves(&[(curve, 1.0)], 0.0, 800.0, 100.0, f64::INFINITY);
         let bound = 7.0 * (module.mpp().2 * 0.95).min(o.rated_w);
         assert!((0.99..=1.000001).contains(&(tracked.p_operating / bound)), "{tracked:?}");
+
+        let shade = params(100.0);
+        let module = IvCurve::substrings(&[(module, 2), (shade, 1)], 3, 0.5).unwrap();
+        let shaded = ModuleIv::Shaded(&module);
+        let curve = series_curve(&[SeriesSegment {
+            module: Some(shaded), modules: 7.0, bypass_drop: 1.5, optimizer: Some(&o),
+        }]).unwrap();
+        let power = operate_curves(&[(curve, 1.0)], 0.0, 800.0, 100.0, f64::INFINITY).p_operating;
+        let bound = 7.0 * (shaded.max_power() * 0.95).min(o.rated_w);
+        assert!((0.97..=1.000001).contains(&(power / bound)), "{power} vs {bound}");
+    }
+
+    #[test]
+    fn cross_area_shading_preserves_physical_string_pairing() {
+        let bright = IvCurve::substrings(&[(params(980.0), 3)], 3, 0.5).unwrap();
+        let dim = IvCurve::substrings(&[(params(180.0), 3)], 3, 0.5).unwrap();
+        let string_curve = |left, right| {
+            series_curve(&[left, right].map(|curve| SeriesSegment {
+                module: Some(ModuleIv::Shaded(curve)), modules: 6.0, bypass_drop: 1.5, optimizer: None,
+            })).unwrap()
+        };
+        let same = [(string_curve(&bright, &bright), 1.0), (string_curve(&dim, &dim), 1.0)];
+        let crossed = [(string_curve(&bright, &dim), 2.0)];
+        let power = |curves| operate_curves(curves, 50.0, 600.0, 50.0, f64::INFINITY).p_operating;
+        assert!(power(&same) > power(&crossed) * 1.15);
+        assert!(ModuleIv::Shaded(&dim).voltage(20.0) < 0.0);
     }
 
     #[test]

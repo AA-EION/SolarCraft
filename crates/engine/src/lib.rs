@@ -224,6 +224,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         voc: Vec<f64>,
         shaded: Option<partial_shading::ShadedArray>,
         archived: Option<archived_shading::ArchiveArray>,
+        saved_shade: bool,
     }
     let mut arr_hours: std::collections::HashMap<String, ArrayHours> = Default::default();
     let mut dc_kwp = 0.0;
@@ -256,7 +257,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         let archived_iam_at_50 = archive.filter(|saved| saved.diffuse_baseline.is_some())
             .and_then(|_| module.unverified.get("iam").and_then(serde_json::Value::as_f64))
             .filter(|value| (0.01..=1.0).contains(value));
-        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None,
+        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None, saved_shade: archive.is_some(),
             archived: archive.and_then(|saved| archived_shading::ArchiveArray::new(saved, &elec, &a.id, module, module_curve)) };
         let shade = if a.tracking.is_some() || archive.is_some() {
             None
@@ -441,14 +442,25 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         trackers.sort_by_key(|g| g[0]);
         let mut vw = vec![0.0f64; n]; // Σ V·P for the power-weighted unit voltage
         for members in &trackers {
-            let groups: Vec<&solarcraft_model::plant::StringGroup> = members.iter().filter_map(|&mi| u.mppts.get(mi)).flatten().collect();
+            let inputs = || members.iter().filter_map(|&mi| u.mppts.get(mi).map(|input| (mi, input)));
+            let groups_with_keys: Vec<_> = inputs().flat_map(|(mi, input)| {
+                input.iter().enumerate().map(move |(gi, group)| ((u.id.as_str(), mi, gi), group))
+            }).collect();
+            let groups: Vec<_> = groups_with_keys.iter().map(|&(_, group)| group).collect();
             if groups.is_empty() { continue; }
             let composite = groups.iter().any(|g| g.series_chain.is_some() || g.optimizer.is_some());
             let strings: Vec<_> = if composite {
-                members.iter().filter_map(|&index| u.mppts.get(index)).flat_map(|input| {
-                    solarcraft_model::plant::physical_strings(input).into_iter().map(|positions| {
-                        positions.into_iter().map(|i| &input[i]).collect::<Vec<_>>()
-                    })
+                inputs().flat_map(|(mi, input)| {
+                    solarcraft_model::plant::physical_strings(input).into_iter().map(move |positions| {
+                        positions.into_iter().map(|gi| {
+                            let group = &input[gi];
+                            let item = p.arrays.iter().find(|a| a.id == group.array_id)
+                                .and_then(|a| p.library.module(&a.module_id.value));
+                            let bypass = item.map_or(1.5, |m| f64::from(m.bypass_diodes.unwrap_or(3).max(1))
+                                * m.bypass_diode_voltage_v.unwrap_or(0.5).clamp(0.05, 2.0));
+                            ((u.id.as_str(), mi, gi), group, bypass)
+                        }).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>()
                 }).collect()
             } else { vec![] };
             let offsets: Vec<_> = groups.iter().map(|group| {
@@ -462,14 +474,14 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let mut mr = MpptResult { index: mi as u32 + 1, ..Default::default() };
             mr.strings = groups.iter().map(|g| format!("{} × {} ({})", g.strings, g.modules_per_string, p.arrays.iter().find(|a| a.id == g.array_id).map_or(g.array_id.clone(), |a| a.name.value.clone()))).collect::<Vec<_>>().join(" + ");
             if composite {
-                mr.strings = strings.iter().map(|chain| format!("{} × [{}]", chain[0].strings, chain.iter().map(|g| {
+                mr.strings = strings.iter().map(|chain| format!("{} × [{}]", chain[0].1.strings, chain.iter().map(|&(_, g, _)| {
                     let area = p.arrays.iter().find(|a| a.id == g.array_id).map_or(&g.array_id, |a| &a.name.value);
                     let optimizer = g.optimizer.as_ref().map_or("", |o| o.model.as_str());
                     format!("{} {} {optimizer}", g.modules_per_string, area).trim().to_owned()
                 }).collect::<Vec<_>>().join(" in series with "))).collect::<Vec<_>>().join(" || ");
-                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.shaded.is_some() || a.archived.is_some())) {
+                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.shaded.is_some() || (a.saved_shade && a.archived.is_none()))) {
                     warnings.push(Note { code: "COMPOSITE_STRING_SHADE_AVERAGE".into(), subject: u.name.clone(), value: 0.0,
-                        text: "Series/optimizer wiring uses area-average irradiance for each segment.".into() });
+                        text: "Series or optimizer segments without a verified physical shade route use area-average irradiance.".into() });
                 }
             }
             if members.len() > 1 { mr.strings = format!("MPPT {} interconnected: {}", members.iter().map(|m| (m + 1).to_string()).collect::<Vec<_>>().join("+"), mr.strings); }
@@ -494,30 +506,52 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     .and_then(|ah| ah.archived.as_ref()).filter(|shaded| shaded.active(k, local_hour[k] as usize));
                 let t = if composite {
                     let mut available = 0.0;
-                    let curves: Vec<_> = strings.iter().filter_map(|chain| {
-                        let multiplicity = f64::from(chain[0].strings);
-                        let segments: Vec<_> = chain.iter().map(|g| {
-                            let module = arr_hours.get(&g.array_id).and_then(|a| a.params[k].as_ref());
-                            let item = p.arrays.iter().find(|a| a.id == g.array_id).and_then(|a| p.library.module(&a.module_id.value));
-                            let bypass = item.map_or(1.5, |m| f64::from(m.bypass_diodes.unwrap_or(3).max(1))
-                                * m.bypass_diode_voltage_v.unwrap_or(0.5).clamp(0.05, 2.0));
-                            if let Some(d) = module { available += d.mpp().2 * f64::from(g.modules_per_string) * multiplicity; }
-                            electrical::SeriesSegment { module, modules: f64::from(g.modules_per_string), bypass_drop: bypass,
-                                optimizer: g.optimizer.as_ref() }
-                        }).collect();
-                        electrical::series_curve(&segments).map(|curve| (curve, multiplicity))
-                    }).collect();
+                    let mut curves = Vec::new();
+                    let mut nonlinear = false;
+                    for chain in &strings {
+                        let active: Vec<_> = chain.iter().map(|&(_, group, _)| archived(group)).collect();
+                        let copies = chain[0].1.strings;
+                        let detailed = active.iter().any(Option::is_some);
+                        nonlinear |= detailed;
+                        let (iterations, multiplicity) = if detailed { (copies, 1.0) } else { (1, f64::from(copies)) };
+                        for copy in 0..iterations {
+                            let profiles: Vec<_> = chain.iter().zip(&active).map(|(&(key, _, _), shaded)| {
+                                shaded.map(|a| a.module_curves(k, local_hour[k] as usize, key, copy as usize))
+                            }).collect();
+                            let mut segments = Vec::new();
+                            for (&(_, group, bypass_drop), modules) in chain.iter().zip(&profiles) {
+                                let optimizer = group.optimizer.as_ref();
+                                if let Some(modules) = modules {
+                                    segments.extend(modules.iter().map(|(curve, count)| electrical::SeriesSegment {
+                                        module: curve.as_ref().map(electrical::ModuleIv::Shaded),
+                                        modules: f64::from(*count), bypass_drop, optimizer,
+                                    }));
+                                } else {
+                                    segments.push(electrical::SeriesSegment {
+                                        module: state(group).map(|state| electrical::ModuleIv::Uniform(state.params)),
+                                        modules: f64::from(group.modules_per_string), bypass_drop, optimizer,
+                                    });
+                                }
+                            }
+                            available += segments.iter().map(|s| s.module.map_or(0.0, electrical::ModuleIv::max_power) * s.modules)
+                                .sum::<f64>() * multiplicity;
+                            if let Some(curve) = electrical::series_curve(&segments) {
+                                curves.push((curve, multiplicity));
+                            }
+                        }
+                    }
+                    nonlinear_hours += usize::from(nonlinear);
                     let mut point = electrical::operate_curves(&curves, v_min, v_max, i_max, p_max);
                     point.p_independent = point.p_independent.max(available);
                     point
                 } else if groups.iter().any(|group| resolved(group).is_some() || archived(group).is_some()) {
                     nonlinear_hours += 1;
                     let mut curves = vec![];
-                    for (group, &start) in groups.iter().zip(&offsets) {
+                    for (&(key, group), &start) in groups_with_keys.iter().zip(&offsets) {
                         if let Some(shaded) = resolved(group) {
                             curves.extend(shaded.curves(k, group.modules_per_string, start, group.strings as usize));
                         } else if let Some(shaded) = archived(group) {
-                            curves.extend(shaded.curves(k, local_hour[k] as usize, group.modules_per_string, start, group.strings as usize));
+                            curves.extend(shaded.curves(k, local_hour[k] as usize, group.modules_per_string, key));
                         } else if let Some(state) = state(group) {
                             curves.push((electrical::IvCurve::uniform(&state), state.strings));
                         }

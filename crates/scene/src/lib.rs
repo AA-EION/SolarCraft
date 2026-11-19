@@ -171,6 +171,9 @@ impl Scene {
     }
     pub fn object(&self, id: &str) -> Option<&Object> { self.objects.iter().find(|o| o.id == id) }
     pub fn field(&self, id: &str) -> Option<&place::ModuleField> { self.fields.iter().find(|f| f.id == id) }
+    pub fn has_bound_modules(&self) -> bool {
+        self.fields.iter().any(|field| field.array_id.is_some() && !field.modules.is_empty())
+    }
     fn mint(&mut self, prefix: &str) -> String {
         let n = self.next_id.max(1);
         self.next_id = n + 1;

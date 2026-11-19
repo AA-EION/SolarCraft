@@ -36,12 +36,15 @@ pub fn get(path: &Path) -> Result<Value> { let (_, p) = open(path)?; Ok(summary(
 pub fn edit(path: &Path, edits: &Value, preview: bool) -> Result<Value> {
     let edits: Vec<Edit> = serde_json::from_value(edits.clone()).map_err(|x| e("INVALID_ARGUMENT", format!("edits: {x}")))?;
     let (mut st, mut p) = open(path)?;
-    let (s, touched) = apply(&scene_of(&p), &edits).map_err(|x| e("SCENE_EDIT", x))?;
+    let before = scene_of(&p);
+    let (s, touched) = apply(&before, &edits).map_err(|x| e("SCENE_EDIT", x))?;
     let mut out = summary(&s, &touched);
     out["preview"] = Value::from(preview);
     if !preview {
+        if before.has_bound_modules() || s.has_bound_modules() {
+            p.use_archived_scene_shading = false;
+        }
         p.scene = Some(s);
-        p.use_archived_scene_shading = false;
         let ops: Vec<String> = edits.iter().map(|x| serde_json::to_value(x).ok().and_then(|v| v["op"].as_str().map(String::from)).unwrap_or_default()).collect();
         save(&mut st, &p, &format!("scene:{}", ops.join(",")))?;
     }

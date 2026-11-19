@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Editable scene import for the saved Visual3D binary meshes and drawn roof planes.
+//! Editable scene import for saved Visual3D objects and drawn roof planes.
 use super::{children, document, member, number, path_node, value};
 use crate::Result;
 use roxmltree::Node;
@@ -8,7 +8,7 @@ use solarcraft_model::{derive, Project};
 use solarcraft_scene::{
     mesh::{add, cross, dist, dot, norm, scale, sub},
     place::{FieldLayout, ModuleDims, ModuleField, Mount, PlacedModule, StringRoute},
-    Georef, Kind, MeshFace, Object, Scene, Source, P2, V3,
+    Georef, Kind, Layer, MeshFace, Object, Scene, Source, P2, V3,
 };
 use std::{collections::{BTreeMap, HashMap, HashSet}, io::Cursor};
 use zip::ZipArchive;
@@ -22,14 +22,21 @@ const MAX_TRIANGLES: usize = 30_000;
 
 pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, archive: &mut Archive, warnings: &mut Vec<String>) -> usize {
     match read_scene(project, root, archive) {
-        Ok(Some((scene, skipped_meshes, skipped_fields))) => {
+        Ok(Some((scene, skipped_objects, skipped_fields))) => {
             let fields = scene.fields.len();
             let modules = scene.fields.iter().map(|f| f.modules.len()).sum::<usize>();
             let strings = scene.fields.iter().map(|f| f.strings.len()).sum::<usize>();
-            let meshes = scene.objects.len() - fields;
-            warnings.push(format!("Restored {meshes} editable Visual3D meshes, {fields} drawn roof fields, {modules} placed modules and {strings} saved string routes. Scene material textures and parametric Visual3D objects require separate migration."));
-            if skipped_meshes > 0 || skipped_fields > 0 {
-                warnings.push(format!("Omitted {skipped_meshes} unsupported Visual3D meshes and {skipped_fields} drawn fields without a verified placement and wiring join."));
+            let meshes = scene.objects.iter().filter(|o| o.id.starts_with("visual3d-mesh-")).count();
+            let trees = scene.objects.iter().filter(|o| matches!(o.kind, Kind::Tree { .. })).count();
+            warnings.push(format!("Restored {meshes} Visual3D meshes, {trees} editable trees, {fields} drawn roof fields, {modules} placed modules and {strings} saved string routes. Unsupported building, terrain and material data require separate migration."));
+            if trees > 0 {
+                warnings.push("Imported tree crowns use an ellipsoid and mean opacity for local edits. The saved monthly opacity values are retained as object properties.".into());
+            }
+            if fields == 0 {
+                warnings.push("The imported objects have no bound module geometry. Edits to these objects leave the archived shading in use.".into());
+            }
+            if skipped_objects > 0 || skipped_fields > 0 {
+                warnings.push(format!("Omitted {skipped_objects} unsupported Visual3D objects and {skipped_fields} drawn fields without a verified placement and wiring join."));
             }
             project.scene = Some(scene);
             fields
@@ -52,16 +59,27 @@ fn read_scene(project: &Project, root: Node<'_, '_>, archive: &mut Archive) -> R
         latitude: project.site.latitude.value, longitude: project.site.longitude.value,
         elevation: project.site.elevation.value, true_north_deg: 0.0,
     });
-    let mut skipped_meshes = 0;
+    let mut skipped_objects = 0;
     let mut triangles = 0;
     for (index, node) in children(saved, "ZeichenObjekt").enumerate() {
+        if let Some(tree) = path_node(node, &["SpezifDaten", "Baum"]) {
+            if let Some(object) = read_tree(index + 1, node, tree) {
+                scene.objects.push(object);
+            } else {
+                skipped_objects += 1;
+            }
+            continue;
+        }
         let Some(mesh) = path_node(node, &["SpezifDaten", "MeshObj"]) else { continue; };
         if let Some(object) = read_object(index + 1, node, mesh, archive, MAX_TRIANGLES - triangles) {
             if let Kind::Mesh { faces, .. } = &object.kind { triangles += faces.len(); }
             scene.objects.push(object);
         } else {
-            skipped_meshes += 1;
+            skipped_objects += 1;
         }
+    }
+    if scene.objects.iter().any(|o| o.layer == "vegetation") {
+        scene.layers.push(Layer { name: "vegetation".into(), visible: true, locked: false });
     }
     let planes: Vec<_> = children(saved, "ZeichenObjekt")
         .filter(|node| path_node(*node, &["SpezifDaten", "BelegFL"]).is_some()).collect();
@@ -76,7 +94,7 @@ fn read_scene(project: &Project, root: Node<'_, '_>, archive: &mut Archive) -> R
         }
     }
     if scene.objects.is_empty() { return Ok(None); }
-    Ok(Some((scene, skipped_meshes, skipped_fields)))
+    Ok(Some((scene, skipped_objects, skipped_fields)))
 }
 
 fn normalized_guid(s: &str) -> String {
@@ -97,6 +115,44 @@ fn xy(node: Node<'_, '_>) -> Option<P2> {
 // Visual3D's X and Z run west and south, with Y up. Cross-check:
 // the Fabrik roof's saved basis and this mapping give a south-facing 8.53° plane.
 fn enu([x, y, z]: V3) -> V3 { [-x, -z, y] }
+
+fn read_tree(index: usize, node: Node<'_, '_>, tree: Node<'_, '_>) -> Option<Object> {
+    let standard = path_node(node, &["StandardDaten"])?;
+    if xyz(standard, &["Skalierung"])? != [1.0; 3] { return None; }
+    let upright = ["ZenitWinkel", "RollWinkel"].into_iter().all(|axis| {
+        number::<f64>(standard, &["Rotation", axis]).is_some_and(|v| v.abs() < 0.001)
+    });
+    let azimuth = number::<f64>(standard, &["Rotation", "AzimutWinkel"])?;
+    if !upright || (azimuth.rem_euclid(360.0) - 180.0).abs() >= 0.001 { return None; }
+    let diameter = |path: &[&str]| number::<f64>(tree, path).filter(|v| (0.001..=1000.0).contains(v));
+    let crown_height = diameter(&["Krone", "Hoehe"])?;
+    let height = diameter(&["BaumHoehe"])?;
+    if height < crown_height { return None; }
+    let centroid = number::<f64>(tree, &["Krone", "HoeheSchwPkt"]).filter(|v| (0.0..=1.0).contains(v))?;
+    let monthly: Vec<_> = ["Jan", "Feb", "Mar", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+        .into_iter().map(|month| number::<f64>(tree, &["KronenAbschGrad_Monat", month])
+            .filter(|v| (0.0..=1.0).contains(v))).collect::<Option<_>>()?;
+    let [east, north, base_z] = enu(xyz(standard, &["Position"])?);
+    let trunk_radius = diameter(&["StammDurchmesser"])? * 0.5;
+    // In the saved overview plans, this pose anchors the lower trunk
+    // corner. The center is one radius farther east and north.
+    let kind = Kind::Tree {
+        center: [east + trunk_radius, north + trunk_radius], base_z, trunk_height: height - crown_height,
+        trunk_radius,
+        crown_radius: diameter(&["Krone", "Durchmesser"])? * 0.5,
+        crown_height, transparency: 1.0 - monthly.iter().sum::<f64>() / 12.0, segments: 16,
+    };
+    let properties = BTreeMap::from([
+        ("pvsol_crown_opacity_jan_to_dec".into(), serde_json::to_string(&monthly).ok()?),
+        ("pvsol_crown_centroid_fraction".into(), centroid.to_string()),
+    ]);
+    Some(Object {
+        id: format!("visual3d-tree-{index}"), name: value(standard, &["Bezeichnung"])?.to_owned(),
+        layer: "vegetation".into(), kind, hidden: false, properties,
+        source: Some(Source { format: "pvsol_visual3d".into(), file: GEOMETRY.into(),
+            external_id: normalized_guid(value(standard, &["SignaturXML"])?), local_geometry: false }),
+    })
+}
 
 fn read_object(index: usize, node: Node<'_, '_>, mesh: Node<'_, '_>, archive: &mut Archive, budget: usize) -> Option<Object> {
     let file = value(mesh, &["DateiName"])?;

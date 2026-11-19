@@ -10,8 +10,14 @@ pub struct Route {
     pub unit_id: String,
     pub input: usize,
     pub group: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_chain: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer: Option<crate::plant::CatalogRef>,
     pub strings: Vec<Vec<usize>>,
 }
+
+pub type RouteKey<'a> = (&'a str, usize, usize);
 
 /// Saved direct shade grouped by physical string, with one diffuse loss per
 /// module. Direct rows contain a packed affected-diode and half count.
@@ -27,6 +33,9 @@ pub struct StringShade {
 pub struct RearIrradiance {
     pub weather_hash: String,
     pub w_m2: Vec<f32>,
+    /// True when the archive supplies only monthly totals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub estimated_hourly: bool,
 }
 
 impl RearIrradiance {
@@ -58,24 +67,27 @@ impl StringShade {
         (bytes.len() == expected).then_some(bytes)
     }
 
-    /// Order archived strings the same way as the engine traverses the
-    /// current trackers. Fall back to field averages when topology changed.
-    pub fn ordered_routes(&self, array_id: &str, electrical: &Electrical) -> Option<BTreeMap<u32, Vec<Vec<usize>>>> {
-        let mut by_key: BTreeMap<_, _> = self.routes.iter()
-            .map(|route| ((route.unit_id.as_str(), route.input, route.group), &route.strings)).collect();
+    /// Check each physical segment against the current wiring. The copy index
+    /// of a segment stays aligned with the other segments on the same string.
+    pub fn checked_routes(&self, array_id: &str, electrical: &Electrical) -> Option<BTreeMap<RouteKey<'_>, &[Vec<usize>]>> {
+        let by_key: BTreeMap<_, _> = self.routes.iter()
+            .map(|route| ((route.unit_id.as_str(), route.input, route.group), route)).collect();
         if by_key.len() != self.routes.len() { return None; }
-        let mut routes = BTreeMap::<_, Vec<_>>::new();
+        let mut matched = 0;
         for unit in &electrical.inverters {
             for (input_index, input) in unit.mppts.iter().enumerate() {
                 for (group_index, group) in input.iter().enumerate().filter(|(_, g)| g.array_id == array_id) {
-                    if group.series_chain.is_some() || group.optimizer.is_some() || !unit.interconnected.is_empty() { return None; }
-                    let strings = by_key.remove(&(unit.id.as_str(), input_index, group_index))?;
-                    if strings.len() != group.strings as usize
-                        || strings.iter().any(|s| s.len() != group.modules_per_string as usize) { return None; }
-                    routes.entry(group.modules_per_string).or_default().extend(strings.iter().cloned());
+                    let route = by_key.get(&(unit.id.as_str(), input_index, group_index))?;
+                    if route.series_chain != group.series_chain
+                        || route.optimizer.as_ref() != group.optimizer.as_ref().map(|o| &o.catalog_ref)
+                        || route.strings.len() != group.strings as usize
+                        || route.strings.iter().any(|s| s.len() != group.modules_per_string as usize) {
+                        return None;
+                    }
+                    matched += 1;
                 }
             }
         }
-        by_key.is_empty().then_some(routes)
+        (matched == by_key.len()).then(|| by_key.into_iter().map(|(key, route)| (key, route.strings.as_slice())).collect())
     }
 }

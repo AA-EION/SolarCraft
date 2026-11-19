@@ -187,7 +187,7 @@ fn read(source: &Path) -> Result<Imported> {
     if !island {
         warnings.push("Grid-connected storage settings require separate migration.".into());
     }
-    let mut saved = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?
+    let (mut saved, monthly_rear) = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?
         .map(|bytes| read_saved_xml(&bytes)).transpose()?.unwrap_or_default();
     let (core, diffuse, rear) = match member(&mut archive, "core.results.3600", 80 * 1024 * 1024)? {
         Some(bytes) => read_core(&bytes)?,
@@ -321,13 +321,24 @@ fn read(source: &Path) -> Result<Imported> {
     }
     let bytes = encode(&weather)?;
     let weather_hash = sha256_hex(&bytes);
-    if let ([array], Some(rear)) = (project.arrays.as_mut_slice(), rear) {
+    if let [array] = project.arrays.as_mut_slice() {
         let bifacial = project.library.module(&array.module_id.value).and_then(|m| m.bifaciality).is_some();
         if let Some(shade) = array.archived_shading.as_mut().filter(|_| bifacial) {
-            shade.rear = Some(solarcraft_model::archived_shading::RearIrradiance {
-                weather_hash: weather_hash.clone(), w_m2: rear,
-            });
-            warnings.push("The saved hourly rear irradiance is used with the module's bifacial coefficient and original weather. The native scene's rear irradiance is not recomputed.".into());
+            let estimated_hourly = rear.is_none();
+            let profile = rear.or_else(|| distribute_monthly_rear(monthly_rear?, &weather.hours));
+            if let Some(w_m2) = profile {
+                let rear = solarcraft_model::archived_shading::RearIrradiance {
+                    weather_hash: weather_hash.clone(), w_m2, estimated_hourly,
+                };
+                if rear.valid() {
+                    warnings.push(if estimated_hourly {
+                        "Saved monthly rear irradiance is distributed over the original weather's daylight irradiance. Hourly rear readings are estimated."
+                    } else {
+                        "Saved hourly rear irradiance is used with the module's bifacial coefficient and original weather."
+                    }.into());
+                    shade.rear = Some(rear);
+                }
+            }
         }
     }
     if project.arrays.iter().any(|array| project.library.module(&array.module_id.value).is_some_and(|module| module.bifaciality.is_some())
@@ -556,10 +567,12 @@ fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f6
     Ok((Weather { latitude: lat, longitude: lon, elevation, horizon_applied: false, provenance, hours }, tz, basis.into()))
 }
 
-fn read_saved_xml(bytes: &[u8]) -> Result<BTreeMap<String, Channel>> {
+type SavedXml = (BTreeMap<String, Channel>, Option<[f64; 12]>);
+
+fn read_saved_xml(bytes: &[u8]) -> Result<SavedXml> {
     let document = document(bytes, "SimResults.xml")?;
     let root = document.root_element();
-    if value(root, &["ModelString"]).is_none_or(str::is_empty) { return Ok(BTreeMap::new()); }
+    if value(root, &["ModelString"]).is_none_or(str::is_empty) { return Ok(SavedXml::default()); }
     let mut saved = BTreeMap::new();
     for (key, group, section) in [(AC, "EnergiebilanzResultsWr", "EB_WR5_PVEnergieAC"),
         (DC, "EnergiebilanzResultsVerschaltung", "EB_PV17_ErzeugtePVEnergie")] {
@@ -572,7 +585,65 @@ fn read_saved_xml(bytes: &[u8]) -> Result<BTreeMap<String, Channel>> {
             saved.insert(key.into(), Channel { annual_kwh: annual, monthly_kwh: monthly, ..Default::default() });
         }
     }
-    Ok(saved)
+    Ok((saved, read_monthly_rear(root)))
+}
+
+fn read_monthly_rear(root: Node<'_, '_>) -> Option<[f64; 12]> {
+    let mut totals = None;
+    for field in children(root, "EnergiebilanzResultsPVFeld") {
+        let node = path_node(field, &["EB_Meteo4a_BacksideIrradiance"])?;
+        let monthly: Vec<_> = children(node, "MonthlyValues").map(|month| {
+            number::<f64>(month, &["value"]).filter(|v| v.is_finite() && *v >= 0.0)
+                .map(|ws| ws / WS_PER_KWH)
+        }).collect::<Option<_>>()?;
+        let monthly: [f64; 12] = monthly.try_into().ok()?;
+        let annual = number::<f64>(node, &["YearlyValue"])? / WS_PER_KWH;
+        if !annual.is_finite() || annual <= 0.0 || (monthly.iter().sum::<f64>() - annual).abs() > 0.001
+            || totals.is_some_and(|earlier| earlier != monthly) {
+            return None;
+        }
+        totals = Some(monthly);
+    }
+    totals
+}
+
+/// WBV rows start on January 1 in local standard time. Weight each month's
+/// saved rear energy by its original GHI and preserve the monthly integral.
+fn distribute_monthly_rear(monthly: [f64; 12], hours: &[Hour]) -> Option<Vec<f32>> {
+    if hours.len() != HOURS { return None; }
+    let mut weights = [0.0; 12];
+    let month = |index| solarcraft_engine::calendar::local_time(index).month as usize - 1;
+    for (index, hour) in hours.iter().enumerate() {
+        weights[month(index as u32)] += hour.ghi;
+    }
+    if monthly.iter().zip(weights).any(|(&rear, ghi)| rear > 0.0 && ghi == 0.0) {
+        return None;
+    }
+    Some(hours.iter().enumerate().map(|(index, hour)| {
+        let m = month(index as u32);
+        if weights[m] > 0.0 { (hour.ghi * monthly[m] * 1000.0 / weights[m]) as f32 } else { 0.0 }
+    }).collect())
+}
+
+#[cfg(test)]
+#[test]
+fn monthly_rear_preserves_energy_in_local_months_and_dark_hours() {
+    let monthly = std::array::from_fn(|m| m as f64 + 1.0);
+    let mut hours: Vec<_> = (0..HOURS).map(|i| Hour {
+        unix_mid: 1800 + i as i64 * 3600, unix_start: None,
+        ghi: if i % 24 == 12 { 800.0 } else { 0.0 }, dni: 0.0, dhi: 0.0,
+        temp_air: 25.0, wind: 0.0, pressure: 101325.0,
+    }).collect();
+    let values = distribute_monthly_rear(monthly, &hours).unwrap();
+    let mut totals = [0.0; 12];
+    for (i, value) in values.into_iter().enumerate() {
+        if hours[i].ghi == 0.0 { assert_eq!(value, 0.0); }
+        let month = solarcraft_engine::calendar::local_time(i as u32).month as usize - 1;
+        totals[month] += f64::from(value) / 1000.0;
+    }
+    assert!(monthly.into_iter().zip(totals).all(|(a, b)| (a - b).abs() < 1e-6));
+    for hour in &mut hours[..31 * 24] { hour.ghi = 0.0; }
+    assert!(distribute_monthly_rear(monthly, &hours).is_none());
 }
 
 type CoreSeries = (BTreeMap<String, Vec<f64>>, Option<Vec<f64>>, Option<Vec<f32>>);
