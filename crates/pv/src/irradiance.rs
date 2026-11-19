@@ -95,6 +95,50 @@ fn perez(g: &Geometry, c: &Components, a: f64, cos_z: f64) -> f64 {
 
 pub fn ground_diffuse(tilt: f64, ghi: f64, albedo: f64) -> f64 { ghi * albedo * (1.0 - cosd(tilt)) * 0.5 }
 
+/// Portion of the sky diffuse carried by the directional optical port in
+/// Hay–Davies and Reindl. The other supported models keep sky diffuse in
+/// their background port for archived Visual3D replay.
+pub fn directional_sky(model: SkyModel, g: &Geometry, c: &Components) -> f64 {
+    if !matches!(model, SkyModel::HayDavies | SkyModel::Reindl) { return 0.0; }
+    let incidence = aoi_projection(g.tilt, g.surface_azimuth, g.zenith, g.sun_azimuth).max(0.0);
+    let rb = incidence / cosd(g.zenith).max(0.01745);
+    (c.dhi * (c.dni / c.dni_extra) * rb).max(0.0)
+}
+
+/// Hay–Davies partition used by archived PV*SOL projects. The numerator is
+/// horizontal beam irradiance and the denominator is the saved clear-sky model.
+pub fn archived_hay_davies(g: &Geometry, c: &Components, day: u32, bourges: bool) -> (f64, f64) {
+    let sin_elevation = cosd(g.zenith).max(0.0);
+    let horizontal_beam = c.dni * sin_elevation;
+    let extraterrestrial = 1367.0 * (1.0 + 0.033 * (2.0 * PI * f64::from(day) / 365.0).cos());
+    let mut ai = 0.0;
+    if sin_elevation > 0.035 {
+        let clear = extraterrestrial * if bourges { 0.81 * sin_elevation.powf(1.15) } else { sin_elevation };
+        ai = horizontal_beam / clear;
+        if ai > 1.0 { ai = horizontal_beam / (horizontal_beam + c.dhi); }
+    }
+    let background = c.dhi * (1.0 - ai) * 0.5 * (1.0 + cosd(g.tilt));
+    let rb = aoi_projection(g.tilt, g.surface_azimuth, g.zenith, g.sun_azimuth).max(0.0) / sin_elevation.max(0.01745);
+    (background, c.dhi * ai * rb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_hay_davies_separates_directional_from_background() {
+        let g = Geometry { tilt: 0.0, surface_azimuth: 180.0, zenith: 45.0, sun_azimuth: 180.0 };
+        let c = Components { ghi: 600.0, dni: 600.0, dhi: 180.0, dni_extra: 1367.0 };
+        let (iso, directional) = archived_hay_davies(&g, &c, 45, true);
+        assert!(iso < c.dhi && directional > 0.0);
+        assert!((iso + directional - c.dhi).abs() < 1e-10);
+        let low = Geometry { zenith: 89.0, ..g };
+        assert_eq!(archived_hay_davies(&low, &c, 45, true), (c.dhi, 0.0));
+        assert_eq!(directional_sky(SkyModel::Perez, &g, &c), 0.0);
+    }
+}
+
 pub fn poa(model: SkyModel, g: &Geometry, c: &Components, albedo: f64) -> Poa {
     let direct = (c.dni * aoi_projection(g.tilt, g.surface_azimuth, g.zenith, g.sun_azimuth)).max(0.0);
     let sky = sky_diffuse(model, g, c);

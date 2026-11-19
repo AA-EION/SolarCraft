@@ -46,6 +46,13 @@ pub fn calcparams_desoto(s: f64, tc: f64, p: &DeSotoRef) -> DiodeParams {
 }
 
 impl DiodeParams {
+    /// Rescale current at every terminal voltage while preserving the
+    /// voltage-axis shape of the original curve.
+    pub fn scale_current(self, scale: f64) -> Self {
+        Self { i_l: self.i_l * scale, i_0: self.i_0 * scale, i_02: self.i_02 * scale,
+            r_s: self.r_s / scale, r_sh: self.r_sh / scale, ..self }
+    }
+
     fn junction(&self, voltage: f64) -> (f64, f64) {
         let x = voltage / self.n_ns_vth;
         let ex = x.exp();

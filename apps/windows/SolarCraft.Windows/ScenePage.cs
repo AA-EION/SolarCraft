@@ -30,7 +30,9 @@ public sealed partial class MainWindow
     private TextBlock? _sceneCounts, _sceneReport;
     private Windows.Foundation.Point? _pressAt;
     private (double yaw, double pitch) _pressCam;
-    private bool _dragging, _rendering, _renderPending;
+    private bool _dragging, _rendering, _renderPending, _sceneClosing;
+
+    private bool CanRenderScene => !_sceneClosing && ReferenceEquals(Nav.SelectedItem, NavScene);
 
     private object SceneCamera() => new { yaw_deg = _yaw, pitch_deg = _pitch, zoom = _zoom, width = SceneW, height = SceneH };
     private string? SceneSelected() => _hit?["owner"]?.GetValue<string>();
@@ -72,7 +74,7 @@ public sealed partial class MainWindow
 
     private async void RenderScene()
     {
-        if (_file is not { } file || _sceneImage is not { } target) return;
+        if (!CanRenderScene || _file is not { } file || _sceneImage is not { } target) return;
         if (_rendering)
         {
             _renderPending = true;
@@ -88,7 +90,7 @@ public sealed partial class MainWindow
                 var rendered = Api.Invoke("scene_image", request)!;
                 return (scene?["counts"], rendered, Convert.FromBase64String(rendered["png_base64"]!.GetValue<string>()));
             });
-            if (file != _file || target != _sceneImage) return;
+            if (!CanRenderScene || file != _file || target != _sceneImage) return;
             if (_sceneCounts is not null && counts is not null)
                 _sceneCounts.Text = $"{counts["objects"]} objects · {counts["faces"]} faces · {counts["fields"]} fields · {counts["modules"]} modules · {counts["strings"]} strings";
             using var ms = new InMemoryRandomAccessStream();
@@ -96,7 +98,7 @@ public sealed partial class MainWindow
             ms.Seek(0);
             var bmp = new BitmapImage();
             await bmp.SetSourceAsync(ms);
-            if (file != _file || target != _sceneImage) return;
+            if (!CanRenderScene || file != _file || target != _sceneImage) return;
             target.Source = bmp;
             if (_sceneLegend is not null)
             {
@@ -109,7 +111,7 @@ public sealed partial class MainWindow
                 }
             }
         }
-        catch (Exception ex) { ShowError(ex.Message); }
+        catch (Exception ex) { if (CanRenderScene) ShowError(ex.Message); }
         finally
         {
             _rendering = false;

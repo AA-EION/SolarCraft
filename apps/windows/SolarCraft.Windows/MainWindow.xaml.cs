@@ -28,6 +28,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Closed += (_, _) => _sceneClosing = true;
         try
         {
             var ui = Api.Invoke("ui_strings", new { lang = CultureInfo.CurrentUICulture.Name })!.AsObject();
@@ -434,6 +435,7 @@ public sealed partial class MainWindow : Window
         ResultsPage.Visibility = tag == "results" ? Visibility.Visible : Visibility.Collapsed;
         ElectricalPage.Visibility = tag == "electrical" ? Visibility.Visible : Visibility.Collapsed;
         ScenePage.Visibility = tag == "scene" ? Visibility.Visible : Visibility.Collapsed;
+        if (tag == "scene") RenderScene();
         StoragePage.Visibility = tag == "storage" ? Visibility.Visible : Visibility.Collapsed;
         EconomicsPage.Visibility = tag == "economics" ? Visibility.Visible : Visibility.Collapsed;
         ReportPage.Visibility = tag == "report" ? Visibility.Visible : Visibility.Collapsed;

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
 mod archived_photo;
+mod archived_routes;
+mod archived_scene;
 mod archived_shade;
 mod island;
 
@@ -65,6 +67,10 @@ struct Reference {
     tracking_arrays: usize,
     #[serde(default)]
     archived_shade_arrays: usize,
+    #[serde(default)]
+    nonlinear_shade_arrays: usize,
+    #[serde(default)]
+    archived_scene_fields: usize,
     #[serde(default)]
     photoplan_arrays: usize,
     target_kwp: f64,
@@ -149,7 +155,8 @@ fn overview(reference: &Reference) -> Value {
         "load_source":reference.load_source,"load_annual_kwh":reference.load_annual_kwh,
         "installed_modules":reference.installed_modules,"inverters":reference.inverters,"target_kwp":reference.target_kwp,
         "tracking_arrays": reference.tracking_arrays, "archived_shade_arrays": reference.archived_shade_arrays,
-        "photoplan_arrays": reference.photoplan_arrays,
+        "photoplan_arrays": reference.photoplan_arrays, "nonlinear_shade_arrays": reference.nonlinear_shade_arrays,
+        "archived_scene_fields": reference.archived_scene_fields,
         "warnings":reference.warnings,"channels":channels})
 }
 
@@ -182,9 +189,9 @@ fn read(source: &Path) -> Result<Imported> {
     }
     let mut saved = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?
         .map(|bytes| read_saved_xml(&bytes)).transpose()?.unwrap_or_default();
-    let (core, diffuse) = match member(&mut archive, "core.results.3600", 80 * 1024 * 1024)? {
+    let (core, diffuse, rear) = match member(&mut archive, "core.results.3600", 80 * 1024 * 1024)? {
         Some(bytes) => read_core(&bytes)?,
-        None => (BTreeMap::new(), None),
+        None => (BTreeMap::new(), None, None),
     };
     for (name, hours) in core {
         let channel = saved.entry(name).or_default();
@@ -251,9 +258,11 @@ fn read(source: &Path) -> Result<Imported> {
     let (installed_modules, target_kwp) = electrical(&mut project, root, &db, &sha, &mut warnings)?;
     apply_field_settings(&mut project, root, &mut warnings);
     let archived_shade_arrays = archived_shade::apply(&mut project, root, &mut archive, &mut warnings)?;
+    let archived_scene_fields = archived_scene::apply(&mut project, root, &mut archive, &mut warnings);
+    project.use_archived_scene_shading = project.scene.is_some() && archived_shade_arrays > 0;
     let photo_blobs = import_photos(&mut project, root, &mut archive, &mut warnings);
-    if system.contains("3d") || system.contains("3D") {
-        warnings.push("3D fields retain angle and wired counts. Editable scene geometry requires separate migration.".into());
+    if archived_scene_fields == 0 && (system.contains("3d") || system.contains("3D")) {
+        warnings.push("3D fields retain angle and wired counts. This archive has no supported editable field geometry.".into());
     }
     project.grid.phases = number(root, &["ACNetz", "PhasenAnzahl"]).filter(|v| matches!(*v, 1 | 3)).unwrap_or(1);
     let minimum_bus_voltage = if island { 1.0 } else { 30.0 };
@@ -312,6 +321,19 @@ fn read(source: &Path) -> Result<Imported> {
     }
     let bytes = encode(&weather)?;
     let weather_hash = sha256_hex(&bytes);
+    if let ([array], Some(rear)) = (project.arrays.as_mut_slice(), rear) {
+        let bifacial = project.library.module(&array.module_id.value).and_then(|m| m.bifaciality).is_some();
+        if let Some(shade) = array.archived_shading.as_mut().filter(|_| bifacial) {
+            shade.rear = Some(solarcraft_model::archived_shading::RearIrradiance {
+                weather_hash: weather_hash.clone(), w_m2: rear,
+            });
+            warnings.push("The saved hourly rear irradiance is used with the module's bifacial coefficient and original weather. The native scene's rear irradiance is not recomputed.".into());
+        }
+    }
+    if project.arrays.iter().any(|array| project.library.module(&array.module_id.value).is_some_and(|module| module.bifaciality.is_some())
+        && array.archived_shading.as_ref().is_none_or(|shade| shade.rear.is_none())) {
+        warnings.push("Some bifacial arrays use front irradiance because an identifiable saved rear series is unavailable.".into());
+    }
     project.weather = Some(solarcraft_model::WeatherRef { hash: weather_hash.clone(), provider: weather.provenance.provider,
         summary: format!("{weather_member} · {HOURS} hours") });
     derive::derive(&mut project);
@@ -319,6 +341,9 @@ fn read(source: &Path) -> Result<Imported> {
         weather_member, weather_diffuse, load_source, load_annual_kwh, installed_modules,
         inverters: project.electrical.inverters.len(), target_kwp,
         tracking_arrays: project.arrays.iter().filter(|a| a.tracking.is_some()).count(),
+        nonlinear_shade_arrays: project.arrays.iter()
+            .filter(|a| a.archived_shading.as_ref().is_some_and(|s| s.strings.is_some())).count(),
+        archived_scene_fields,
         archived_shade_arrays, photoplan_arrays: project.roof_photos.len(),
         initial_inputs_hash: solarcraft_engine::inputs_hash(&project, &weather_hash), warnings, channels: saved };
     Ok(Imported { project, weather: bytes, load, photo_blobs, reference })
@@ -550,7 +575,7 @@ fn read_saved_xml(bytes: &[u8]) -> Result<BTreeMap<String, Channel>> {
     Ok(saved)
 }
 
-type CoreSeries = (BTreeMap<String, Vec<f64>>, Option<Vec<f64>>);
+type CoreSeries = (BTreeMap<String, Vec<f64>>, Option<Vec<f64>>, Option<Vec<f32>>);
 
 fn read_core(bytes: &[u8]) -> Result<CoreSeries> {
     let text = std::str::from_utf8(strip_bom(bytes)).map_err(|error| e("PVSOL_REFERENCE", error))?;
@@ -559,13 +584,14 @@ fn read_core(bytes: &[u8]) -> Result<CoreSeries> {
     let units: Vec<_> = lines.next().unwrap_or_default().split('\t').collect();
     if header.first() != Some(&"time") { return Err(e("PVSOL_REFERENCE", "Expected the saved core time column.")); }
     let recognized = [(AC, "EnergieBilanz.WRAcEnergie", "Ws"), (DC, "EnergieBilanz.PVErzeugteEnergie", "Ws"),
-        ("diffuse", "MeteoBlock.IrradiationDiffuseOut", "Ws/m²")];
+        ("diffuse", "MeteoBlock.IrradiationDiffuseOut", "Ws/m²"),
+        ("rear", "EnergieBilanz.Meteo0.MeteoBacksideIrradiance", "W/m²")];
     let mut fields: Vec<_> = recognized.into_iter().filter_map(|(key, label, unit)| {
         let col = header.iter().position(|name| name.trim() == label)?;
         units.get(col).filter(|supplied| supplied.trim() == unit)?;
         Some((key, col, Vec::with_capacity(HOURS)))
     }).collect();
-    if fields.is_empty() { return Ok((BTreeMap::new(), None)); }
+    if fields.is_empty() { return Ok((BTreeMap::new(), None, None)); }
     let mut row_count = 0;
     for line in lines.filter(|line| !line.is_empty()) {
         let columns: Vec<_> = line.split('\t').collect();
@@ -579,16 +605,24 @@ fn read_core(bytes: &[u8]) -> Result<CoreSeries> {
                 entry.replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite())
                     .ok_or_else(|| e("PVSOL_REFERENCE", "Saved result column contains an invalid numeric reading."))?
             };
-            values.push(ws / if *name == "diffuse" { 3600.0 } else { WS_PER_KWH });
+            // This rear column's writer stores energy per interval despite its unit label.
+            values.push(ws / if matches!(*name, "diffuse" | "rear") { 3600.0 } else { WS_PER_KWH });
         }
     }
     if row_count != HOURS { return Err(e("PVSOL_REFERENCE", "Expected 8760 saved hourly rows.")); }
     let mut saved = BTreeMap::new();
     let mut diffuse = None;
+    let mut rear = None;
     for (name, _, values) in fields {
-        if name == "diffuse" { diffuse = Some(values); } else { saved.insert(name.into(), values); }
+        match name {
+            "diffuse" => diffuse = Some(values),
+            "rear" if values.iter().all(|v| (0.0..=1800.0).contains(v)) && values.iter().any(|&v| v > 0.0) =>
+                rear = Some(values.into_iter().map(|v| v as f32).collect()),
+            "rear" => {}
+            _ => { saved.insert(name.into(), values); }
+        }
     }
-    Ok((saved, diffuse))
+    Ok((saved, diffuse, rear))
 }
 
 fn children<'a, 'b>(node: Node<'a, 'b>, name: &'static str) -> impl Iterator<Item = Node<'a, 'b>> {
@@ -679,7 +713,6 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
             .ok_or_else(|| fail(format!("Missing or invalid azimuth for {}.", array.name.value)))?.rem_euclid(360.0));
         array.module_id = Field::user(module.id.clone());
         if !project.library.modules.iter().any(|m| m.id == module.id) {
-            if module.bifaciality.is_some() { warnings.push(format!("{} is bifacial. Only its front-side PV model is replayed.", module.model)); }
             project.library.modules.push(module);
         }
         if let Some(tracking) = path_node(node, &["PVTracking"]).filter(|n| number::<u32>(*n, &["KindOfTracking"]).is_some_and(|kind| kind != 0)) {

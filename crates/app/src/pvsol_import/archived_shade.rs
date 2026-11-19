@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Area-average replay of saved Visual3D shading at the original site and orientation.
+//! Saved Visual3D shade rates, field averages and validated string bindings.
 use super::{archive_path, children, document, member, number, path_node, value, HOURS};
 use crate::{e, Result};
 use roxmltree::Node;
-use solarcraft_model::{derive, ArchivedShading, Project};
+use solarcraft_model::{archived_shading::StringShade, derive, ArchivedShading, Project};
 use std::{collections::{HashMap, HashSet}, io::Cursor};
 use zip::ZipArchive;
 
@@ -25,9 +25,13 @@ pub(super) fn apply(
         }
     };
     let count = bindings.len();
+    let detailed = bindings.iter().filter(|(_, shade)| shade.strings.is_some()).count();
     for (i, shading) in bindings { project.arrays[i].archived_shading = Some(shading); }
     if count > 0 {
-        warnings.push(format!("Replays saved Visual3D shading for {count} module areas. For each hour, direct shade uses the average affected substring fraction and tilted diffuse shade uses the field average. Per-string I–V shading and editable scene geometry require separate migration."));
+        warnings.push(format!("Replays saved Visual3D shading across {count} module areas, including {detailed} areas with validated physical strings and per-module rates."));
+        if detailed < count {
+            warnings.push("Areas with unresolved, optimizer or cross-area series wiring use saved field-average shading.".into());
+        }
     }
     Ok(count)
 }
@@ -55,7 +59,7 @@ fn read(
     }
     let diffuse: Vec<_> = diffuse[4..].chunks_exact(4).map(|bytes| {
         let pct = i32::from_le_bytes(bytes.try_into().unwrap());
-        (pct <= 100).then_some(f64::from(pct.max(0)) / 100.0)
+        (pct <= 100).then_some(pct.max(0) as u8)
     }).collect::<Option<_>>().ok_or_else(|| error("Saved tilted diffuse percentages exceed 100."))?;
 
     let area_ids: HashMap<_, _> = path_node(root, &["PVModule"]).into_iter()
@@ -69,8 +73,11 @@ fn read(
     let wiring = required(archive, WIRING, 12 * 1024 * 1024)?;
     let wiring = document(&wiring, WIRING)?;
     let by_array = shade_slots(wiring.root_element(), &area_ids, slots, project.arrays.len())?;
+    let mut physical = super::archived_routes::bind(project, wiring.root_element(), &area_ids)
+        .unwrap_or_else(|| vec![Vec::new(); project.arrays.len()]);
     let expected = derive::modules_by_array(&project.electrical);
     let site = [project.site.latitude.value, project.site.longitude.value, project.site.utc_offset()];
+    let bourges_clear_sky = value(root, &["Meteo", "DiffuseModelType"]).map(|model| model == "Hofmann");
     let mut bound = Vec::new();
     for (index, (array, indices)) in project.arrays.iter().zip(by_array).enumerate() {
         if indices.len() != expected.get(&array.id).copied().unwrap_or(0) as usize {
@@ -94,10 +101,39 @@ fn read(
             }
             beam_loss.push((sum / indices.len() as f64) as f32);
         }
-        let diffuse_loss = indices.iter().map(|&i| diffuse[i]).sum::<f64>() / indices.len() as f64;
+        let diffuse_percent: Vec<_> = indices.iter().map(|&i| diffuse[i]).collect();
+        let diffuse_loss = diffuse_percent.iter().map(|&v| f64::from(v)).sum::<f64>() / (100.0 * indices.len() as f64);
+        let diffuse_baseline = diffuse_percent.iter().copied().min();
+        let mut routes = std::mem::take(&mut physical[index]);
+        let strings = if routes.is_empty() || !module.bypass_diodes.is_some_and(|n| (1..=12).contains(&n)) { None } else {
+            let dense: HashMap<_, _> = indices.iter().enumerate().map(|(i, &slot)| (slot, i)).collect();
+            if routes.iter_mut().flat_map(|r| r.strings.iter_mut().flatten()).all(|slot| {
+                dense.get(slot).map(|&position| *slot = position).is_some()
+            }) {
+                let mut patterns = HashMap::<Vec<u8>, u16>::new();
+                let mut hour_rows = Vec::with_capacity(HOURS);
+                let mut rates = Vec::new();
+                let diodes = module.bypass_diodes.unwrap();
+                for row in &rows {
+                    let values: Vec<_> = indices.iter().map(|&slot| {
+                        let [h, v] = row.axes(slot);
+                        let (cross, halves) = affected(h, v, diodes, vertical_strings, module.half_cell);
+                        (cross * 3 + halves) as u8
+                    }).collect();
+                    let next = patterns.len() as u16;
+                    let row = *patterns.entry(values).or_insert_with_key(|data| {
+                        rates.extend_from_slice(data);
+                        next
+                    });
+                    hour_rows.push(row);
+                }
+                Some(StringShade::pack(routes, diffuse_percent, hour_rows, &rates))
+            } else { None }
+        };
         bound.push((index, ArchivedShading {
             beam_loss, diffuse_loss, tilt_deg: array.tilt.value, azimuth_deg: array.azimuth.value, site,
             module_id: array.module_id.value.clone(), installed_modules: indices.len() as u32,
+            diffuse_baseline, strings, bourges_clear_sky, rear: None,
         }));
     }
     Ok(bound)
@@ -191,11 +227,14 @@ fn effective_rows(data: &[u8], slots: usize) -> Result<Vec<ShadeRow<'_>>> {
 fn slot_loss(horizontal: u8, vertical: u8, diodes: u32, vertical_strings: bool, half_cell: bool) -> f64 {
     if horizontal == 0 || vertical == 0 { return 0.0; }
     if diodes == 0 { return 1.0; }
+    let (groups, halves) = affected(horizontal, vertical, diodes, vertical_strings, half_cell);
+    f64::from(groups * halves) / f64::from(diodes * if half_cell { 2 } else { 1 })
+}
+
+fn affected(horizontal: u8, vertical: u8, diodes: u32, vertical_strings: bool, half_cell: bool) -> (u32, u32) {
+    if horizontal == 0 || vertical == 0 { return (0, 0); }
     let (cross, along) = if vertical_strings { (horizontal, vertical) } else { (vertical, horizontal) };
-    let affected = (u32::from(cross) * diodes).div_ceil(100);
-    let halves = if half_cell { 2 } else { 1 };
-    let affected_halves = (u32::from(along) * halves).div_ceil(100);
-    f64::from(affected * affected_halves) / f64::from(diodes * halves)
+    ((u32::from(cross) * diodes).div_ceil(100), (u32::from(along) * if half_cell { 2 } else { 1 }).div_ceil(100))
 }
 
 #[cfg(test)]

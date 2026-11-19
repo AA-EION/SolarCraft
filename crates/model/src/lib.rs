@@ -9,6 +9,7 @@
 pub mod derive;
 pub mod equipment;
 pub mod tracking;
+pub mod archived_shading;
 pub mod plant;
 pub mod validate;
 pub mod workflow;
@@ -130,6 +131,16 @@ pub struct ArchivedShading {
     pub site: [f64; 3],
     pub module_id: String,
     pub installed_modules: u32,
+    /// Common isotropic loss before module-level diffuse residuals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diffuse_baseline: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strings: Option<archived_shading::StringShade>,
+    /// Native Hay–Davies clear-sky normalization used by the saved design.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bourges_clear_sky: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rear: Option<archived_shading::RearIrradiance>,
 }
 
 impl ArchivedShading {
@@ -140,6 +151,9 @@ impl ArchivedShading {
             && (-90.0..=90.0).contains(&self.site[0]) && (-180.0..=180.0).contains(&self.site[1])
             && (-14.0..=14.0).contains(&self.site[2])
             && !self.module_id.is_empty() && self.installed_modules > 0
+            && self.diffuse_baseline.is_none_or(|v| v <= 100 && f64::from(v) / 100.0 <= self.diffuse_loss + 1e-12)
+            && self.strings.as_ref().is_none_or(|s| s.valid(self.installed_modules as usize))
+            && self.rear.as_ref().is_none_or(archived_shading::RearIrradiance::valid)
     }
 
     pub fn applies_to(&self, array: &Array, site: &Site, installed_modules: u32) -> bool {
@@ -273,6 +287,10 @@ pub struct Project {
     /// 3D scene: buildings, obstacles, terrain, module fields and strings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<solarcraft_scene::Scene>,
+    /// Initial Visual3D import retains the archived shade calculation until
+    /// a native scene edit changes the geometry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_archived_scene_shading: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roof_photos: Vec<RoofPhoto>,
 }
@@ -311,7 +329,8 @@ impl Project {
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
-            tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None, roof_photos: vec![],
+            tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None,
+            use_archived_scene_shading: false, roof_photos: vec![],
         };
         derive::derive(&mut p);
         p
@@ -368,6 +387,9 @@ impl Project {
             *target = value;
         }
         let mut updated: Project = serde_json::from_value(doc).map_err(|e| format!("invalid value for {pointer}: {e}"))?;
+        if pointer.split('/').nth(1) == Some("scene") && updated.scene != self.scene {
+            updated.use_archived_scene_shading = false;
+        }
         // Easy mode: the kWp target is authoritative, so editing it hands the
         // string layout back to derivation (previous values stay in history).
         if updated.mode == DesignMode::Easy && pointer.ends_with("/target_kwp") {

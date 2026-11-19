@@ -24,6 +24,7 @@ pub mod wiring;
 pub mod flexible;
 pub mod islands;
 mod partial_shading;
+mod archived_shading;
 mod tracking;
 
 pub const ENGINE_VERSION: &str = concat!("solarcraft-engine ", env!("CARGO_PKG_VERSION"), " (electrical 9)");
@@ -218,7 +219,12 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         .then(|| tracking::DiffuseIam::new(iam_beam));
 
     // 1. Per array: plane-of-array irradiance, shading, cell temperature and module diode parameters.
-    struct ArrayHours { params: Vec<Option<diode::DiodeParams>>, voc: Vec<f64>, shaded: Option<partial_shading::ShadedArray> }
+    struct ArrayHours {
+        params: Vec<Option<diode::DiodeParams>>,
+        voc: Vec<f64>,
+        shaded: Option<partial_shading::ShadedArray>,
+        archived: Option<archived_shading::ArchiveArray>,
+    }
     let mut arr_hours: std::collections::HashMap<String, ArrayHours> = Default::default();
     let mut dc_kwp = 0.0;
     for (ai, a) in p.arrays.iter().enumerate() {
@@ -242,8 +248,17 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let ground = if a.tilt.value > 0.0 { iam::diffuse_average(iam_beam, a.tilt.value, false) } else { 0.0 };
             (sky, ground)
         } else { (0.0, 0.0) };
-        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None };
-        let shade = if a.tracking.is_some() {
+        let archive = a.archived_shading.as_ref().filter(|saved| {
+            saved.applies_to(a, &p.site, installed_modules)
+                && (p.scene.is_none() || p.use_archived_scene_shading)
+                && a.roof.as_ref().is_none_or(|roof| roof.face.obstacles.is_empty())
+        });
+        let archived_iam_at_50 = archive.filter(|saved| saved.diffuse_baseline.is_some())
+            .and_then(|_| module.unverified.get("iam").and_then(serde_json::Value::as_f64))
+            .filter(|value| (0.01..=1.0).contains(value));
+        let mut ah = ArrayHours { params: vec![None; n], voc: vec![0.0; n], shaded: None,
+            archived: archive.and_then(|saved| archived_shading::ArchiveArray::new(saved, &elec, &a.id, module, module_curve)) };
+        let shade = if a.tracking.is_some() || archive.is_some() {
             None
         } else if let Some((scene, field)) = bound_field(p, a)? {
             let routes = partial_shading::routes(field, module, &elec, &a.id);
@@ -285,11 +300,11 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         } else {
             None
         };
-        let archived = a.archived_shading.as_ref()
-            .filter(|saved| shade.is_none() && saved.applies_to(a, &p.site, installed_modules));
-        if archived.is_some() {
+        if archive.is_some() {
+            let treatment = if ah.archived.is_some() { "Saved Visual3D rates drive per-string I–V curves with module-level shading and diffuse residuals." }
+                else { "Saved Visual3D shading uses field averages for the current wiring." };
             warnings.push(Note { code: "ARCHIVED_3D_SHADING".into(), subject: a.name.value.clone(), value: 0.0,
-                text: "Saved 3D beam and diffuse shading are applied as field averages.".into() });
+                text: treatment.into() });
         }
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
@@ -305,26 +320,61 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let geo = irr::Geometry { tilt, surface_azimuth, zenith: sp.apparent_zenith, sun_azimuth: sp.azimuth };
             let doy = solarcraft_pv::day_of_year_utc(h.unix_mid as f64) as f64;
             let comp = irr::Components { ghi, dni, dhi, dni_extra: irr::dni_extra(doy, 1366.1) };
-            let poa = irr::poa(model, &geo, &comp, p.site.albedo.value);
+            let mut poa = irr::poa(model, &geo, &comp, p.site.albedo.value);
             let aoi = irr::aoi_projection(geo.tilt, geo.surface_azimuth, geo.zenith, geo.sun_azimuth).clamp(-1.0, 1.0).acos().to_degrees();
             let (beam_f, beam_geo, diff_f) = if let Some(s) = &shade {
                 (1.0 - f64::from(s.beam_shaded[k]), 1.0 - f64::from(s.beam_area_shaded[k]), s.diffuse_factor)
-            } else if let Some(s) = archived {
+            } else if let Some(s) = archive {
                 let beam = 1.0 - f64::from(s.beam_loss[local_hour[k] as usize]);
                 (beam, beam, 1.0 - s.diffuse_loss)
             } else { (1.0, 1.0, 1.0) };
-            let dir_s = poa.direct * if ah.shaded.is_some() { beam_geo } else { beam_f };
-            let sky_s = poa.sky_diffuse * diff_f;
-            let after_geo = poa.direct * beam_geo + sky_s + poa.ground_diffuse;
-            let after_shade = dir_s + sky_s + poa.ground_diffuse;
-            let beam_iam = iam_beam(aoi);
-            let diffuse_iam = sky_s * iam_sky + poa.ground_diffuse * iam_gnd;
+            let (beam_iam, iam_sky, iam_gnd) = if let Some(at_50) = archived_iam_at_50 {
+                let b0 = (1.0 - at_50) / (50.0_f64.to_radians().cos().recip() - 1.0);
+                (iam::ashrae(aoi, b0), at_50, at_50)
+            } else { (iam_beam(aoi), iam_sky, iam_gnd) };
+            let mut directional = poa.direct;
+            let mut sky_s = poa.sky_diffuse * diff_f;
+            let mut ground = poa.ground_diffuse;
+            let mut archived_light = None;
+            let soiling = f(l.soiling_pct.value);
+            if let Some((s, baseline)) = archive.and_then(|s| s.diffuse_baseline.map(|baseline| (s, baseline))) {
+                let mut sky_directional = irr::directional_sky(model, &geo, &comp).min(poa.sky_diffuse);
+                if let (irr::SkyModel::HayDavies, Some(bourges)) = (model, s.bourges_clear_sky) {
+                    let day = local_hour[k] / 24 + 1;
+                    let (background, sunward) = irr::archived_hay_davies(&geo, &comp, day, bourges);
+                    sky_directional = sunward;
+                    poa.sky_diffuse = background + sunward;
+                    poa.global = poa.direct + poa.sky_diffuse + poa.ground_diffuse;
+                }
+                directional += sky_directional;
+                let base = f64::from(baseline) * 0.01;
+                let iso_unshaded = poa.sky_diffuse - sky_directional;
+                let residual = (s.diffuse_loss - base).max(0.0);
+                let field_transmission = (1.0 - base) * (1.0 - residual);
+                sky_s = iso_unshaded * field_transmission;
+                ground *= field_transmission;
+                let rear = s.rear.as_ref().filter(|rear| rear.weather_hash == weather_hash)
+                    .and_then(|rear| module.bifaciality.map(|factor| factor * f64::from(rear.w_m2[local_hour[k] as usize])))
+                    .unwrap_or(0.0);
+                archived_light = Some(archived_shading::Light {
+                    directional: directional * beam_iam * soiling,
+                    isotropic: (iso_unshaded * iam_sky + poa.ground_diffuse * iam_gnd) * (1.0 - base) * soiling,
+                    rear, temperature: 0.0,
+                });
+            }
+            let dir_s = directional * if ah.shaded.is_some() { beam_geo } else { beam_f };
+            let after_geo = directional * beam_geo + sky_s + ground;
+            let after_shade = dir_s + sky_s + ground;
+            let diffuse_iam = sky_s * iam_sky + ground * iam_gnd;
             let after_iam = dir_s * beam_iam + diffuse_iam;
-            let e_eff = after_iam * f(l.soiling_pct.value);
-            for (s, v) in [ghi, poa.global, after_geo, after_shade, after_iam, e_eff, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
+            let e_eff = after_iam * soiling + archived_light.map_or(0.0, |light| light.rear);
+            for (s, v) in [ghi, poa.global, after_geo, after_shade, after_iam, after_iam * soiling, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
             let tc = temperature::faiman(poa.global, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             if let Some(shaded) = &mut ah.shaded {
                 shaded.hours[k] = partial_shading::Light { direct: poa.direct * beam_iam * f(l.soiling_pct.value), diffuse: diffuse_iam * f(l.soiling_pct.value), temperature: tc };
+            }
+            if let (Some(shaded), Some(light)) = (&mut ah.archived, archived_light) {
+                shaded.hours[k] = archived_shading::Light { temperature: tc, ..light };
             }
             e_tot[0] += e_eff / 1000.0 * p_stc;
             if e_eff > 0.0 {
@@ -417,7 +467,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     let optimizer = g.optimizer.as_ref().map_or("", |o| o.model.as_str());
                     format!("{} {} {optimizer}", g.modules_per_string, area).trim().to_owned()
                 }).collect::<Vec<_>>().join(" in series with "))).collect::<Vec<_>>().join(" || ");
-                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.shaded.is_some())) {
+                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.shaded.is_some() || a.archived.is_some())) {
                     warnings.push(Note { code: "COMPOSITE_STRING_SHADE_AVERAGE".into(), subject: u.name.clone(), value: 0.0,
                         text: "Series/optimizer wiring uses area-average irradiance for each segment.".into() });
                 }
@@ -440,6 +490,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 };
                 let resolved = |g: &solarcraft_model::plant::StringGroup| arr_hours.get(&g.array_id)
                     .and_then(|ah| ah.shaded.as_ref()).filter(|shaded| shaded.active(k));
+                let archived = |g: &solarcraft_model::plant::StringGroup| arr_hours.get(&g.array_id)
+                    .and_then(|ah| ah.archived.as_ref()).filter(|shaded| shaded.active(k, local_hour[k] as usize));
                 let t = if composite {
                     let mut available = 0.0;
                     let curves: Vec<_> = strings.iter().filter_map(|chain| {
@@ -458,12 +510,14 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     let mut point = electrical::operate_curves(&curves, v_min, v_max, i_max, p_max);
                     point.p_independent = point.p_independent.max(available);
                     point
-                } else if groups.iter().any(|group| resolved(group).is_some()) {
+                } else if groups.iter().any(|group| resolved(group).is_some() || archived(group).is_some()) {
                     nonlinear_hours += 1;
                     let mut curves = vec![];
                     for (group, &start) in groups.iter().zip(&offsets) {
                         if let Some(shaded) = resolved(group) {
                             curves.extend(shaded.curves(k, group.modules_per_string, start, group.strings as usize));
+                        } else if let Some(shaded) = archived(group) {
+                            curves.extend(shaded.curves(k, local_hour[k] as usize, group.modules_per_string, start, group.strings as usize));
                         } else if let Some(state) = state(group) {
                             curves.push((electrical::IvCurve::uniform(&state), state.strings));
                         }

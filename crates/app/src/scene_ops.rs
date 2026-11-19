@@ -41,6 +41,7 @@ pub fn edit(path: &Path, edits: &Value, preview: bool) -> Result<Value> {
     out["preview"] = Value::from(preview);
     if !preview {
         p.scene = Some(s);
+        p.use_archived_scene_shading = false;
         let ops: Vec<String> = edits.iter().map(|x| serde_json::to_value(x).ok().and_then(|v| v["op"].as_str().map(String::from)).unwrap_or_default()).collect();
         save(&mut st, &p, &format!("scene:{}", ops.join(",")))?;
     }
@@ -66,6 +67,8 @@ pub fn place_roof(path: &Path, face: &str) -> Result<Value> {
     }
     array.name = Field::user(face.to_owned());
     array.roof = None;
+    array.tracking = None;
+    array.archived_shading = None;
     let module = project.library.module(&array.module_id.value)
         .ok_or_else(|| e("SCENE_EDIT", "Select a PV module before placing a roof field."))?;
     let module_watts = module.pmp_stc();
@@ -120,6 +123,7 @@ pub fn place_roof(path: &Path, face: &str) -> Result<Value> {
         project.electrical.inverters.extend(solarcraft_model::derive::electrical(&automatic).inverters);
     }
     project.scene = Some(scene);
+    project.use_archived_scene_shading = false;
     save(&mut store, &project, &format!("place roof {face}"))?;
     Ok(json!({"field": field, "array": array_id, "modules": per_string * strings,
         "modules_per_string": per_string, "strings": strings, "unused_modules": count - per_string * strings,
@@ -166,6 +170,7 @@ pub fn bind(path: &Path, field: &str, array_id: &str, match_array: bool) -> Resu
     let f = s.fields[fi].clone();
     let orient = s.field_orientation(&f);
     p.scene = Some(s);
+    p.use_archived_scene_shading = false;
     if let Some((tilt, az)) = orient {
         let set = |p: &mut Project, k: &str, v: Value| p.set_by_pointer(&format!("/arrays/{ai}/{k}"), v).map_err(|x| e("INVALID_ARGUMENT", x));
         set(&mut p, "tilt", json!((tilt * 100.0).round() / 100.0))?;
@@ -286,6 +291,7 @@ pub fn import(path: &Path, source: &Path, options: &Value, preview: bool) -> Res
     out["preview"] = Value::from(preview);
     if !preview {
         p.scene = Some(s);
+        p.use_archived_scene_shading = false;
         save(&mut st, &p, &format!("scene:import {name}"))?;
     }
     Ok(out)
