@@ -101,6 +101,7 @@ ui! {
     add_string => ["Add strings", "Añadir cadenas", "Strings hinzufügen", "Adicionar strings"],
     modules_per_string_short => ["Modules/string", "Módulos/cadena", "Module/String", "Módulos/string"],
     strings_short => ["Strings", "Cadenas", "Strings", "Strings"],
+    series_chain => ["Series chain", "Tramo en serie", "Reihenschaltung", "Cadeia em série"],
     array => ["Array", "Campo", "Generator", "Arranjo"],
     equipment => ["Equipment", "Equipos", "Komponenten", "Equipamentos"],
     my_library => ["My library (offline)", "Mi biblioteca (sin conexión)", "Meine Bibliothek (offline)", "Minha biblioteca (offline)"],

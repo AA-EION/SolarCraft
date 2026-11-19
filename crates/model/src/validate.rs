@@ -97,10 +97,10 @@ fn electrical_issues(p: &Project, push: &mut Push) {
             let mp = format!("{base}/mppts/{mi}");
             let lbl = format!("{} MPPT {}", u.name, mi + 1);
             let inp = inv.input(mi);
-            let (mut isc, mut imp) = (0.0, 0.0);
+            let mut limits = vec![None; groups.len()];
             let mut lens = vec![];
             let mut mods = vec![];
-            for g in groups {
+            for (gi, g) in groups.iter().enumerate() {
                 let Some(a) = p.arrays.iter().find(|a| a.id == g.array_id) else { push("STRING_ARRAY_MISSING", Severity::Error, mp.clone(), format!("{lbl}: array '{}' does not exist.", g.array_id)); continue };
                 let Some(m) = p.library.module(&a.module_id.value) else { continue };
                 if g.modules_per_string == 0 || g.strings == 0 { push("STRING_EMPTY", Severity::Error, mp.clone(), format!("{lbl}: a string group has zero modules or strings.")); continue; }
@@ -111,18 +111,46 @@ fn electrical_issues(p: &Project, push: &mut Push) {
                 let (_, vmp_hot) = module_voltages(m, T_CELL_MAX);
                 let (_, vmp_cold) = module_voltages(m, T_CELL_MIN);
                 if m.requires_transformer_inverter && inv.transformer == Some(false) { push("MODULE_NEEDS_TRANSFORMER", Severity::Error, mp.clone(), format!("{lbl}: {} {} may only be used with a transformer inverter; {} {} is transformerless.", m.manufacturer, m.model, inv.manufacturer, inv.model)); }
-                if let Some(vmax) = m.max_system_voltage_v { if n * voc_cold > vmax { push("MODULE_SYSTEM_VOLTAGE", Severity::Error, mp.clone(), format!("{lbl}: string Voc {:.0} V at {T_CELL_MIN} °C exceeds the module's maximum system voltage {vmax:.0} V.", n * voc_cold)); } }
-                if n * voc_cold > inv.v_dc_max { push("STRING_VOC_MAX", Severity::Error, mp.clone(), format!("{lbl}: {} modules in series reach Voc {:.0} V at {T_CELL_MIN} °C, above the inverter maximum {:.0} V. Use at most {} modules per string.", g.modules_per_string, n * voc_cold, inv.v_dc_max, (inv.v_dc_max / voc_cold).floor())); }
-                if n * vmp_hot < inp.v_min { push("STRING_VMP_MIN", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MAX} °C is {:.0} V, below the MPPT minimum {:.0} V: the simulation shows the loss on hot days.", n * vmp_hot, inp.v_min)); }
-                if n * vmp_cold > inp.v_max { push("STRING_VMP_MAX", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MIN} °C is {:.0} V, above the MPPT maximum {:.0} V.", n * vmp_cold, inp.v_max)); }
-                isc += g.strings as f64 * m.i_sc;
-                imp += g.strings as f64 * m.i_mp;
-                lens.push(g.modules_per_string);
+                if let Some(o) = &g.optimizer {
+                    if !o.valid() { push("OPTIMIZER_RATING", Severity::Error, mp.clone(), format!("{lbl}: invalid {} buck optimizer ratings.", o.model)); continue; }
+                    if voc_cold > o.input_max_v {
+                        push("OPTIMIZER_INPUT_VOLTAGE", Severity::Error, mp.clone(), format!("{lbl}: cold module Voc {voc_cold:.1} V exceeds the {} input limit {:.1} V.", o.model, o.input_max_v));
+                    }
+                    if m.i_sc > o.input_max_a {
+                        push("OPTIMIZER_INPUT_CURRENT", Severity::Warning, mp.clone(), format!("{lbl}: module Isc {:.1} A exceeds the {} operating input-current limit {:.1} A. The replay applies the operating limit; check the separate short-circuit rating.", m.i_sc, o.model, o.input_max_a));
+                    }
+                }
+                let cap = |v: f64| g.optimizer.as_ref().map_or(v, |o| v.min(o.output_max_v));
+                limits[gi] = Some((n * cap(voc_cold), n * cap(vmp_hot), n * cap(vmp_cold), m.max_system_voltage_v));
                 mods.push(m.id.clone());
                 stc_w += n * g.strings as f64 * m.pmp_stc();
             }
+            for chain in crate::plant::physical_strings(groups) {
+                let first = &groups[chain[0]];
+                if chain.iter().any(|&i| groups[i].strings != first.strings) {
+                    push("STRING_SERIES_COUNT", Severity::Error, mp.clone(), format!("{lbl}: series segments must have equal parallel multiplicity."));
+                    continue;
+                }
+                let Some(series) = chain.iter().map(|&i| limits[i]).collect::<Option<Vec<_>>>() else { continue; };
+                let (voc, hot, cold) = series.iter().fold((0.0, 0.0, 0.0), |(v, h, c), n| (v + n.0, h + n.1, c + n.2));
+                let count: u32 = chain.iter().map(|&i| groups[i].modules_per_string).sum();
+                lens.push(count);
+                if let Some(vmax) = series.iter().filter_map(|item| item.3).reduce(f64::min).filter(|&vmax| voc > vmax) {
+                    push("MODULE_SYSTEM_VOLTAGE", Severity::Error, mp.clone(), format!("{lbl}: string Voc {voc:.0} V at {T_CELL_MIN} °C exceeds the module's maximum system voltage {vmax:.0} V."));
+                }
+                if voc > inv.v_dc_max {
+                    push("STRING_VOC_MAX", Severity::Error, mp.clone(), format!("{lbl}: {count} modules in series reach Voc {voc:.0} V at {T_CELL_MIN} °C, above the inverter maximum {:.0} V.", inv.v_dc_max));
+                }
+                let regular = chain.iter().all(|&i| groups[i].optimizer.is_none());
+                if regular && hot < inp.v_min { push("STRING_VMP_MIN", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MAX} °C is {hot:.0} V, below the MPPT minimum {:.0} V: the simulation shows the loss on hot days.", inp.v_min)); }
+                if regular && cold > inp.v_max { push("STRING_VMP_MAX", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MIN} °C is {cold:.0} V, above the MPPT maximum {:.0} V.", inp.v_max)); }
+            }
+            let (isc, imp, _, direct_isc) = string_currents(p, groups);
             let (isc_lim, isc_txt) = match inp.i_sc_max { Some(x) => (x, format!("the input's {x:.1} A short-circuit rating")), None => (inp.i_max * 1.25, format!("125 % of the {:.1} A input limit", inp.i_max)) };
-            if isc > isc_lim { push("MPPT_CURRENT", Severity::Error, mp.clone(), format!("{lbl}: short-circuit current {isc:.1} A exceeds {isc_txt}. Move strings to another MPPT.")); }
+            if isc > isc_lim {
+                if direct_isc <= isc_lim { push("OPTIMIZER_OUTPUT_CURRENT", Severity::Warning, mp.clone(), format!("{lbl}: optimizer output envelope {isc:.1} A exceeds {isc_txt}. Confirm device-specific short-circuit behavior separately.")); }
+                else { push("MPPT_CURRENT", Severity::Error, mp.clone(), format!("{lbl}: short-circuit current {direct_isc:.1} A exceeds {isc_txt}. Move strings to another MPPT.")); }
+            }
             else if imp > inp.i_max { push("MPPT_CURRENT_LIMITED", Severity::Warning, mp.clone(), format!("{lbl}: MPP current {imp:.1} A exceeds the {:.1} A input limit; the inverter will limit current (simulated).", inp.i_max)); }
             let stc_mppt: f64 = groups.iter().filter_map(|g| { let a = p.arrays.iter().find(|a| a.id == g.array_id)?; let m = p.library.module(&a.module_id.value)?; Some(g.strings as f64 * g.modules_per_string as f64 * m.pmp_stc()) }).sum();
             if let Some(pm) = inp.p_max_w { if stc_mppt > pm * 1.3 { push("MPPT_POWER", Severity::Warning, mp.clone(), format!("{lbl}: {:.0} W STC on an input rated {pm:.0} W; the input limits power (simulated).", stc_mppt)); } }
@@ -132,12 +160,12 @@ fn electrical_issues(p: &Project, push: &mut Push) {
             if mods.len() > 1 { push("MPPT_MIXED_MODULES", Severity::Warning, mp.clone(), format!("{lbl}: different module types on one MPP tracker.")); }
         }
         // Aggregate DC limits, connectors and MPPT interconnection rules.
-        let (mut isc_all, mut imp_all, mut n_strings) = (0.0, 0.0, 0u32);
-        for g in u.mppts.iter().flatten() {
-            if let Some(m) = p.arrays.iter().find(|a| a.id == g.array_id).and_then(|a| p.library.module(&a.module_id.value)) { isc_all += g.strings as f64 * m.i_sc; imp_all += g.strings as f64 * m.i_mp; }
-            n_strings += g.strings;
-        }
-        if let Some(x) = inv.i_sc_dc_max { if isc_all > x { push("INVERTER_ISC_TOTAL", Severity::Error, format!("{base}/mppts"), format!("{}: total short-circuit current {isc_all:.1} A exceeds the inverter's {x:.1} A.", u.name)); } }
+        let (isc_all, imp_all, n_strings, direct_isc_all) = u.mppts.iter().map(|groups| string_currents(p, groups))
+            .fold((0.0, 0.0, 0, 0.0), |(s, i, n, d), (b, c, k, a)| (s+b, i+c, n+k, d+a));
+        if let Some(x) = inv.i_sc_dc_max { if isc_all > x {
+            let severity = if direct_isc_all > x { Severity::Error } else { Severity::Warning };
+            push("INVERTER_ISC_TOTAL", severity, format!("{base}/mppts"), format!("{}: total current envelope {isc_all:.1} A exceeds the inverter's {x:.1} A short-circuit limit.", u.name));
+        } }
         if let Some(x) = inv.i_dc_max { if imp_all > x { push("INVERTER_IDC_TOTAL", Severity::Warning, format!("{base}/mppts"), format!("{}: total MPP current {imp_all:.1} A exceeds the inverter's {x:.1} A operating limit.", u.name)); } }
         if let Some(c) = inv.dc_connectors { if c > 0 && n_strings > c { push("INVERTER_CONNECTORS", Severity::Warning, format!("{base}/mppts"), format!("{}: {n_strings} strings but {c} DC input connectors; strings must be combined before the inverter.", u.name)); } }
         if let (Some(ph), 1) = (inv.phases, p.grid.phases) { if ph == 3 { push("INVERTER_PHASES", Severity::Error, format!("{base}/inverter_id"), format!("{}: a three-phase inverter cannot connect to a single-phase grid.", u.name)); } }
@@ -165,6 +193,21 @@ fn electrical_issues(p: &Project, push: &mut Push) {
             }
         }
     }
+}
+
+fn string_currents(p: &Project, groups: &[crate::plant::StringGroup]) -> (f64, f64, u32, f64) {
+    crate::plant::physical_strings(groups).into_iter().fold((0.0, 0.0, 0, 0.0), |(isc, imp, n, direct_isc), chain| {
+        let count = groups[chain[0]].strings;
+        let with_converter = chain.iter().any(|&i| groups[i].optimizer.is_some());
+        let current = |working| chain.iter().filter_map(|&i| {
+            let g = &groups[i];
+            let m = p.arrays.iter().find(|a| a.id == g.array_id).and_then(|a| p.library.module(&a.module_id.value))?;
+            Some(g.optimizer.as_ref().map_or(if working {m.i_mp} else {m.i_sc}, |o| o.output_max_a))
+        }).reduce(f64::min).unwrap_or(0.0) * f64::from(count);
+        let chain_isc = current(false);
+        let verified_isc = if with_converter { 0.0 } else { chain_isc };
+        (isc + chain_isc, imp + current(true), n.saturating_add(count), direct_isc + verified_isc)
+    })
 }
 
 fn validate_clusters(p: &Project, push: &mut Push) {

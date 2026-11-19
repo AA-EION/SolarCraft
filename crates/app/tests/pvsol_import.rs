@@ -16,16 +16,24 @@ fn archive(path: &Path) {
         zip.write_all(data).unwrap();
     };
     let xml = br#"<PVData>
-      <Versionsnummer>23</Versionsnummer><AnlagenTyp><SystemType>OnGridPVAdvanced</SystemType></AnlagenTyp>
+      <Versionsnummer>15</Versionsnummer><AnlagenTyp><SystemType>EnergySoftware.PVSOL.OnGridPVAdvanced</SystemType></AnlagenTyp>
       <Meteo><TranspositionModelType><Value>HayDavies</Value></TranspositionModelType></Meteo>
       <PVModule><Modulfelder><ModulfeldID>area</ModulfeldID><Modulname>South roof</Modulname>
         <ModulID>m</ModulID><ModulVersion><Value>2</Value></ModulVersion><Modulanzahl><Value>2</Value></Modulanzahl>
         <Modulneigung><Value>28</Value></Modulneigung><Modulausrichtung><Value>180</Value></Modulausrichtung>
+      </Modulfelder><Modulfelder><ModulfeldID>spare</ModulfeldID><Modulname>Unassigned roof</Modulname>
+        <ModulID>m</ModulID><ModulVersion>2</ModulVersion><Modulanzahl>7</Modulanzahl>
+        <Modulneigung>35</Modulneigung><Modulausrichtung>270</Modulausrichtung>
       </Modulfelder></PVModule>
       <Wechselrichter><Verschaltung><WRObj><InverterID>i</InverterID><InverterVersion>3</InverterVersion>
-        <Haeufigkeit>2</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><Straenge>
+        <Haeufigkeit>1</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><Straenge>
           <ModulfeldId>area</ModulfeldId><AnzahlInReihe>7</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings>
         </Straenge></PolyStringVerschaltung></ModulfeldTeil><MPPListe>0</MPPListe></MPPListe>
+      </WRObj></Verschaltung><Verschaltung><WRObj><InverterID>i</InverterID><InverterVersion>3</InverterVersion>
+        <Haeufigkeit>1</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><StraengeInReihe>true</StraengeInReihe>
+          <Straenge><ModulfeldId>area</ModulfeldId><AnzahlInReihe>3</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings></Straenge>
+          <Straenge><ModulfeldId>area</ModulfeldId><AnzahlInReihe>4</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings></Straenge>
+        </PolyStringVerschaltung></ModulfeldTeil><MPPListe>0</MPPListe></MPPListe>
       </WRObj></Verschaltung></Wechselrichter>
     </PVData>"#;
     add("Project.xml", xml);
@@ -82,7 +90,12 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     assert_eq!(reopened.site.longitude.value, -74.1);
     assert_eq!(reopened.site.utc_offset(), -5.0);
     assert_eq!(reopened.library.modules[0].catalog_ref.as_ref().unwrap().version, 2);
-    assert_eq!(reopened.electrical.inverters[1].mppts[0][0].modules_per_string, 7);
+    assert_eq!(reopened.arrays.len(), 2);
+    assert_eq!(reopened.arrays[1].strings.value, 0);
+    assert_eq!(reopened.electrical.inverters[0].mppts[0][0].modules_per_string, 7);
+    let series = &reopened.electrical.inverters[1].mppts[0];
+    assert_eq!(series.iter().map(|g| g.modules_per_string).collect::<Vec<_>>(), [3, 4]);
+    assert!(series[0].series_chain.is_some() && series[0].series_chain == series[1].series_chain);
     assert!(app::pvsol_import::import(&source, Some(&destination)).is_err());
     assert!(call("compare_pvsol",json!({"file":destination}))["comparison"].is_null());
     app::simulate(&destination, |_| true).unwrap();

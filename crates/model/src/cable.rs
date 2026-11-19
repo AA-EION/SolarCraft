@@ -178,6 +178,9 @@ pub fn resolve(p: &crate::Project, electrical: &crate::plant::Electrical, spec: 
             let (mut power, mut current, mut short, mut strings) = (0.0, 0.0, 0.0, 0);
             let mut highest_string_isc: f64 = 0.0;
             for group in indices.iter().flat_map(|&i| unit.mppts.get(i)).flatten() {
+                if group.series_chain.is_some() || group.optimizer.is_some() {
+                    return Err("Enter verified DC cable ratings manually for series-linked areas or module optimizers.");
+                }
                 let array = p.arrays.iter().find(|a| a.id == group.array_id).ok_or("Cable string array does not exist.")?;
                 let module = p.library.module(&array.module_id.value).ok_or("Cable module does not exist.")?;
                 let count = f64::from(group.strings);
@@ -238,8 +241,8 @@ mod tests {
         let layout = Electrical { manual: true, inverters: vec![InverterUnit {
             id: "inv".into(), name: "Inverter".into(), inverter_id: p.library.inverters[0].id.clone(), interconnected: vec![],
             mppts: vec![vec![
-                StringGroup { array_id: p.arrays[0].id.clone(), modules_per_string: 8, strings: 1 },
-                StringGroup { array_id: p.arrays[1].id.clone(), modules_per_string: 8, strings: 1 },
+                StringGroup { array_id: p.arrays[0].id.clone(), modules_per_string: 8, strings: 1, series_chain: None, optimizer: None },
+                StringGroup { array_id: p.arrays[1].id.clone(), modules_per_string: 8, strings: 1, series_chain: None, optimizer: None },
             ]],
         }] };
         let mut row: Circuit = serde_json::from_value(serde_json::json!({

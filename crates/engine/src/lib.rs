@@ -366,6 +366,14 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         for members in &trackers {
             let groups: Vec<&solarcraft_model::plant::StringGroup> = members.iter().filter_map(|&mi| u.mppts.get(mi)).flatten().collect();
             if groups.is_empty() { continue; }
+            let composite = groups.iter().any(|g| g.series_chain.is_some() || g.optimizer.is_some());
+            let strings: Vec<_> = if composite {
+                members.iter().filter_map(|&index| u.mppts.get(index)).flat_map(|input| {
+                    solarcraft_model::plant::physical_strings(input).into_iter().map(|positions| {
+                        positions.into_iter().map(|i| &input[i]).collect::<Vec<_>>()
+                    })
+                }).collect()
+            } else { vec![] };
             let offsets: Vec<_> = groups.iter().map(|group| {
                 let start = route_offsets.entry((&group.array_id, group.modules_per_string)).or_default();
                 let old = *start;
@@ -376,6 +384,17 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let circuit_links = routed.dc.get(&(u.id.clone(), mi));
             let mut mr = MpptResult { index: mi as u32 + 1, ..Default::default() };
             mr.strings = groups.iter().map(|g| format!("{} × {} ({})", g.strings, g.modules_per_string, p.arrays.iter().find(|a| a.id == g.array_id).map_or(g.array_id.clone(), |a| a.name.value.clone()))).collect::<Vec<_>>().join(" + ");
+            if composite {
+                mr.strings = strings.iter().map(|chain| format!("{} × [{}]", chain[0].strings, chain.iter().map(|g| {
+                    let area = p.arrays.iter().find(|a| a.id == g.array_id).map_or(&g.array_id, |a| &a.name.value);
+                    let optimizer = g.optimizer.as_ref().map_or("", |o| o.model.as_str());
+                    format!("{} {} {optimizer}", g.modules_per_string, area).trim().to_owned()
+                }).collect::<Vec<_>>().join(" in series with "))).collect::<Vec<_>>().join(" || ");
+                if groups.iter().any(|g| arr_hours.get(&g.array_id).is_some_and(|a| a.shaded.is_some())) {
+                    warnings.push(Note { code: "COMPOSITE_STRING_SHADE_AVERAGE".into(), subject: u.name.clone(), value: 0.0,
+                        text: "Series/optimizer wiring uses area-average irradiance for each segment.".into() });
+                }
+            }
             if members.len() > 1 { mr.strings = format!("MPPT {} interconnected: {}", members.iter().map(|m| (m + 1).to_string()).collect::<Vec<_>>().join("+"), mr.strings); }
             mr.stc_kw = groups.iter().filter_map(|g| { let a = p.arrays.iter().find(|a| a.id == g.array_id)?; let m = p.library.module(&a.module_id.value)?; Some(g.strings as f64 * g.modules_per_string as f64 * m.pmp_stc() / 1000.0) }).sum();
             ur.stc_kw += mr.stc_kw;
@@ -394,7 +413,25 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 };
                 let resolved = |g: &solarcraft_model::plant::StringGroup| arr_hours.get(&g.array_id)
                     .and_then(|ah| ah.shaded.as_ref()).filter(|shaded| shaded.active(k));
-                let t = if groups.iter().any(|group| resolved(group).is_some()) {
+                let t = if composite {
+                    let mut available = 0.0;
+                    let curves: Vec<_> = strings.iter().filter_map(|chain| {
+                        let multiplicity = f64::from(chain[0].strings);
+                        let segments: Vec<_> = chain.iter().map(|g| {
+                            let module = arr_hours.get(&g.array_id).and_then(|a| a.params[k].as_ref());
+                            let item = p.arrays.iter().find(|a| a.id == g.array_id).and_then(|a| p.library.module(&a.module_id.value));
+                            let bypass = item.map_or(1.5, |m| f64::from(m.bypass_diodes.unwrap_or(3).max(1))
+                                * m.bypass_diode_voltage_v.unwrap_or(0.5).clamp(0.05, 2.0));
+                            if let Some(d) = module { available += d.mpp().2 * f64::from(g.modules_per_string) * multiplicity; }
+                            electrical::SeriesSegment { module, modules: f64::from(g.modules_per_string), bypass_drop: bypass,
+                                optimizer: g.optimizer.as_ref() }
+                        }).collect();
+                        electrical::series_curve(&segments).map(|curve| (curve, multiplicity))
+                    }).collect();
+                    let mut point = electrical::operate_curves(&curves, v_min, v_max, i_max, p_max);
+                    point.p_independent = point.p_independent.max(available);
+                    point
+                } else if groups.iter().any(|group| resolved(group).is_some()) {
                     nonlinear_hours += 1;
                     let mut curves = vec![];
                     for (group, &start) in groups.iter().zip(&offsets) {

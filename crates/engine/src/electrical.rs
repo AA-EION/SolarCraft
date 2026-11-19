@@ -10,6 +10,7 @@
 //! maximum is the parallel-string mismatch, and the reduction from the
 //! unconstrained to the constrained maximum is the tracker-limit loss.
 use solarcraft_pv::diode::DiodeParams;
+use solarcraft_model::{equipment::curve_efficiency, plant::BuckOptimizer};
 
 /// One group of identical parallel strings at a tracker.
 pub struct StringState<'a> {
@@ -65,6 +66,74 @@ pub fn operate_limited(groups: &[StringState], v_min: f64, v_max: f64, i_max: f6
 /// An I–V curve with explicit bypass knees. Knots are in ascending voltage.
 pub(crate) struct IvCurve {
     knots: Vec<(f64, f64)>,
+    power_ceiling_w: Option<f64>,
+}
+
+pub(crate) struct SeriesSegment<'a> {
+    pub module: Option<&'a DiodeParams>,
+    pub modules: f64,
+    pub bypass_drop: f64,
+    pub optimizer: Option<&'a BuckOptimizer>,
+}
+
+impl SeriesSegment<'_> {
+    fn buck_input(&self) -> Option<(f64, f64, f64)> {
+        let (d, o) = self.module.zip(self.optimizer)?;
+        let lo = o.mppt_min_v.max(d.voltage(o.input_max_a));
+        let hi = o.mppt_max_v.min(d.voc());
+        if lo >= hi { return None; }
+        let input_v = d.mpp().0.clamp(lo, hi);
+        let input_a = d.current(input_v).clamp(0.0, o.input_max_a);
+        let power = input_a * input_v;
+        let eta = curve_efficiency(&o.efficiency_curve, power / o.rated_w);
+        Some((input_v, input_a * eta, (power * eta).min(o.rated_w)))
+    }
+}
+
+/// Series segments share current, while each buck optimizer can trade voltage
+/// for current up to its archived envelope. The resulting string curves can
+/// run in parallel on the existing tracker.
+pub(crate) fn series_curve(segments: &[SeriesSegment<'_>]) -> Option<IvCurve> {
+    let controls: Vec<_> = segments.iter().map(SeriesSegment::buck_input).collect();
+    let hard_limit = segments.iter().filter_map(|segment| segment.optimizer.map(|o| o.output_max_a))
+        .reduce(f64::min).unwrap_or(f64::INFINITY);
+    let mut knees: Vec<_> = segments.iter().zip(&controls).filter_map(|(segment, input)| {
+        let module = segment.module?;
+        let knee = match segment.optimizer {
+            Some(o) => input.map(|_| o.output_max_a),
+            None => Some(module.current(-segment.bypass_drop)),
+        }?;
+        Some(knee.min(hard_limit))
+    }).collect();
+    knees.extend(controls.iter().flatten().map(|(_, current, _)| current.min(hard_limit)));
+    let mut curve = IvCurve::series(&knees, |i| {
+        if i > hard_limit { return -1.0; }
+        segments.iter().zip(&controls).map(|(segment, input)| {
+            let bypass = -segment.bypass_drop;
+            let volts = match (segment.module, segment.optimizer, *input) {
+                (Some(d), Some(o), Some((vm, knee, power))) => {
+                    let pass = if i <= knee && knee > 0.0 { d.voltage(i * d.current(vm) / knee) } else { vm };
+                    pass.min(o.output_max_v).min(if i > 0.0 { power / i } else { f64::INFINITY })
+                }
+                (Some(d), None, _) => d.voltage(i).max(bypass),
+                _ => bypass,
+            };
+            volts * segment.modules
+        }).sum()
+    })?;
+    // The final knot can interpolate across a converter's hard current stop.
+    // Keep the entire electrical curve inside that output-current rating.
+    for (_, current) in &mut curve.knots { *current = current.min(hard_limit); }
+    if hard_limit.is_finite() {
+        // Linear interpolation between constant-power knots can slightly
+        // exceed their true output. Retain the physical power bound.
+        curve.power_ceiling_w = Some(segments.iter().zip(controls).map(|(segment, input)| {
+            let power = if segment.optimizer.is_some() { input.map_or(0.0, |(_, _, p)| p) }
+                else { segment.module.map_or(0.0, |module| module.mpp().2) };
+            power * segment.modules
+        }).sum());
+    }
+    Some(curve)
 }
 
 impl IvCurve {
@@ -78,7 +147,7 @@ impl IvCurve {
         knots.push((v * state.modules, i));
         knots.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         knots.dedup_by(|a, b| a.0 == b.0);
-        Self { knots }
+        Self { knots, power_ceiling_w: None }
     }
 
     /// A series string with one or more distinct illumination levels. Every
@@ -147,7 +216,7 @@ impl IvCurve {
             knots.push((v, i));
         }
         knots.reverse();
-        Some(Self { knots })
+        (knots.len() >= 2).then_some(Self { knots, power_ceiling_w: None })
     }
 
     fn current(&self, v: f64) -> f64 {
@@ -193,7 +262,10 @@ fn curve_max(curves: &[(&IvCurve, f64)], lo: f64, hi: f64, limit_a: f64) -> (f64
 pub(crate) fn operate_curves(curves: &[(IvCurve, f64)], v_min: f64, v_max: f64, i_max: f64, p_max: f64) -> TrackerPoint {
     let voc = curves.iter().map(|(curve, _)| curve.voc()).fold(0.0, f64::max);
     let refs: Vec<_> = curves.iter().map(|(curve, count)| (curve, *count)).collect();
-    let p_independent = refs.iter().map(|&(curve, count)| curve_max(&[(curve, count)], 0.0, curve.voc(), f64::INFINITY).1).sum::<f64>();
+    let p_independent = refs.iter().map(|&(curve, count)| {
+        let power = curve_max(&[(curve, count)], 0.0, curve.voc(), f64::INFINITY).1;
+        power.min(curve.power_ceiling_w.map_or(f64::INFINITY, |limit| limit * count))
+    }).sum::<f64>();
     let p_combined = curve_max(&refs, 0.0, voc, f64::INFINITY).1.min(p_independent);
     let (v_operating, p_operating) = curve_max(&refs, v_min.max(0.0), v_max.min(voc), i_max);
     let p_operating = p_operating.min(p_combined).min(p_max);
@@ -271,6 +343,28 @@ mod tests {
         assert!(limited.p_operating < free.p_operating * 0.9 && limited.window_limited);
         let narrow = operate(&g, 420.0, 800.0, 100.0);
         assert!(narrow.p_operating < free.p_operating && narrow.v_operating >= 420.0 - 1e-6);
+    }
+
+    #[test]
+    fn series_optimizer_cannot_exceed_its_current_or_power_rating() {
+        let module = params(1000.0);
+        let o = BuckOptimizer {
+            catalog_ref: solarcraft_model::plant::CatalogRef {
+                family: "optimizer".into(), id: "fixture".into(), version: 1,
+                source_sha256: String::new(), dataset: String::new(),
+            },
+            model: "Fixture buck converter".into(), rated_w: 230.0,
+            mppt_min_v: 16.0, mppt_max_v: 90.0, input_max_v: 90.0, input_max_a: 12.0,
+            output_max_v: 90.0, output_max_a: 15.0, efficiency_curve: vec![[0.0, 0.95], [1.0, 0.95]],
+        };
+        let two_areas = [3.0, 4.0].map(|modules| SeriesSegment {
+            module: Some(&module), modules, bypass_drop: 1.5, optimizer: Some(&o),
+        });
+        let curve = series_curve(&two_areas).unwrap();
+        assert!(curve.knots.iter().all(|&(_, current)| current <= o.output_max_a));
+        let tracked = operate_curves(&[(curve, 1.0)], 0.0, 800.0, 100.0, f64::INFINITY);
+        let bound = 7.0 * (module.mpp().2 * 0.95).min(o.rated_w);
+        assert!((0.99..=1.000001).contains(&(tracked.p_operating / bound)), "{tracked:?}");
     }
 
     #[test]

@@ -21,7 +21,14 @@ struct PvsolComparison: View {
                         ForEach(["pv_dc","inverter_ac"], id: \.self) { key in
                             if let channel = comparison[key] as? JSONDict { track(key, channel) }
                         }
-                    } else { Text(m.t("pvsol_run_to_compare")) }
+                    } else if let channels = reference["channels"] as? JSONDict, !channels.isEmpty {
+                        ForEach(["pv_dc","inverter_ac"], id: \.self) { key in
+                            if let channel = channels[key] as? JSONDict, channel["annual_kwh"] is NSNumber {
+                                Text(m.t(key == "pv_dc" ? "pvsol_dc" : "pvsol_ac") + " · " + number(channel, "annual_kwh") + " kWh")
+                            }
+                        }
+                        Text(m.t("pvsol_run_to_compare"))
+                    } else { Text(m.t("pvsol_no_saved_results")) }
                 }
             }
         }

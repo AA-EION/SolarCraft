@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
+mod island;
+
 use crate::{e, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::read::GzDecoder;
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use solarcraft_model::{derive, plant::{CatalogRef, Electrical, FeedIn, InverterUnit, LoadProfile, StringGroup},
+use solarcraft_model::{derive, plant::{BuckOptimizer, CatalogRef, Electrical, FeedIn, InverterUnit, LoadProfile, StringGroup},
     DesignMode, Field, Project, TranspositionModel};
 use solarcraft_store::{sha256_hex, InitialBlob, Store};
 use solarcraft_weather::{Hour, Provenance, Weather};
@@ -26,6 +28,23 @@ struct Channel {
     monthly_kwh: Option<Vec<f64>>,
     hourly_kwh: Option<Vec<f64>>,
     hourly_source: Option<String>,
+}
+
+impl Channel {
+    fn annual(&self) -> Option<f64> {
+        self.annual_kwh.or_else(|| self.hourly_kwh.as_ref().map(|hours| hours.iter().sum()))
+    }
+
+    fn monthly(&self) -> Option<Vec<f64>> {
+        self.monthly_kwh.clone().or_else(|| {
+            let hours = self.hourly_kwh.as_ref().filter(|hours| hours.len() == HOURS)?;
+            let mut months = vec![0.0; 12];
+            for (hour, value) in hours.iter().enumerate() {
+                months[solarcraft_engine::calendar::local_time(hour as u32).month as usize - 1] += value;
+            }
+            Some(months)
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,9 +107,9 @@ pub fn compare(path: &Path) -> Result<Value> {
     for (name, hours, months) in comparable {
         let Some(channel) = saved.channels.get(name) else { continue; };
         let annual = months.iter().sum::<f64>();
-        let reference_annual = channel.annual_kwh.or_else(|| channel.hourly_kwh.as_ref().map(|v| v.iter().sum()));
+        let reference_annual = channel.annual();
         let delta = reference_annual.map(|value| annual - value);
-        let monthly = channel.monthly_kwh.as_ref().map(|reference| months.iter().zip(reference).enumerate()
+        let monthly = channel.monthly().map(|reference| months.iter().zip(reference).enumerate()
             .map(|(month, (actual, saved))| json!({"month":month + 1,"solarcraft_kwh":actual,"pvsol_kwh":saved,"delta_kwh":actual - saved}))
             .collect::<Vec<_>>());
         let hourly = channel.hourly_kwh.as_ref().filter(|rows| rows.len() == HOURS && hours.len() == HOURS).map(|rows| {
@@ -110,7 +129,8 @@ pub fn compare(path: &Path) -> Result<Value> {
 
 fn overview(reference: &Reference) -> Value {
     let channels: Map<_, _> = reference.channels.iter().map(|(key, channel)| (key.clone(),
-        json!({"annual_kwh":channel.annual_kwh,"monthly_kwh":channel.monthly_kwh,
+        json!({"annual_kwh":channel.annual(),"monthly_kwh":channel.monthly(),
+            "monthly_source":if channel.monthly_kwh.is_some() { Some("SimResults.xml") } else { channel.hourly_source.as_deref() },
             "hourly_rows":channel.hourly_kwh.as_ref().map_or(0, Vec::len), "hourly_source":channel.hourly_source}))).collect();
     json!({"source_name":reference.source_name,"sha256":reference.sha256,"format":reference.format,
         "system_type":reference.system_type,"weather_member":reference.weather_member,"weather_diffuse":reference.weather_diffuse,
@@ -131,16 +151,21 @@ fn read(source: &Path) -> Result<Imported> {
     let doc = document(&project_xml, "Project.xml")?;
     let root = doc.root_element();
     if !root.has_tag_name("PVData") { return Err(bad("Project.xml has no PVData root.")); }
-    let format = number::<f64>(root, &["Versionsnummer"]).filter(|v| matches!(*v, 23.0 | 24.0))
-        .map(|v| v as u32).ok_or_else(|| bad("Only project formats 23 and 24 are supported."))?;
-    let system = value(root, &["AnlagenTyp", "SystemType"]).filter(|v| v.starts_with("OnGrid"))
-        .ok_or_else(|| bad("This importer supports on-grid PV designs."))?;
+    let format = number::<f64>(root, &["Versionsnummer"]).filter(|v| matches!(*v, 15.0 | 20.0 | 23.0 | 24.0))
+        .map(|v| v as u32).ok_or_else(|| bad("Only observed project formats 15, 20, 23 and 24 are supported."))?;
+    let system = value(root, &["AnlagenTyp", "SystemType"]).map(|v| v.strip_prefix("EnergySoftware.PVSOL.").unwrap_or(v))
+        .filter(|v| v.starts_with("OnGrid") || matches!(*v, "OffGridPV" | "OffGridPVWithBackUp"))
+        .ok_or_else(|| bad("This importer supports on-grid PV and the observed legacy island designs."))?;
+    let island = system.starts_with("OffGrid");
     let db = member(&mut archive, "DB.json", 16 * 1024 * 1024)?.ok_or_else(|| bad("An embedded DB.json is required."))?;
     let db: Value = serde_json::from_slice(strip_bom(&db)).map_err(|error| e("PVSOL_IMPORT", error))?;
     let mut warnings = vec![
-        "The imported copy replays the editable PV design. Storage, EV, heat pump controls, financial settings, roof geometry and shading geometry require separate migration.".into(),
+        "The imported copy replays the editable PV design. EV, heat pump controls, financial settings, roof geometry and shading geometry require separate migration.".into(),
         "SolarCraft uses one-hour intervals on a reference non-leap standard-time calendar and estimates irradiance at the midpoint. Module temperature and electrical models may differ from the archived run.".into(),
     ];
+    if !island {
+        warnings.push("Grid-connected storage settings require separate migration.".into());
+    }
     let mut saved = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?
         .map(|bytes| read_saved_xml(&bytes)).transpose()?.unwrap_or_default();
     let (core, diffuse) = match member(&mut archive, "core.results.3600", 80 * 1024 * 1024)? {
@@ -215,7 +240,8 @@ fn read(source: &Path) -> Result<Imported> {
         warnings.push("3D fields retain angle and wired counts. The saved 3D geometry and shading coefficients were not imported.".into());
     }
     project.grid.phases = number(root, &["ACNetz", "PhasenAnzahl"]).filter(|v| matches!(*v, 1 | 3)).unwrap_or(1);
-    if let Some(volts) = number::<f64>(root, &["ACNetz", "NetzSpannung"]).filter(|v| (30.0..=500.0).contains(v)) {
+    let minimum_bus_voltage = if island { 1.0 } else { 30.0 };
+    if let Some(volts) = number::<f64>(root, &["ACNetz", "NetzSpannung"]).filter(|v| (minimum_bus_voltage..=500.0).contains(v)) {
         project.grid.voltage_v = volts;
     }
     project.grid.feed_in = if system.starts_with("OnGridPVAdvanced") || system.starts_with("OnGridPremium") { FeedIn::Full } else { FeedIn::Surplus };
@@ -235,19 +261,38 @@ fn read(source: &Path) -> Result<Imported> {
             project.losses.ac_wiring_pct = Field::user(fraction * 100.0);
         }
     }
+    if island {
+        let bytes = member(&mut archive, "OffGrid.xml", 4 * 1024 * 1024)?
+            .ok_or_else(|| bad("The legacy island design has no OffGrid.xml."))?;
+        island::apply(&mut project, &bytes, &db, &sha, system == "OffGridPVWithBackUp", &mut warnings)?;
+    }
     let mut load = None;
-    let imported_profile = read_project_load(root)?;
-    let profile = imported_profile.map(|(values, minutes)| (values, minutes, "PV*SOL project base load"))
+    let profile = read_project_load(root)?.map(|(values, minutes)| (values, minutes, "PV*SOL project base load"))
         .or_else(|| hourly("PowerConsumptionHourly").filter(|rows| rows.iter().all(|v| *v >= 0.0) && rows.iter().any(|v| *v > 0.0))
             .map(|values| (values, 60, "PV*SOL saved base-load ledger")));
-    let load_source = profile.as_ref().map(|(_, _, label)| (*label).to_owned());
-    let load_annual_kwh = profile.as_ref().map(|(values, _, _)| values.iter().sum());
+    let profile = match profile {
+        None if island => island::load(root, &mut warnings)?.map(|values| (values, 60, "PV*SOL island demand reconstruction")),
+        other => other,
+    };
+    let mut load_source = profile.as_ref().map(|(_, _, label)| (*label).to_owned());
+    let mut load_annual_kwh = profile.as_ref().map(|(values, _, _)| values.iter().sum());
     if let Some((values, minutes, label)) = profile {
         let data = encode(&values)?;
         project.loads.profile = LoadProfile::Series { blob: sha256_hex(&data), name: label.into(),
             step_minutes: minutes, values: values.len(), local_year: None };
         project.loads.annual_kwh = values.iter().sum();
         load = Some(data);
+    } else if island {
+        use solarcraft_model::plant::SyntheticProfile;
+        if let Some(kwh) = number::<f64>(root, &["Verbrauch", "Gesamtverbrauch"]).filter(|x| (0.0..=1e12).contains(x)) {
+            project.loads.profile = LoadProfile::Synthetic { profile: SyntheticProfile::Flat };
+            project.loads.annual_kwh = kwh;
+            load_source = Some("PV*SOL declared annual demand with SolarCraft flat profile".into());
+            load_annual_kwh = Some(kwh);
+            warnings.push("The island demand schedule could not be reconstructed. The declared annual consumption is spread evenly across the year.".into());
+        } else {
+            warnings.push("No usable island demand was found in the archive.".into());
+        }
     }
     let bytes = encode(&weather)?;
     let weather_hash = sha256_hex(&bytes);
@@ -261,7 +306,8 @@ fn read(source: &Path) -> Result<Imported> {
     Ok(Imported { project, weather: bytes, load, reference })
 }
 
-fn equipment(db: &Value, family: &str, keys: &[&str], id: Option<&str>, version: Option<i64>, sha: &str) -> Result<Value> {
+fn equipment_record<'a>(db: &'a Value, family: &str, keys: &[&str], id: Option<&str>, version: Option<i64>, sha: &str)
+    -> Result<(&'a Value, CatalogRef)> {
     let (id, version) = id.zip(version).filter(|(id, version)| !id.is_empty() && id.len() <= 80 && *version >= 0)
         .ok_or_else(|| e("PVSOL_IMPORT", format!("Missing embedded {family} ID or revision.")))?;
     let matched = keys.iter().find_map(|key| {
@@ -271,6 +317,12 @@ fn equipment(db: &Value, family: &str, keys: &[&str], id: Option<&str>, version:
         }).map(|record| (*key, record))
     });
     let (dataset, record) = matched.ok_or_else(|| e("PVSOL_IMPORT", format!("Embedded {family} {id}@{version} is missing.")))?;
+    Ok((record, CatalogRef { family: family.to_owned(), id: id.to_owned(), version,
+        source_sha256: sha.to_owned(), dataset: dataset.to_owned() }))
+}
+
+fn equipment(db: &Value, family: &str, keys: &[&str], id: Option<&str>, version: Option<i64>, sha: &str) -> Result<Value> {
+    let (record, reference) = equipment_record(db, family, keys, id, version, sha)?;
     // Archive fields use Pascal and acronym casing. Map only the existing catalog
     // normalizer's supported fields, and keep online JSON's case-sensitive path.
     let common = "id version name description cellCount openCircuitVoltage isHalfCellModule cellType height width shortCircuitCurrent mpP_Voltage mpP_Current currentCoefficient voltageCoefficient outputpowerCoefficient specifiedOutputPower maxSysVoltage diodeCount lossVoltagePerBypassDiode increaseU0 onlyTransformerInverter bifacialityFactor depthOfPanel weight g2 umpp2 impp2 uoc2 isc2 iam standardCellConnection standardPartLoadOperation widthOfFrame isAvailable isCorrupt productType dbEntryType e0 e5 e10 e20 e30 e50 e75 e100 maxAC_Power maxInputVoltageDC nightConsumption standbyConsumption maxDC_Power dC_PowerRating nominalVoltageDC numberOfPhases withTransformer feedInFrom changeOfEtaDependentOnVoltage matchingEtaMPP20 matchingEtaMPP100 parallelOperating maxCurrentDC maxShortCircuitCurrentDC dC_InputCount voltageAC aC_PowerRating";
@@ -291,12 +343,34 @@ fn equipment(db: &Value, family: &str, keys: &[&str], id: Option<&str>, version:
     }
     let company = record.pointer("/Company/Name").map(|value| json!({"name":value}));
     let normalized = solarcraft_catalog::normalize::normalize(family, &Value::Object(canonical), None,
-        company.as_ref(), None, sha, dataset);
-    let mut out = normalized.record.ok_or_else(|| e("PVSOL_IMPORT", format!("Cannot normalize {family} {id}@{version}: {}", normalized.issues.join("; "))))?;
+        company.as_ref(), None, sha, &reference.dataset);
+    let mut out = normalized.record.ok_or_else(|| e("PVSOL_IMPORT", format!("Cannot normalize {family} {}@{}: {}",
+        reference.id, reference.version, normalized.issues.join("; "))))?;
     out["provenance"] = json!("imported");
-    out["catalog_ref"] = json!(CatalogRef { family: family.to_owned(), id: id.to_owned(), version,
-        source_sha256: sha.to_owned(), dataset: dataset.to_owned() });
+    out["catalog_ref"] = json!(reference);
     crate::plant_ops::canonical_equipment(if family == "module" { "module" } else { "inverter" }, &out)
+}
+
+fn optimizer(node: Node<'_, '_>, area_id: &str, db: &Value, sha: &str) -> Result<BuckOptimizer> {
+    if value(node, &["ModulfeldId"]) != Some(area_id) || number::<u32>(node, &["AnzahlInReihe"]) != Some(1)
+        || number::<u32>(node, &["AnzahlStrings"]) != Some(1) {
+        return Err(e("PVSOL_IMPORT", "Expected one saved optimizer per module in its assigned area."));
+    }
+    let (record, catalog_ref) = equipment_record(db, "optimizer", &["PowerOptimizers", "PowerOptimizersFrom3D"],
+        value(node, &["ProductID"]), number(node, &["ProductVersion"]), sha)?;
+    if record["PowerOptimizerMode"].as_i64() != Some(1) {
+        return Err(e("PVSOL_IMPORT", "This optimizer uses a mode without a migrated electrical model."));
+    }
+    let get = |key| record.get(key).and_then(Value::as_f64)
+        .ok_or_else(|| e("PVSOL_IMPORT", format!("Optimizer {} has no {key} rating.", catalog_ref.id)));
+    let efficiency_curve = [(0.0,"E0"),(0.05,"E5"),(0.1,"E10"),(0.2,"E20"),(0.3,"E30"),(0.5,"E50"),(0.75,"E75"),(1.0,"E100")]
+        .into_iter().filter_map(|(load,key)| record[key].as_f64().filter(|v| *v > 0.0).map(|v| [load,v])).collect();
+    let model = BuckOptimizer { model: record["Name"].as_str().unwrap_or_default().to_owned(),
+        rated_w: get("RatedDCOutputPower")?, mppt_min_v: get("U_MPP_Min")?, mppt_max_v: get("U_MPP_Max")?,
+        input_max_v: get("MaxInputVoltage")?, input_max_a: get("MaxInputCurrent")?,
+        output_max_v: get("MaxOutputVoltage")?, output_max_a: get("MaxOutputCurrent")?, efficiency_curve, catalog_ref };
+    if !model.valid() { return Err(e("PVSOL_IMPORT", "Invalid embedded buck optimizer ratings or efficiency curve.")); }
+    Ok(model)
 }
 
 fn apply_field_settings(project: &mut Project, root: Node<'_, '_>, warnings: &mut Vec<String>) {
@@ -325,15 +399,19 @@ fn read_project_load(root: Node<'_, '_>) -> Result<Option<(Vec<f64>, u32)>> {
     if number::<usize>(*profile, &["NoOfValues"]) != Some(count) || number::<u32>(*profile, &["NoOfDays"]) != Some(365) {
         return Ok(None);
     }
-    let encoded: String = value(*profile, &["Values"]).unwrap_or_default().chars().filter(|c| !c.is_whitespace()).collect();
+    let values = read_load_values(value(*profile, &["Values"]).unwrap_or_default(), minutes, count)?;
+    Ok(Some((values, minutes)))
+}
+
+fn read_load_values(encoded: &str, minutes: u32, count: usize) -> Result<Vec<f64>> {
+    let encoded: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
     let packed = STANDARD.decode(encoded).map_err(|error| e("PVSOL_IMPORT", error))?;
     let data = read_limited(GzDecoder::new(&packed[..]), (count * 8) as u64)?;
     if data.len() != count * 8 { return Err(e("PVSOL_IMPORT", "The embedded load profile length does not match its interval count.")); }
-    let values = data.chunks_exact(8).map(|b| {
+    data.chunks_exact(8).map(|b| {
         let watts = f64::from_le_bytes(b.try_into().unwrap());
         (0.0..=1e12).contains(&watts).then_some(watts * f64::from(minutes) / 60_000.0)
-    }).collect::<Option<Vec<_>>>().ok_or_else(|| e("PVSOL_IMPORT", "The embedded load profile contains an invalid power reading."))?;
-    Ok(Some((values, minutes)))
+    }).collect::<Option<Vec<_>>>().ok_or_else(|| e("PVSOL_IMPORT", "The embedded load profile contains an invalid power reading."))
 }
 
 fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f64) -> Result<(Weather, f64, String)> {
@@ -498,7 +576,8 @@ fn member(archive: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str, limit: u64) -> 
 fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, warnings: &mut Vec<String>) -> Result<(u32, f64)> {
     let fail = |message: String| e("PVSOL_IMPORT", message);
     let fields: Vec<_> = path_node(root, &["PVModule"]).into_iter().flat_map(|p| children(p, "Modulfelder")).collect();
-    let wiring: Vec<_> = path_node(root, &["Wechselrichter", "Verschaltung"]).into_iter().flat_map(|p| children(p, "WRObj")).collect();
+    let wiring: Vec<_> = children(root, "Wechselrichter").flat_map(|root| children(root, "Verschaltung"))
+        .flat_map(|group| children(group, "WRObj")).collect();
     if !(1..=100).contains(&fields.len()) || !(1..=256).contains(&wiring.len()) {
         return Err(fail("Expected 1–100 module areas and a wired inverter configuration.".into()));
     }
@@ -524,18 +603,20 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
             if module.bifaciality.is_some() { warnings.push(format!("{} is bifacial. Only its front-side PV model is replayed.", module.model)); }
             project.library.modules.push(module);
         }
-        if flag(node, &["PVTracking", "Aktiv"]) || flag(node, &["HasPhotoPlan"]) {
-            warnings.push(format!("The source uses optional layout controls on {}; only the saved orientation is imported.", array.name.value));
+        if let Some(tracking) = number::<u32>(node, &["PVTracking", "KindOfTracking"]).filter(|mode| *mode != 0) {
+            warnings.push(format!("{} uses tracking mode {tracking}. This replay uses the saved fixed orientation.", array.name.value));
+        }
+        if flag(node, &["HasPhotoPlan"]) {
+            warnings.push(format!("{} uses PhotoPlan. The saved orientation is imported, while photo calibration and roof outlines require separate migration.", array.name.value));
         }
         project.arrays.push(array);
     }
     let mut units = vec![];
     let mut totals = vec![0_u32; fields.len()];
     let mut assignments = vec![None; fields.len()];
+    let mut optimized_modules = 0_u32;
+    let mut physical_series = 0_u32;
     for node in wiring {
-        if flag(node, &["HatLeistungsOpt"]) || flag(node, &["WithPowerOptimizerProduct"]) {
-            return Err(fail("Projects with active power optimizers need an optimizer migration.".into()));
-        }
         let record = equipment(db, "pvinverter", &["PVInverters", "PVInvertersFrom3D"],
             value(node, &["InverterID"]), number(node, &["InverterVersion"]), sha)?;
         let inverter: solarcraft_model::equipment::InverterSpec = serde_json::from_value(record).map_err(|error| e("PVSOL_IMPORT", error))?;
@@ -546,33 +627,47 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
         }
         let mut mppts = vec![vec![]; inverter.mppt_count as usize];
         let mut populated = vec![false; mppts.len()];
+        let mut has_optimizer = false;
         for input in children(node, "MPPListe") {
             let slot = number::<usize>(input, &["MPPListe"]).filter(|i| *i < mppts.len() && !populated[*i])
                 .ok_or_else(|| fail("Invalid or duplicate inverter MPPT slot.".into()))?;
             populated[slot] = true;
             for field in children(input, "ModulfeldTeil") {
-                let grouped: Vec<_> = children(field, "PolyStringVerschaltung").flat_map(|poly| children(poly, "Straenge")).collect();
-                if grouped.is_empty() {
+                let sets: Vec<_> = children(field, "PolyStringVerschaltung").collect();
+                if sets.iter().all(|&set| children(set,"Straenge").next().is_none()) {
                     if number::<u32>(field, &["AnzahlStrings"]).is_some_and(|n| n > 0) {
                         return Err(fail("The inverter uses an unrecognized legacy string layout.".into()));
                     }
                     continue;
                 }
-                if children(field, "PolyStringVerschaltung").any(|poly| flag(poly, &["StraengeInReihe"])) {
-                    return Err(fail("Series-connected groups with unequal module areas require a topology migration.".into()));
-                }
-                for string in grouped {
-                    let &i = value(string, &["ModulfeldId"]).and_then(|k| ids.get(k))
-                        .ok_or_else(|| fail("A string points to an unknown PV area.".into()))?;
-                    let modules = number::<u32>(string, &["AnzahlInReihe"]).filter(|n| (1..=1000).contains(n));
-                    let strings = number::<u32>(string, &["AnzahlStrings"]).filter(|n| (1..=1000).contains(n));
-                    let (modules, strings) = modules.zip(strings).ok_or_else(|| fail("Invalid saved string dimensions.".into()))?;
-                    totals[i] = totals[i].checked_add(modules * strings * quantity).filter(|v| *v <= 100_000)
-                        .ok_or_else(|| fail("Too many wired modules in a PV area.".into()))?;
-                    assignments[i].get_or_insert_with(|| (inverter.id.clone(), modules, strings, quantity));
-                    mppts[slot].push(StringGroup { array_id: project.arrays[i].id.clone(), modules_per_string: modules, strings });
+                for set in sets {
+                    let chain = flag(set, &["StraengeInReihe"]).then_some(mppts[slot].len() as u32);
+                    let mut chain_count = None;
+                    for string in children(set, "Straenge") {
+                        let area_id = value(string, &["ModulfeldId"]).filter(|id| ids.contains_key(id))
+                            .ok_or_else(|| fail("A string points to an unknown PV area.".into()))?;
+                        let i = ids[area_id];
+                        let modules = number::<u32>(string, &["AnzahlInReihe"]).filter(|n| (1..=1000).contains(n));
+                        let strings = number::<u32>(string, &["AnzahlStrings"]).filter(|n| (1..=1000).contains(n));
+                        let (modules, strings) = modules.zip(strings).ok_or_else(|| fail("Invalid saved string dimensions.".into()))?;
+                        if chain.is_some() && *chain_count.get_or_insert(strings) != strings {
+                            return Err(fail("Series-connected segments require equal parallel string counts.".into()));
+                        }
+                        let count = modules * strings * quantity;
+                        totals[i] = totals[i].checked_add(count).filter(|v| *v <= 100_000)
+                            .ok_or_else(|| fail("Too many wired modules in a PV area.".into()))?;
+                        assignments[i].get_or_insert_with(|| (inverter.id.clone(), modules, strings, quantity));
+                        let optimizer = path_node(string, &["powerOptimizer"]).map(|node| optimizer(node, area_id, db, sha)).transpose()?;
+                        if optimizer.is_some() { has_optimizer = true; optimized_modules += count; }
+                        mppts[slot].push(StringGroup { array_id: project.arrays[i].id.clone(), modules_per_string: modules, strings,
+                            series_chain: chain, optimizer });
+                    }
+                    if let Some(strings) = chain_count { physical_series += strings * quantity; }
                 }
             }
+        }
+        if (flag(node, &["HatLeistungsOpt"]) || flag(node, &["WithPowerOptimizerProduct"])) && !has_optimizer {
+            return Err(fail("The source marks this inverter optimized but supplies no supported device assignment.".into()));
         }
         for _ in 0..quantity {
             units.push(InverterUnit { id: format!("inv-{}", units.len() + 1),
@@ -583,7 +678,14 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
     }
     let mut target_kwp = 0.0;
     for (i, array) in project.arrays.iter_mut().enumerate() {
-        let (inverter, modules, strings, quantity) = assignments[i].take().ok_or_else(|| fail(format!("{} has no wired strings.", array.name.value)))?;
+        let Some((inverter, modules, strings, quantity)) = assignments[i].take() else {
+            array.inverter_id = Field::user(units[0].inverter_id.clone());
+            array.modules_per_string = Field::user(0);
+            array.strings = Field::user(0);
+            let declared = number::<u32>(fields[i], &["Modulanzahl"]).unwrap_or(0);
+            warnings.push(format!("{} has no saved wire assignment for its {declared} planned modules. Its orientation and equipment remain editable. It contributes zero modules to the replay.", array.name.value));
+            continue;
+        };
         array.inverter_id = Field::user(inverter);
         array.modules_per_string = Field::user(modules);
         array.strings = Field::user(strings);
@@ -596,6 +698,11 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
         if number::<u32>(fields[i], &["Modulanzahl"]).is_some_and(|total| total != totals[i]) {
             warnings.push(format!("Used wired count {} rather than the design count for {}.", totals[i], array.name.value));
         }
+    }
+    if totals.iter().all(|&total| total == 0) { return Err(fail("The project contains no wired PV strings.".into())); }
+    if physical_series > 0 { warnings.push(format!("Preserved {physical_series} physical series strings spanning multiple module areas.")); }
+    if optimized_modules > 0 {
+        warnings.push(format!("Applied archived buck converter ratings and efficiency to {optimized_modules} wired modules. Vendor mismatch, subgroup and bypass logic require separate validation."));
     }
     project.electrical = Electrical { manual: true, inverters: units };
     Ok((totals.into_iter().sum(), target_kwp))

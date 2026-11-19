@@ -135,7 +135,16 @@ public sealed partial class MainWindow
             details.Children.Add(Note(warning?.GetValue<string>() ?? ""));
         if (data["comparison"] is not JsonObject comparison)
         {
-            PvsolComparisonPanel.Children.Add(Note(T("pvsol_run_to_compare")));
+            var channels = reference["channels"] as JsonObject;
+            if (channels is null || channels.Count == 0)
+                PvsolComparisonPanel.Children.Add(Note(T("pvsol_no_saved_results")));
+            else
+            {
+                foreach (var (key, channel) in channels)
+                    if (channel?["annual_kwh"] is not null)
+                        PvsolComparisonPanel.Children.Add(Note($"{T(key == "pv_dc" ? "pvsol_dc" : "pvsol_ac")} · {F(N(channel, "annual_kwh"), 2)} kWh"));
+                PvsolComparisonPanel.Children.Add(Note(T("pvsol_run_to_compare")));
+            }
             return;
         }
         if (comparison.Count == 0) PvsolComparisonPanel.Children.Add(Note(T("pvsol_no_saved_results")));
@@ -232,34 +241,44 @@ public sealed partial class MainWindow
         p.Children.Add(Note("MPPT: array-1: 7x2 + array-2: 6x1  (" + T("modules_per_string_short") + " x " + T("strings_short") + ")"));
         var inverters = Arr(_project!["library"]?["inverters"]);
         var invItems = inverters.Select(i => (S(i, "id"), $"{S(i, "manufacturer")} {S(i, "model")}")).ToList();
-        var editors = new List<(TextBox name, ComboBox inv, List<TextBox> mppts, string id)>();
+        var editors = new List<(TextBox name, ComboBox inv, List<(TextBox text, JsonArray? archived)> mppts, JsonNode unit)>();
         foreach (var entry in Arr(_stringing?["inverters"]))
         {
             var u = entry!["unit"];
             var name = new TextBox { Header = T("inverter"), Text = S(u, "name"), Width = 320, HorizontalAlignment = HorizontalAlignment.Left };
             var inv = Combo("", invItems, S(u, "inverter_id"));
-            var mpptBoxes = new List<TextBox>();
+            var mpptBoxes = new List<(TextBox, JsonArray?)>();
             var count = Math.Max(Arr(u?["mppts"]).Count, (int)N(inverters.FirstOrDefault(i => S(i, "id") == S(u, "inverter_id")), "mppt_count", 1));
             var panel = new StackPanel { Spacing = 4 };
             panel.Children.Add(Row(name, inv));
             for (int m = 0; m < count; m++)
             {
                 var groups = m < Arr(u?["mppts"]).Count ? Arr(u!["mppts"]![m]) : new JsonArray();
-                var tb = new TextBox { Header = $"MPPT {m + 1}", Width = 520, HorizontalAlignment = HorizontalAlignment.Left, Text = string.Join(" + ", groups.Select(g => $"{S(g, "array_id")}: {N(g, "modules_per_string")}x{N(g, "strings")}")) };
-                mpptBoxes.Add(tb); panel.Children.Add(tb);
+                var advanced = groups.Any(g => g?["series_chain"] is not null || g?["optimizer"] is not null);
+                var text = groups.Select(g =>
+                {
+                    var dimensions = $"{S(g, "array_id")}: {N(g, "modules_per_string")}x{N(g, "strings")}";
+                    if (g?["series_chain"] is JsonNode chain) dimensions += $" · {T("series_chain")} {chain.GetValue<int>() + 1}";
+                    if (g?["optimizer"] is JsonNode optimizer) dimensions += $" · {S(optimizer, "model")}";
+                    return dimensions;
+                });
+                var tb = new TextBox { Header = $"MPPT {m + 1}", Width = 520, HorizontalAlignment = HorizontalAlignment.Left,
+                    Text = string.Join(" + ", text), IsReadOnly = advanced, TextWrapping = TextWrapping.Wrap };
+                mpptBoxes.Add((tb, advanced ? groups : null)); panel.Children.Add(tb);
             }
             p.Children.Add(panel);
-            editors.Add((name, inv, mpptBoxes, S(u, "id")));
+            editors.Add((name, inv, mpptBoxes, u!));
         }
         p.Children.Add(Btn(T("apply"), () =>
         {
             if (!manual.IsOn) { Try(() => Api.Invoke("set_stringing", new { file = _file, manual = false })); Reload(); return; }
             var units = new JsonArray();
-            foreach (var (name, inv, mppts, id) in editors)
+            foreach (var (name, inv, mppts, unit) in editors)
             {
                 var mp = new JsonArray();
-                foreach (var tb in mppts)
+                foreach (var (tb, archived) in mppts)
                 {
+                    if (archived is not null) { mp.Add(archived.DeepClone()); continue; }
                     var groups = new JsonArray();
                     foreach (var part in tb.Text.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     {
@@ -270,7 +289,8 @@ public sealed partial class MainWindow
                     }
                     mp.Add(groups);
                 }
-                units.Add(new JsonObject { ["id"] = id, ["name"] = name.Text, ["inverter_id"] = Sel(inv), ["mppts"] = mp });
+                units.Add(new JsonObject { ["id"] = S(unit, "id"), ["name"] = name.Text, ["inverter_id"] = Sel(inv),
+                    ["mppts"] = mp, ["interconnected"] = unit["interconnected"]?.DeepClone() ?? new JsonArray() });
             }
             Try(() => Api.Invoke("set_stringing", new JsonObject { ["file"] = _file, ["manual"] = true, ["inverters"] = units }));
             Reload();

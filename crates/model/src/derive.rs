@@ -125,7 +125,8 @@ pub fn electrical(p: &Project) -> crate::plant::Electrical {
             let mut groups: Vec<Vec<StringGroup>> = vec![vec![]; mppts as usize];
             for m in 0..mppts {
                 let s_m = s_u / mppts + u32::from(m < s_u % mppts);
-                if s_m > 0 { groups[m as usize].push(StringGroup { array_id: a.id.clone(), modules_per_string: a.modules_per_string.value, strings: s_m }); }
+                if s_m > 0 { groups[m as usize].push(StringGroup { array_id: a.id.clone(), modules_per_string: a.modules_per_string.value,
+                    strings: s_m, series_chain: None, optimizer: None }); }
             }
             let id = if n_inv == 1 { format!("{}-inv", a.id) } else { format!("{}-inv{}", a.id, u + 1) };
             units.push(InverterUnit { id, name: format!("{} · {} {}", a.name.value, inv.manufacturer, inv.model), inverter_id: inv.id.clone(), mppts: groups, interconnected: vec![] });

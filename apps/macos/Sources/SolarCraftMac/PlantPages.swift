@@ -296,8 +296,23 @@ struct AllocationBar: View {
 
 // MARK: - electrical design and equipment
 
-struct GroupEdit: Identifiable { let id = UUID(); var arrayId: String; var modules: Int; var strings: Int }
-struct UnitEdit: Identifiable { let id: String; var name: String; var inverterId: String; var mppts: [[GroupEdit]] }
+struct GroupEdit: Identifiable {
+    let id = UUID()
+    var arrayId: String
+    var modules: Int
+    var strings: Int
+    var seriesChain: Int? = nil
+    var optimizer: JSONDict? = nil
+
+    var advanced: Bool { seriesChain != nil || optimizer != nil }
+}
+struct UnitEdit: Identifiable {
+    let id: String
+    var name: String
+    var inverterId: String
+    var mppts: [[GroupEdit]]
+    var interconnected: [[Int]] = []
+}
 
 struct ElectricalPage: View {
     @EnvironmentObject var m: AppModel
@@ -332,8 +347,12 @@ struct ElectricalPage: View {
                                                     Picker("", selection: $g.arrayId) { ForEach(arrays.indices, id: \.self) { i in Text((arrays[i]["name"] as? JSONDict).map { str($0, "value") } ?? str(arrays[i], "id")).tag(str(arrays[i], "id")) } }.frame(width: 140)
                                                     Stepper("\(m.t("modules_per_string_short")): \(g.modules)", value: $g.modules, in: 1...60)
                                                     Stepper("\(m.t("strings_short")): \(g.strings)", value: $g.strings, in: 1...40)
-                                                    Button { u.mppts[mi].removeAll { $0.id == g.id } } label: { Image(systemName: "minus.circle") }.buttonStyle(.borderless)
-                                                }.disabled(!manual)
+                                                    if let chain = g.seriesChain { Text("\(m.t("series_chain")) \(chain + 1)") }
+                                                    if let optimizer = g.optimizer { Text(str(optimizer, "model")) }
+                                                    if !g.advanced {
+                                                        Button { u.mppts[mi].removeAll { $0.id == g.id } } label: { Image(systemName: "minus.circle") }.buttonStyle(.borderless)
+                                                    }
+                                                }.disabled(!manual || g.advanced)
                                             }
                                         }
                                         if manual {
@@ -390,15 +409,23 @@ struct ElectricalPage: View {
         manual = (m.stringingDoc?["manual"] as? Bool) ?? false
         units = dicts(m.stringingDoc?["inverters"]).compactMap { $0["unit"] as? JSONDict }.map { u in
             UnitEdit(id: str(u, "id"), name: str(u, "name"), inverterId: str(u, "inverter_id"),
-                     mppts: (u["mppts"] as? [[JSONDict]] ?? []).map { $0.map { GroupEdit(arrayId: str($0, "array_id"), modules: int($0, "modules_per_string"), strings: int($0, "strings")) } })
+                     mppts: (u["mppts"] as? [[JSONDict]] ?? []).map { groups in groups.map {
+                         GroupEdit(arrayId: str($0, "array_id"), modules: int($0, "modules_per_string"), strings: int($0, "strings"),
+                                   seriesChain: $0["series_chain"] as? Int, optimizer: $0["optimizer"] as? JSONDict)
+                     } }, interconnected: u["interconnected"] as? [[Int]] ?? [])
         }
     }
 
     private func apply() {
         if !manual { m.setStringing(manual: false, inverters: []); load(); return }
         let inv: [JSONDict] = units.map { u -> JSONDict in
-            let mppts: [[JSONDict]] = u.mppts.map { groups in groups.map { g -> JSONDict in ["array_id": g.arrayId, "modules_per_string": g.modules, "strings": g.strings] } }
-            return ["id": u.id, "name": u.name, "inverter_id": u.inverterId, "mppts": mppts]
+            let mppts: [[JSONDict]] = u.mppts.map { groups in groups.map { g -> JSONDict in
+                var group: JSONDict = ["array_id": g.arrayId, "modules_per_string": g.modules, "strings": g.strings]
+                if let chain = g.seriesChain { group["series_chain"] = chain }
+                if let optimizer = g.optimizer { group["optimizer"] = optimizer }
+                return group
+            } }
+            return ["id": u.id, "name": u.name, "inverter_id": u.inverterId, "mppts": mppts, "interconnected": u.interconnected]
         }
         m.setStringing(manual: true, inverters: inv)
         load()

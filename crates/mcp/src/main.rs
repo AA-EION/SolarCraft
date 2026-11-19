@@ -395,7 +395,7 @@ impl SolarCraftMcp {
         match app::get_project(&f) { Ok(p) => ok(to_value(&p)), Err(e) => app_err(e) }
     }
 
-    #[tool(description = "Inspect or import a local PV*SOL v23/v24 on-grid project into a new SolarCraft copy with saved reference results.")]
+    #[tool(description = "Inspect or import a local PV*SOL project in observed formats 15, 20, 23 or 24, including supported island designs, into a new SolarCraft copy with any saved reference results.")]
     async fn import_pvsol(&self, Parameters(a): Parameters<PvsolImportArgs>) -> Result<CallToolResult, ErrorData> {
         let source = self.path(&a.source, false, true)?;
         let mut request = json!({"source": source});

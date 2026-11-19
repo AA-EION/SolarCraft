@@ -27,6 +27,52 @@ pub struct StringGroup {
     pub array_id: String,
     pub modules_per_string: u32,
     pub strings: u32,
+    /// Segments bearing the same ID within this MPPT share one series current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series_chain: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer: Option<BuckOptimizer>,
+}
+
+/// Archived module-level buck converter and its documented operating envelope.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuckOptimizer {
+    pub catalog_ref: CatalogRef,
+    pub model: String,
+    pub rated_w: f64,
+    pub mppt_min_v: f64,
+    pub mppt_max_v: f64,
+    pub input_max_v: f64,
+    pub input_max_a: f64,
+    pub output_max_v: f64,
+    pub output_max_a: f64,
+    pub efficiency_curve: Vec<[f64; 2]>,
+}
+
+impl BuckOptimizer {
+    pub fn valid(&self) -> bool {
+        !self.model.trim().is_empty() && !self.catalog_ref.id.is_empty()
+            && [self.rated_w, self.mppt_min_v, self.mppt_max_v, self.input_max_v,
+                self.input_max_a, self.output_max_v, self.output_max_a].into_iter()
+                .all(|v| (0.01..=100_000.0).contains(&v))
+            && self.mppt_min_v < self.mppt_max_v && self.mppt_max_v <= self.input_max_v
+            && !self.efficiency_curve.is_empty() && self.efficiency_curve.len() <= 32
+            && self.efficiency_curve.iter().all(|p| (0.0..=1.0).contains(&p[0]) && (0.01..=1.0).contains(&p[1]))
+            && self.efficiency_curve.windows(2).all(|p| p[1][0] > p[0][0])
+    }
+}
+
+/// Positions of each physical string pattern in a single MPPT. Ordinary
+/// groups still represent separate strings wired in parallel.
+pub fn physical_strings(groups: &[StringGroup]) -> Vec<Vec<usize>> {
+    let mut chains = std::collections::HashMap::new();
+    let mut strings: Vec<Vec<usize>> = vec![];
+    for (index, group) in groups.iter().enumerate() {
+        let string = group.series_chain.map_or(strings.len(), |id| *chains.entry(id).or_insert(strings.len()));
+        if string == strings.len() { strings.push(vec![]); }
+        strings[string].push(index);
+    }
+    strings
 }
 
 /// One physical inverter and the strings on each of its MPPT inputs.
