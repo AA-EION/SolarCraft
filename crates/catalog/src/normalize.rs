@@ -135,7 +135,9 @@ pub fn normalize(f: &str, v: &Value, linked_battery: Option<&Value>, company: Op
             }
             let cells = solarcraft_model::equipment::BatteryCells { chemistry_code: bat["batteryType"].as_u64().map(|x| x as u32), cell_voltage_v: cell_v,
                 series: (n(bat, "numberOfCellsSerie")?.max(1.0) * per_string) as u32, parallel: n(bat, "numberOfCellsParallel")?.max(1.0) as u32, strings: strings as u32,
-                internal_resistance_ohm: n(bat, "internalResistance").unwrap_or(0.0), capacity_ah_by_hours: cap, cycles_by_dod: cyc };
+                // internalResistance is per catalog battery (block); convert it to one cell.
+                internal_resistance_ohm: n(bat, "internalResistance").unwrap_or(0.0) * n(bat, "numberOfCellsParallel")?.max(1.0) / n(bat, "numberOfCellsSerie")?.max(1.0),
+                capacity_ah_by_hours: cap, cycles_by_dod: cyc };
             let kwh = cells.energy_kwh();
             if kwh <= 0.0 { issues.push("no capacity at the 10-hour rate".into()); return None; }
             let code = bat["batteryType"].as_i64();

@@ -57,7 +57,10 @@ pub(super) fn apply(project: &mut Project, bytes: &[u8], db: &Value, sha: &str, 
         chemistry_code, cell_voltage_v, series: series_cells,
         // Published Ah is per catalog block, including its internal parallels.
         parallel: 1, strings,
-        internal_resistance_ohm: rating(battery, "InternalResistance", 0.0, 100.0)?,
+        // InternalResistance is per catalog battery (block); convert it to one cell.
+        internal_resistance_ohm: rating(battery, "InternalResistance", 0.0, 100.0)?
+            * battery["NumberOfCellsParallel"].as_f64().filter(|v| *v >= 1.0).unwrap_or(1.0)
+            / battery["NumberOfCellsSerie"].as_f64().filter(|v| *v >= 1.0).unwrap_or(1.0),
         capacity_ah_by_hours: [(0.167, "CapacityAt0167"), (0.5, "CapacityAt05"), (1.0, "CapacityAt1"),
             (5.0, "CapacityAt5"), (10.0, "CapacityAt10"), (100.0, "CapacityAt100")].into_iter()
             .filter_map(|(h, key)| battery[key].as_f64().filter(|x| (0.001..=1e8).contains(x)).map(|x| [h, x]))

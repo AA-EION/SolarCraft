@@ -258,7 +258,7 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
     // Storage setup.
     let mut hybrid_unit: Option<usize> = None;
     let mut batinv: Option<&BatteryInverterSpec> = None;
-    let mut port_eta = 1.0;
+    let mut port: Option<&solarcraft_model::equipment::BatteryPort> = None;
     let (mut port_ch, mut port_dis) = (f64::INFINITY, f64::INFINITY);
     let integrated_converter = p.storage.as_ref()
         .filter(|s| matches!(s.coupling, Coupling::Integrated))
@@ -276,8 +276,8 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
             match &st.coupling {
                 Coupling::DcHybrid { unit_id } => {
                     let i = units.iter().position(|u| u.id == unit_id).ok_or("hybrid inverter unit missing")?;
-                    let port = units[i].spec.battery_port.as_ref().ok_or("inverter has no battery port")?;
-                    hybrid_unit = Some(i); port_eta = port.dc_dc_efficiency; port_ch = port.p_charge_max_w; port_dis = port.p_discharge_max_w;
+                    let bp = units[i].spec.battery_port.as_ref().ok_or("inverter has no battery port")?;
+                    hybrid_unit = Some(i); port = Some(bp); port_ch = bp.p_charge_max_w; port_dis = bp.p_discharge_max_w;
                 }
                 Coupling::AcCoupled { battery_inverter_id } => {
                     let inverter = p.library.battery_inverter(battery_inverter_id).ok_or("battery inverter missing")?;
@@ -306,6 +306,8 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
         }
     };
     let outage_set: std::collections::HashSet<u32> = p.storage.iter().flat_map(|s| s.outages.iter()).flat_map(|o| (o.start_hour..o.start_hour + o.hours).map(|h| h % 8760)).collect();
+    // DC/DC stage of a hybrid inverter's battery port: part-load curve in the detailed model.
+    let port_eta = |w: f64, model: BatteryModel| -> f64 { port.map_or(1.0, |p| if model == BatteryModel::Detailed { p.efficiency(w).max(0.5) } else { p.dc_dc_efficiency }) };
     let bi_eta = |w: f64, model: BatteryModel| -> f64 { batinv.map_or(1.0, |b| if model == BatteryModel::Detailed { b.efficiency(w).max(0.5) } else { b.efficiency(b.p_ac_max_w * 0.5) }) };
 
     let ac_modes: Vec<_> = units.iter().map(|u| routed.ac_delivery(ac, u.id, u.spec.pac_max_w)).collect();
@@ -394,7 +396,7 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
                 let dc_target = dc_for_ac(u.spec, target_inv, u.v(k)).min(pv_h);
                 let surplus_dc = pv_h - dc_target;
                 let terminal = surplus_dc.min(charge.terminal);
-                let eta = port_eta * bt.eta_at(terminal);
+                let eta = port_eta(terminal, bt.st.model) * bt.eta_at(terminal);
                 let want_cell = (terminal * eta).min(charge.cells);
                 let got = bt.acc.charge(want_cell, &bt.st.charge_priority);
                 pv_to_batt_dc = got / eta;
@@ -405,7 +407,7 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
             } else if !full_feed_in || outage {
                 let need = (dc_for_ac(u.spec, target_inv, u.v(k)) - pv_h).clamp(0.0, discharge.terminal);
                 let uses: &[EnergyUse] = if outage { &OUTAGE } else { &NORMAL };
-                let eta = port_eta * bt.eta_at(need);
+                let eta = port_eta(need, bt.st.model) * bt.eta_at(need);
                 let want_cell = (need / eta).min(discharge.cells);
                 let got = bt.acc.discharge(want_cell, uses);
                 let out = got * eta;
@@ -464,7 +466,7 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
                 GridService::PeakShaving { import_limit_kw } => {
                     let over = -balance - import_limit_kw * 1000.0;
                     if over > 0.0 && ch_in == 0.0 {
-                        let out = extra_discharge(bt, over, hybrid_unit.map(|i| &units[i]), batinv, k, ac_hybrid, port_eta, &mut discharge, &mut hy_ac, hybrid_dc_used, &mut conv_loss, &mut inv_loss, &mut ac_bus_loss, &mut ac_cable_loss);
+                        let out = extra_discharge(bt, over, hybrid_unit.map(|i| &units[i]), batinv, k, ac_hybrid, &port_eta, &mut discharge, &mut hy_ac, hybrid_dc_used, &mut conv_loss, &mut inv_loss, &mut ac_bus_loss, &mut ac_cable_loss);
                         dis_out += out.0; balance += out.1;
                     }
                 }
@@ -475,7 +477,7 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
                         let export_before = balance.max(0.0);
                         let requested = power_kw * 1000.0;
                         let requested = export_limit.map_or(requested, |limit| requested.min((limit - balance).max(0.0)));
-                        let out = extra_discharge(bt, requested, hybrid_unit.map(|i| &units[i]), batinv, k, ac_hybrid, port_eta, &mut discharge, &mut hy_ac, hybrid_dc_used, &mut conv_loss, &mut inv_loss, &mut ac_bus_loss, &mut ac_cable_loss);
+                        let out = extra_discharge(bt, requested, hybrid_unit.map(|i| &units[i]), batinv, k, ac_hybrid, &port_eta, &mut discharge, &mut hy_ac, hybrid_dc_used, &mut conv_loss, &mut inv_loss, &mut ac_bus_loss, &mut ac_cable_loss);
                         dis_out += out.0;
                         balance += out.1;
                         to_grid += balance.max(0.0) - export_before;
@@ -491,7 +493,7 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
                     let lim_ac = charge.terminal.min(
                         hybrid_unit.map_or(f64::INFINITY, |i| units[i].spec.pac_max_w),
                     );
-                    let eta = if batinv.is_some() { bi_eta(lim_ac, bt.st.model) } else { port_eta * hybrid_unit.map_or(1.0, |i| units[i].spec.efficiency(lim_ac)) } * bt.eta_at(lim_ac);
+                    let eta = if batinv.is_some() { bi_eta(lim_ac, bt.st.model) } else { port_eta(lim_ac, bt.st.model) * hybrid_unit.map_or(1.0, |i| units[i].spec.efficiency(lim_ac)) } * bt.eta_at(lim_ac);
                     let want_cell = (cap - e).min(charge.cells).min(lim_ac * eta).max(0.0);
                     let got = bt.acc.charge_one(want_cell, EnergyUse::Backup);
                     let grid_in = if eta > 0.0 { got / eta } else { 0.0 };
@@ -624,7 +626,7 @@ fn record_ac(flows: &mut Flows, links: &[crate::wiring::Link], total_loss: f64) 
 /// Returns (energy out of the storage system, AC energy added to the bus).
 #[allow(clippy::too_many_arguments)]
 fn extra_discharge(bt: &mut Batt, ac_wanted: f64, hybrid: Option<&UnitInput>, batinv: Option<&BatteryInverterSpec>, k: usize, ac: Delivery,
-                   port_eta: f64, remaining: &mut TransferBudget, hy_ac: &mut f64, dc_now: f64,
+                   port_eta: &dyn Fn(f64, BatteryModel) -> f64, remaining: &mut TransferBudget, hy_ac: &mut f64, dc_now: f64,
                    conv_loss: &mut f64, inv_loss: &mut f64, ac_bus_loss: &mut f64, ac_cable_loss: &mut f64) -> (f64, f64) {
     if ac_wanted <= 0.0 || remaining.terminal <= 0.0 || remaining.cells <= 0.0 {
         return (0.0, 0.0);
@@ -651,7 +653,7 @@ fn extra_discharge(bt: &mut Batt, ac_wanted: f64, hybrid: Option<&UnitInput>, ba
     if ac_add <= 0.0 { return (0.0, 0.0); }
     let dc_need = (dc_for_ac(u.spec, *hy_ac + ac_add, u.v(k)) - dc_now)
         .clamp(0.0, remaining.terminal);
-    let eta = port_eta * bt.eta_at(dc_need);
+    let eta = port_eta(dc_need, bt.st.model) * bt.eta_at(dc_need);
     let want_cell = (dc_need / eta).min(remaining.cells).min(bt.acc.available(&SERVICES));
     let (ac_new, dc_used) = inverter_ac(u.spec, dc_now + want_cell * eta, u.v(k));
     let ac_gain = (ac_new - *hy_ac).max(0.0);

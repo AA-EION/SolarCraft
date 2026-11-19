@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
 mod archived_photo;
+mod grid_storage;
 mod archived_routes;
 mod archived_scene;
 mod archived_shade;
@@ -119,10 +120,30 @@ pub fn compare(path: &Path) -> Result<Value> {
     let Some(run) = crate::current_results(&store, &project)? else {
         return Ok(json!({"reference": overview(&saved), "comparison": null}));
     };
-    let comparable = [(AC, &run.hourly.ac_w, run.monthly.iter().map(|m| m.ac_kwh).collect::<Vec<_>>()),
-        (DC, &run.hourly.dc_w, run.monthly.iter().map(|m| m.dc_kwh).collect::<Vec<_>>())];
+    // With storage, PV*SOL's AC generator energy is what PV and battery deliver to the AC side
+    // (to the load, the grid and the feed-in limiter), not the inverter's PV-only output.
+    let f = &run.flows;
+    let with_storage = project.storage.is_some() && [&f.pv_to_load, &f.battery_to_load, &f.export, &f.curtailed]
+        .iter().all(|v| v.len() == HOURS) && run.local_hour.len() == HOURS;
+    let delivered: Vec<f32> = if with_storage {
+        (0..HOURS).map(|k| f.pv_to_load[k] + f.battery_to_load[k] + f.export[k] + f.curtailed[k]).collect()
+    } else { vec![] };
+    let delivered_monthly = {
+        let mut m = vec![0.0; 12];
+        for (k, wh) in delivered.iter().enumerate() {
+            m[solarcraft_engine::calendar::local_time(run.local_hour[k]).month as usize - 1] += f64::from(*wh) / 1000.0;
+        }
+        m
+    };
+    let (ac_hours, ac_months, ac_basis) = if with_storage {
+        (&delivered, delivered_monthly, "PV and battery delivered to the AC side (load, grid, feed-in limiter)")
+    } else {
+        (&run.hourly.ac_w, run.monthly.iter().map(|m| m.ac_kwh).collect::<Vec<_>>(), "inverter AC output")
+    };
+    let comparable = [(AC, ac_hours, ac_months, ac_basis),
+        (DC, &run.hourly.dc_w, run.monthly.iter().map(|m| m.dc_kwh).collect::<Vec<_>>(), "PV DC at the inverter input before MPP matching")];
     let mut comparison = Map::new();
-    for (name, hours, months) in comparable {
+    for (name, hours, months, basis) in comparable {
         let Some(channel) = saved.channels.get(name) else { continue; };
         let annual = months.iter().sum::<f64>();
         let reference_annual = channel.annual();
@@ -137,7 +158,7 @@ pub fn compare(path: &Path) -> Result<Value> {
             json!({"rows":HOURS,"mae_kwh":mae,"rmse_kwh":rmse,"source":channel.hourly_source,
                 "alignment":"ordered local standard-time hour from January 1"})
         });
-        comparison.insert(name.into(), json!({"solarcraft_kwh": annual, "pvsol_kwh": reference_annual,
+        comparison.insert(name.into(), json!({"solarcraft_kwh": annual, "pvsol_kwh": reference_annual, "solarcraft_basis": basis,
             "delta_kwh":delta, "delta_pct":delta.zip(reference_annual.filter(|v| v.abs() > 1e-9)).map(|(d, v)| d / v * 100.0),
             "monthly":monthly, "hourly":hourly}));
     }
@@ -184,11 +205,9 @@ fn read(source: &Path) -> Result<Imported> {
         "The imported copy replays the editable PV design. EV and heat pump controls, financial settings, and unsupported layout assets require separate migration.".into(),
         "SolarCraft uses one-hour intervals on a reference non-leap standard-time calendar and estimates irradiance at the midpoint. Module temperature and electrical models may differ from the archived run.".into(),
     ];
-    if !island {
-        warnings.push("Grid-connected storage settings require separate migration.".into());
-    }
-    let (mut saved, monthly_rear) = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?
-        .map(|bytes| read_saved_xml(&bytes)).transpose()?.unwrap_or_default();
+    let sim_xml = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?;
+    let (mut saved, monthly_rear) = sim_xml.as_deref().map(read_saved_xml).transpose()?.unwrap_or_default();
+    let saved_temperatures = sim_xml.as_deref().and_then(read_saved_temperatures);
     let (core, diffuse, rear) = match member(&mut archive, "core.results.3600", 80 * 1024 * 1024)? {
         Some(bytes) => read_core(&bytes)?,
         None => (BTreeMap::new(), None, None),
@@ -256,6 +275,9 @@ fn read(source: &Path) -> Result<Imported> {
         _ => { warnings.push("The source transposition model has no verified binding; using SolarCraft Perez.".into()); TranspositionModel::Perez }
     });
     let (installed_modules, target_kwp) = electrical(&mut project, root, &db, &sha, &mut warnings)?;
+    if !island {
+        grid_storage::apply(&mut project, root, &db, &sha, &mut warnings)?;
+    }
     apply_field_settings(&mut project, root, &mut warnings);
     let archived_shade_arrays = archived_shade::apply(&mut project, root, &mut archive, &mut warnings)?;
     let archived_scene_fields = archived_scene::apply(&mut project, root, &mut archive, &mut warnings);
@@ -278,7 +300,12 @@ fn read(source: &Path) -> Result<Imported> {
                 .ok_or_else(|| e("PVSOL_IMPORT", "Invalid saved export limit."))?;
             project.grid.export_limit_kw = Some(target_kwp * fraction);
         } else {
-            warnings.push("The source's non-DC-relative export limit requires separate migration.".into());
+            // In absolute mode the same field holds the limit in units of 100 kW (0.025 → 2.5 kW,
+            // as the project report prints it).
+            let limit = number::<f64>(root, &["ACNetz", "ProzentualeAbregelung"]).filter(|v| (0.0..=100.0).contains(v))
+                .ok_or_else(|| e("PVSOL_IMPORT", "Invalid saved export limit."))?;
+            project.grid.export_limit_kw = Some(limit * 100.0);
+            warnings.push(format!("The absolute feed-in limit is read as {:.2} kW; check it against the source report.", limit * 100.0));
         }
     }
     if flag(root, &["ACNetz", "IsGesamtverlust"]) {
@@ -345,9 +372,12 @@ fn read(source: &Path) -> Result<Imported> {
         && array.archived_shading.as_ref().is_none_or(|shade| shade.rear.is_none())) {
         warnings.push("Bifacial arrays with saved row geometry can estimate rear irradiance when a saved rear profile is unavailable.".into());
     }
-    project.weather = Some(solarcraft_model::WeatherRef { hash: weather_hash.clone(), provider: weather.provenance.provider,
+    project.weather = Some(solarcraft_model::WeatherRef { hash: weather_hash.clone(), provider: weather.provenance.provider.clone(),
         summary: format!("{weather_member} · {HOURS} hours") });
     derive::derive(&mut project);
+    if let Some(temperatures) = saved_temperatures {
+        calibrate_module_temperature(&mut project, &weather, &weather_hash, temperatures, &mut warnings);
+    }
     let reference = Reference { source_name: source_name.to_owned(), sha256: sha, format, system_type: system.to_owned(),
         weather_member, weather_diffuse, load_source, load_annual_kwh, installed_modules,
         inverters: project.electrical.inverters.len(), target_kwp,
@@ -465,6 +495,16 @@ fn apply_field_settings(project: &mut Project, root: Node<'_, '_>, warnings: &mu
     if let Some(v) = unanimous("AlbedoJahreswert") { project.site.albedo = Field::user(v); }
     if let Some(v) = unanimous("VerschmutzungJahreswert") { project.losses.soiling_pct = Field::user(v * 100.0); }
     if let Some(v) = unanimous("MismatchHersteller") { project.losses.mismatch_pct = Field::user(v * 100.0); }
+    // PV*SOL's loss chain has no light-induced degradation step; long-term degradation is separate.
+    project.losses.lid_pct = Field::user(0.0);
+    // DC cable losses come from entered cable lengths; none entered means none simulated.
+    let lengths: Vec<f64> = root.descendants().filter(|n| matches!(n.tag_name().name(), "CableLength_Dc" | "CableLength_String"))
+        .filter_map(|n| number::<f64>(n, &[]).or_else(|| n.text().and_then(|t| t.trim().parse().ok()))).collect();
+    if !lengths.is_empty() && lengths.iter().all(|v| *v == 0.0) {
+        project.losses.dc_wiring_pct = Field::user(0.0);
+    } else if !lengths.is_empty() {
+        warnings.push("The source's DC cable lengths are not mapped; SolarCraft keeps its default DC wiring loss.".into());
+    }
     if fields.iter().any(|&field| flag(field, &["Verluste", "VerschattungsObjekt", "IsHorizon"])) {
         warnings.push("The source contains a 2D horizon mask, which is not applied by the imported design.".into());
     }
@@ -600,6 +640,62 @@ fn read_saved_xml(bytes: &[u8]) -> Result<SavedXml> {
         }
     }
     Ok((saved, read_monthly_rear(root)))
+}
+
+/// Monthly mean ambient and module temperature (°C, all hours) of the archived run,
+/// when the project has one module temperature series.
+fn read_saved_temperatures(bytes: &[u8]) -> Option<([f64; 12], [f64; 12])> {
+    let document = document(bytes, "SimResults.xml").ok()?;
+    let monthly = |tag: &str| -> Option<[f64; 12]> {
+        let nodes: Vec<_> = document.descendants().filter(|n| n.has_tag_name(tag)).collect();
+        let [node] = nodes.as_slice() else { return None };
+        let values: Vec<f64> = children(*node, "MonthlyValues").filter_map(|m| number::<f64>(m, &["value"]))
+            .map(|kelvin| kelvin - 273.15).filter(|c| (-80.0..=120.0).contains(c)).collect();
+        values.try_into().ok()
+    };
+    Some((monthly("Aussentemperatur")?, monthly("Modultemperatur")?))
+}
+
+/// Scale the module temperature rise so SolarCraft's monthly all-hours mean module
+/// temperature matches the archived run. The Faiman rise is G / (u0 + u1·v), so
+/// dividing both coefficients by one factor scales the rise exactly.
+fn calibrate_module_temperature(project: &mut Project, weather: &Weather, weather_hash: &str,
+    (ambient, module): ([f64; 12], [f64; 12]), warnings: &mut Vec<String>) {
+    if project.arrays.len() != 1 { return; }
+    let mut probe = project.clone();
+    probe.storage = None;
+    probe.loads.profile = LoadProfile::Synthetic { profile: solarcraft_model::plant::SyntheticProfile::Flat };
+    let Ok(result) = solarcraft_engine::simulate(&probe, weather, weather_hash, None, |_| true) else {
+        warnings.push("The archived module temperatures could not be used for calibration because the design does not simulate.".into());
+        return;
+    };
+    let mut sums = [[0.0f64; 3]; 12];
+    for (k, hour) in weather.hours.iter().enumerate() {
+        let local = result.local_hour.get(k).copied().unwrap_or(0);
+        let month = solarcraft_engine::calendar::local_time(local).month as usize - 1;
+        let cell = f64::from(result.hourly.t_cell_c[k]);
+        sums[month][0] += hour.temp_air; sums[month][1] += cell; sums[month][2] += 1.0;
+    }
+    let (mut ours, mut theirs) = (0.0, 0.0);
+    for m in 0..12 {
+        let n = sums[m][2].max(1.0);
+        if (sums[m][0] / n - ambient[m]).abs() > 0.5 {
+            warnings.push("The archived ambient temperatures differ from the embedded weather; module temperatures are not calibrated.".into());
+            return;
+        }
+        ours += sums[m][1] / n - sums[m][0] / n;
+        theirs += module[m] - ambient[m];
+    }
+    let ratio = theirs / ours;
+    if !(0.3..=3.0).contains(&ratio) {
+        warnings.push(format!("The archived module temperature rise differs from SolarCraft's by a factor of {ratio:.2}; not calibrated."));
+        return;
+    }
+    let sim = &mut project.simulation;
+    sim.faiman_u0 = Field::user(sim.faiman_u0.value / ratio);
+    sim.faiman_u1 = Field::user(sim.faiman_u1.value / ratio);
+    warnings.push(format!("Module temperature: the archived monthly module temperatures rise {:.0} % as much above ambient as SolarCraft's {:?} model; its coefficients are scaled to match (Faiman U0 {:.1} W/m²K).",
+        ratio * 100.0, sim.mounting.value, sim.faiman_u0.value));
 }
 
 fn read_monthly_rear(root: Node<'_, '_>) -> Option<[f64; 12]> {

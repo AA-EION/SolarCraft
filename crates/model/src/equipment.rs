@@ -208,8 +208,30 @@ pub struct BatteryPort {
     pub v_max: f64,
     pub p_charge_max_w: f64,
     pub p_discharge_max_w: f64,
-    /// DC/DC conversion efficiency between the PV bus and the battery.
+    /// DC/DC conversion efficiency between the PV bus and the battery
+    /// (used when no part-load curve is given, and by the simple battery model).
     pub dc_dc_efficiency: f64,
+    /// Part-load efficiency of the DC/DC stage: (P / `p_rated_w`, efficiency) knots,
+    /// ascending load. Empty: the constant `dc_dc_efficiency`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efficiency_curve: Vec<[f64; 2]>,
+    /// Power the curve's load fractions refer to, W (default: the charge limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p_rated_w: Option<f64>,
+}
+
+impl BatteryPort {
+    /// DC/DC efficiency at a transfer of `w` watts (linear between knots, held flat outside them).
+    pub fn efficiency(&self, w: f64) -> f64 {
+        let c = &self.efficiency_curve;
+        if c.is_empty() { return self.dc_dc_efficiency; }
+        let x = w.abs() / self.p_rated_w.unwrap_or(self.p_charge_max_w).max(1e-9);
+        if x <= c[0][0] { return c[0][1]; }
+        for k in c.windows(2) {
+            if x <= k[1][0] { return k[0][1] + (k[1][1] - k[0][1]) * (x - k[0][0]) / (k[1][0] - k[0][0]).max(1e-12); }
+        }
+        c[c.len() - 1][1]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -422,7 +444,7 @@ impl InverterSpec {
         i.i_max_per_mppt = 16.0;
         i.pdc_max_w = Some(pac_kw * 1500.0);
         i.efficiency_curve = vec![[0.05, 0.90], [0.10, 0.935], [0.20, 0.955], [0.30, 0.965], [0.50, 0.97], [0.75, 0.968], [1.0, 0.965]];
-        i.battery_port = Some(BatteryPort { v_min: 90.0, v_max: 500.0, p_charge_max_w: pac_kw * 1000.0, p_discharge_max_w: pac_kw * 1000.0, dc_dc_efficiency: 0.98 });
+        i.battery_port = Some(BatteryPort { v_min: 90.0, v_max: 500.0, p_charge_max_w: pac_kw * 1000.0, p_discharge_max_w: pac_kw * 1000.0, dc_dc_efficiency: 0.98, efficiency_curve: vec![], p_rated_w: None });
         i
     }
 
