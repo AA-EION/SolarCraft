@@ -49,6 +49,9 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: 
         // The shipped AC system still carries the DC generator-side template flag.
         (Some(1), _, _, _) | (None | Some(0), true, false, false) => true,
         (None | Some(0 | 2), false, true, false) => false,
+        // Catalog coupling 3 is the DC-link connection (PV*SOL's report: "DC intermediate
+        // circuit"); hybrid systems saved this way may still carry the generator-side flag.
+        (Some(3), false, _, _) => false,
         _ => return Err(e("PVSOL_IMPORT", "The saved battery coupling is unsupported or conflicts with the embedded equipment.")),
     };
     let version = system["Version"].as_i64().unwrap_or(0);
@@ -118,6 +121,9 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: 
         let inverter = project.library.inverters.iter_mut().find(|i| i.id == unit.inverter_id)
             .ok_or_else(|| e("PVSOL_IMPORT", "The battery inverter record is missing from the project library."))?;
         spec.unverified.insert("pack_voltage_window".into(), json!("±20 % of nominal (the archive stores no converter voltage window)"));
+        if system["Coupling"].as_i64() == Some(3) {
+            warnings.push("The battery system is connected to the inverter's DC link; SolarCraft models it on the hybrid inverter's DC battery port.".into());
+        }
         inverter.battery_port = Some(BatteryPort {
             v_min: pack_v * 0.8, v_max: pack_v * 1.2, p_charge_max_w: charge_w, p_discharge_max_w: discharge_w,
             dc_dc_efficiency: curve.iter().find(|k| k[0] == 0.5).map_or(0.95, |k| k[1]),

@@ -176,6 +176,27 @@ fn dc_coupled_battery_system_and_absolute_feed_in_limit_are_migrated() {
     fs::remove_dir(dir).unwrap();
 }
 
+/// Catalog coupling 3 (DC link, as in a GoodWe ES hybrid system) with the saved
+/// generator-side flag stays a DC battery on the hybrid inverter.
+#[test]
+fn dc_link_battery_system_is_migrated_to_the_hybrid_port() {
+    use solarcraft_model::plant::Coupling;
+    let dir = std::env::temp_dir().join(format!("SolarCraft-PVPRJ-dc-link-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("battery.pvprj");
+    let destination = dir.join("battery.solarcraft");
+    archive_with(&source, true, Some(3));
+    let imported = call("import_pvsol", json!({"source": source, "file": destination}));
+    let p = app::get_project(&destination).unwrap();
+    let storage = p.storage.as_ref().expect("battery system migrated");
+    assert!(matches!(&storage.coupling, Coupling::DcHybrid { unit_id } if *unit_id == p.electrical.inverters[0].id));
+    assert!(p.library.inverters[0].battery_port.is_some());
+    assert!(imported["reference"]["warnings"].as_array().unwrap().iter()
+        .any(|warning| warning.as_str().unwrap().contains("DC link")));
+    for file in [source, destination] { fs::remove_file(file).unwrap(); }
+    fs::remove_dir(dir).unwrap();
+}
+
 #[test]
 fn ac_battery_catalog_overrides_stale_dc_flag_and_keeps_pv_meter() {
     use solarcraft_model::plant::Coupling;
