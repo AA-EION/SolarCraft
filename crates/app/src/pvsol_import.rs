@@ -558,8 +558,10 @@ fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f6
         if !(-100.0..=100.0).contains(&temp_air) || !(0.0..=1800.0).contains(&ghi) || !(0.0..=100.0).contains(&wind) {
             return Err(error("An embedded WBV weather row is missing or outside the supported range."));
         }
+        // Row k is centred on hour mark k:00 local standard time (the daily irradiance profile is
+        // symmetric about solar noon there), not on k:30. The calendar slot stays hour k.
         let unix_start = start + index as i64 * 3600;
-        let unix_mid = unix_start + 1800;
+        let unix_mid = unix_start;
         let sun = solar_position(unix_mid as f64, &observer, delta_t_estimate(year as f64));
         let (dni, dhi) = if let Some(saved) = diffuse {
             let cosine = sun.zenith.to_radians().cos();
@@ -847,6 +849,8 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
                         let area_id = value(string, &["ModulfeldId"]).filter(|id| ids.contains_key(id))
                             .ok_or_else(|| fail("A string points to an unknown PV area.".into()))?;
                         let i = ids[area_id];
+                        // An unoccupied MPPT is saved as a 0 × 0 placeholder string.
+                        if number::<u32>(string, &["AnzahlInReihe"]) == Some(0) && number::<u32>(string, &["AnzahlStrings"]) == Some(0) { continue; }
                         let modules = number::<u32>(string, &["AnzahlInReihe"]).filter(|n| (1..=1000).contains(n));
                         let strings = number::<u32>(string, &["AnzahlStrings"]).filter(|n| (1..=1000).contains(n));
                         let (modules, strings) = modules.zip(strings).ok_or_else(|| fail("Invalid saved string dimensions.".into()))?;

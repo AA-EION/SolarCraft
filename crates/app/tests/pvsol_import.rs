@@ -28,6 +28,8 @@ fn archive(path: &Path) {
       <Wechselrichter><Verschaltung><WRObj><InverterID>i</InverterID><InverterVersion>3</InverterVersion>
         <Haeufigkeit>1</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><Straenge>
           <ModulfeldId>area</ModulfeldId><AnzahlInReihe>7</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings>
+        </Straenge><Straenge>
+          <ModulfeldId>area</ModulfeldId><AnzahlInReihe>0</AnzahlInReihe><AnzahlStrings>0</AnzahlStrings>
         </Straenge></PolyStringVerschaltung></ModulfeldTeil><MPPListe>0</MPPListe></MPPListe>
       </WRObj></Verschaltung><Verschaltung><WRObj><InverterID>i</InverterID><InverterVersion>3</InverterVersion>
         <Haeufigkeit>1</Haeufigkeit><MPPListe><ModulfeldTeil><PolyStringVerschaltung><StraengeInReihe>true</StraengeInReihe>
@@ -93,6 +95,15 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     assert_eq!(reopened.arrays.len(), 2);
     assert_eq!(reopened.arrays[1].strings.value, 0);
     assert_eq!(reopened.electrical.inverters[0].mppts[0][0].modules_per_string, 7);
+    // PV*SOL saves an unoccupied MPPT as a 0 × 0 string; it is skipped, not rejected.
+    assert_eq!(reopened.electrical.inverters[0].mppts[0].len(), 1);
+    // WBV row k is centred on k:00 local standard time: the sun is evaluated there,
+    // while the calendar slot stays hour k.
+    {
+        let store = solarcraft_store::Store::open(&destination).unwrap();
+        let (weather, _) = app::load_weather(&store, &reopened).unwrap();
+        for hour in &weather.hours[..48] { assert_eq!(Some(hour.unix_mid), hour.unix_start); }
+    }
     let series = &reopened.electrical.inverters[1].mppts[0];
     assert_eq!(series.iter().map(|g| g.modules_per_string).collect::<Vec<_>>(), [3, 4]);
     assert!(series[0].series_chain.is_some() && series[0].series_chain == series[1].series_chain);
