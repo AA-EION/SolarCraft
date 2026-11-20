@@ -119,6 +119,12 @@ pub struct Array {
     pub roof: Option<RoofLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracking: Option<tracking::Tracker>,
+    /// Saved mounting class for the archived dynamic module-temperature model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_module_mounting: Option<u8>,
+    /// Saved fixed voltage loss for the legacy module curve when no substring shades apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_diode_loss_fraction: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site_shade: Option<horizon::SiteShade>,
     /// Hourly field-average losses carried in from a saved 3D calculation.
@@ -356,7 +362,8 @@ impl Project {
                 strings: Field::default(0),
                 inverter_id: Field::default(String::new()),
                 inverter_count: Field::default(1),
-                roof: None, tracking: None, site_shade: None, archived_shading: None, bifacial_rows: None,
+                roof: None, tracking: None, archived_module_mounting: None, archived_diode_loss_fraction: None,
+                site_shade: None, archived_shading: None, bifacial_rows: None,
             }],
             losses: Losses {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),

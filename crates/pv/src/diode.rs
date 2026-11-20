@@ -53,6 +53,12 @@ impl DiodeParams {
             r_s: self.r_s / scale, r_sh: self.r_sh / scale, ..self }
     }
 
+    /// Rescale voltage at every terminal current while preserving the
+    /// current-axis shape of the original curve.
+    pub fn scale_voltage(self, scale: f64) -> Self {
+        Self { r_s: self.r_s * scale, r_sh: self.r_sh * scale, n_ns_vth: self.n_ns_vth * scale, ..self }
+    }
+
     fn junction(&self, voltage: f64) -> (f64, f64) {
         let x = voltage / self.n_ns_vth;
         let ex = x.exp();
@@ -506,6 +512,10 @@ mod tests {
         let curve: Vec<_> = (0..=20).map(|step| dim.current(dim.voc() * step as f64 / 20.0)).collect();
         assert!(curve.windows(2).all(|pair| pair[0] > pair[1]));
         assert!((dim.voltage(dim.current(20.0)) - 20.0).abs() < 1e-8);
+        let scaled = dim.scale_voltage(0.995);
+        let (v, i, power) = dim.mpp();
+        assert!((scaled.current(0.995 * v) - i).abs() < 1e-9);
+        assert!((scaled.mpp().2 - 0.995 * power).abs() < 1e-9);
     }
 
     #[test]

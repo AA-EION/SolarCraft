@@ -1,6 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use super::{calendar, calendar_order, TankRun};
-use solarcraft_model::demand::{HeatStore, Heating, HotWaterWeights, ThermalControls, ThermalEmitter};
+use solarcraft_model::demand::{BuildingHeatGains, HeatStore, Heating, HotWaterWeights, ThermalControls, ThermalEmitter};
+use solarcraft_pv::{irradiance as irr, spa::SolarPosition};
+use solarcraft_weather::Weather;
+
+pub(crate) fn facade_irradiance(weather: &Weather, sun: &[SolarPosition], local_hour: &[u32], albedo: f64) -> Vec<[f64; 4]> {
+    weather.hours.iter().zip(sun).zip(local_hour).map(|((hour, sun), local_hour)| {
+        let components = irr::Components {
+            ghi: hour.ghi.max(0.0), dni: hour.dni.max(0.0), dhi: hour.dhi.max(0.0),
+            dni_extra: irr::dni_extra(f64::from(local_hour / 24 + 1), 1367.0),
+        };
+        [0.0, 90.0, 180.0, 270.0].map(|surface_azimuth| {
+            let geometry = irr::Geometry { tilt: 90.0, surface_azimuth, zenith: sun.zenith, sun_azimuth: sun.azimuth };
+            irr::poa(irr::SkyModel::HayDavies, &geometry, &components, albedo).global
+        })
+    }).collect()
+}
+
+fn space_heat_loss_kw_per_k(heating: &Heating, gains: BuildingHeatGains, hour: usize, facade_w_m2: [f64; 4]) -> f64 {
+    // Each façade offsets its share of design heat loss, with no credit for
+    // solar gains over that façade's load. Internal gains apply from 06:00 to 22:00.
+    let design_load = heating.heat_loss_kw_per_k * gains.design_temperature_difference_c;
+    let facade_load_kw: f64 = facade_w_m2.into_iter().zip([(0.20, 0.02), (0.25, 0.05), (0.30, 0.10), (0.25, 0.07)])
+        .map(|(flux, (load_share, window_fraction))| {
+            (load_share * design_load - flux * gains.effective_floor_area_m2 * window_fraction / 1000.0).max(0.0)
+        }).sum();
+    let internal_kw = if (6..22).contains(&(hour % 24)) { 0.005 * gains.effective_floor_area_m2 } else { 0.0 };
+    (facade_load_kw - internal_kw).max(0.0) / gains.design_temperature_difference_c
+}
+
+fn resistance(thickness_m: f64, mean_c: f64) -> f64 {
+    thickness_m / (0.037 + 0.0002 * mean_c) + 6.25e-5
+}
 
 fn water_profile(weights: &HotWaterWeights, annual_kwh: f64) -> Vec<f64> {
     let mut month_weight = [0.0; 12];
@@ -60,7 +91,7 @@ fn electric_heat(heating: &Heating, emitter: &ThermalEmitter, hour: usize, outsi
 }
 
 pub(super) fn mixed_tank(heat: &Heating, tank: &HeatStore, controls: &ThermalControls, temp: &[f64],
-    local_hour: &[u32], load: &[f64], pv: &[f32]) -> TankRun
+    local_hour: &[u32], load: &[f64], pv: &[f32], facades: Option<&[[f64; 4]]>) -> TankRun
 {
     let n = local_hour.len();
     let order = calendar_order(local_hour);
@@ -69,20 +100,35 @@ pub(super) fn mixed_tank(heat: &Heating, tank: &HeatStore, controls: &ThermalCon
     let hot_water = controls.hot_water.as_ref().map(|w| water_profile(w, tank.daily_hot_water_kwh * 365.0));
     let mut run = TankRun { demand: Default::default(), result: Default::default(), electrical: vec![0.0; n],
         stored: vec![0.0; n], top_c: vec![], bottom_c: vec![] };
-    let loss_fraction = 1.0 - (1.0 - tank.standing_loss_pct_per_day / 100.0).powf(1.0 / 24.0);
+    let hourly_loss_rate = -(-tank.standing_loss_pct_per_day / 100.0).ln_1p() / 24.0;
+    let loss_fraction = -(-hourly_loss_rate).exp_m1();
     let kwh_per_k = tank.capacity_kwh / (controls.solar_target_c - controls.ambient_c);
     let heat_at = |c: f64| kwh_per_k * (c - controls.ambient_c);
-    let resistance = matches!(controls.emitter, ThermalEmitter::Resistance { .. });
+    let insulation = controls.insulation_thickness_m.map(|thickness| {
+        let nominal_mean = (controls.ambient_c + controls.boiler_target_c) / 2.0;
+        (thickness, resistance(thickness, nominal_mean))
+    });
+    let gains = controls.space.as_ref().and_then(|schedule| schedule.building_gains);
+    let is_rod = matches!(controls.emitter, ThermalEmitter::Resistance { .. });
     let pv_only = !matches!(controls.emitter, ThermalEmitter::HeatPump { pv_only: false, .. });
     let mut stored = tank.initial_kwh;
     let mut boiler_total = 0.0;
     let mut solar_electric = 0.0;
     for (h, i) in order.into_iter().enumerate() {
-        let loss = stored * loss_fraction;
+        let loss = match insulation {
+            Some((thickness, nominal_resistance)) => {
+                let mean_c = controls.ambient_c + stored / (2.0 * kwh_per_k);
+                stored * (hourly_loss_rate * nominal_resistance / resistance(thickness, mean_c)).min(1.0)
+            }
+            None => stored * loss_fraction,
+        };
         let water = hot_water.as_ref().map_or_else(
             || if h as u32 % 24 == tank.hot_water_hour { tank.daily_hot_water_kwh } else { 0.0 },
             |profile| profile[h]);
-        let demand = degree_hours[h] * heat.heat_loss_kw_per_k + water;
+        let loss_kw_per_k = gains.map_or(heat.heat_loss_kw_per_k, |gains| {
+            space_heat_loss_kw_per_k(heat, gains, h, facades.map_or([0.0; 4], |facades| facades[i]))
+        });
+        let demand = degree_hours[h] * loss_kw_per_k + water;
         let request = demand.min(tank.discharge_kw);
         stored -= loss + request;
         let now = h as u32 * 3600;
@@ -107,7 +153,7 @@ pub(super) fn mixed_tank(heat: &Heating, tank: &HeatStore, controls: &ThermalCon
         run.stored[i] = stored as f32;
         run.demand.demand_kwh += demand;
         run.demand.unmet_heat_kwh += demand - delivered;
-        if resistance { run.demand.backup_kwh += electric; }
+        if is_rod { run.demand.backup_kwh += electric; }
         else {
             run.demand.pump_heat_kwh += input_heat;
             run.demand.pump_electric_kwh += electric;
@@ -137,21 +183,22 @@ mod tests {
             cutoff_c: -20.0, cop_at_0c: 3.0, cop_at_10c: 4.28, resistance_backup_kw: 0.0 };
         let controls = ThermalControls { ambient_c: 20.0, solar_target_c: 70.0, boiler_target_c: 60.0,
             boiler_limit_kw: None, emitter: ThermalEmitter::HeatPump { pv_only: true, cop_a_minus7: 2.31,
-                cop_a2: 3.1, cop_a7: 3.98, blocked_seconds: vec![] }, space: None, hot_water: None, sanitation: None };
+                cop_a2: 3.1, cop_a7: 3.98, blocked_seconds: vec![] }, space: None, hot_water: None, sanitation: None,
+            insulation_thickness_m: None };
         let tank = HeatStore { capacity_kwh: 10.0, initial_kwh: 8.0, charge_kw: 6.0, discharge_kw: 10.0,
             standing_loss_pct_per_day: 0.0, daily_hot_water_kwh: 3.0, hot_water_hour: 1, layers: None, controls: None };
-        let direct = mixed_tank(&heat, &tank, &controls, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[0.0; 3]);
+        let direct = mixed_tank(&heat, &tank, &controls, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[0.0; 3], None);
         assert_eq!(direct.electrical, [0.0; 3]);
         assert_eq!(direct.result.boiler_heat_kwh, Some(3.0));
         assert_eq!(direct.result.direct_solar_electric_kwh, Some(0.0));
-        let solar = mixed_tank(&heat, &tank, &controls, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[1000.0, 0.0, 0.0]);
+        let solar = mixed_tank(&heat, &tank, &controls, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[1000.0, 0.0, 0.0], None);
         assert!((solar.demand.pump_heat_kwh - 2.0).abs() < 1e-9);
         assert_eq!(solar.result.direct_solar_electric_kwh, Some(solar.demand.pump_electric_kwh));
         assert!((solar.result.boiler_heat_kwh.unwrap() - 1.0).abs() < 1e-9);
         assert!((solar.result.boiler_heat_kwh.unwrap() + solar.demand.pump_heat_kwh - solar.result.discharge_heat_kwh).abs() < 1e-9);
         let mut standard = controls;
         if let ThermalEmitter::HeatPump { pv_only, .. } = &mut standard.emitter { *pv_only = false; }
-        let grid = mixed_tank(&heat, &tank, &standard, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[0.0; 3]);
+        let grid = mixed_tank(&heat, &tank, &standard, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[0.0; 3], None);
         assert!((grid.demand.pump_electric_kwh - 3.0 / 3.98).abs() < 1e-9);
         assert_eq!(grid.result.boiler_heat_kwh, Some(0.0));
     }

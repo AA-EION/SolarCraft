@@ -50,6 +50,14 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
             push("SITE_SHADE_INVALID", Severity::Error, format!("{base}/site_shade"),
                 "Site shading needs a loss fraction between zero and one or 360 horizon angles between 0 and 90°.".into());
         }
+        if a.archived_module_mounting.is_some_and(|code| code > 5) {
+            push("ARCHIVED_MODULE_MOUNTING", Severity::Error, format!("{base}/archived_module_mounting"),
+                "The saved mounting class must be between 0 and 5.".into());
+        }
+        if a.archived_diode_loss_fraction.is_some_and(|loss| !(0.0..1.0).contains(&loss)) {
+            push("ARCHIVED_DIODE_LOSS", Severity::Error, format!("{base}/archived_diode_loss_fraction"),
+                "The saved diode voltage loss must be at least zero and below one.".into());
+        }
         if let Some(rows) = a.bifacial_rows {
             if !rows.valid(a.tilt.value) {
                 push("BIFACIAL_ROWS_INVALID", Severity::Error, format!("{base}/bifacial_rows"),

@@ -183,6 +183,9 @@ pub struct ThermalControls {
     pub space: Option<SpaceHeatSchedule>,
     pub hot_water: Option<HotWaterWeights>,
     pub sanitation: Option<TankSanitation>,
+    /// Insulation thickness for the mixed tank's temperature-dependent standing loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insulation_thickness_m: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,6 +202,15 @@ pub struct SpaceHeatSchedule {
     pub inactive_days: [u32; 2],
     pub night_seconds: Option<[u32; 2]>,
     pub night_setback_c: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub building_gains: Option<BuildingHeatGains>,
+}
+
+/// Building geometry and design temperature lift for estimating heat gains.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BuildingHeatGains {
+    pub effective_floor_area_m2: f64,
+    pub design_temperature_difference_c: f64,
 }
 
 impl SpaceHeatSchedule {
@@ -219,6 +231,9 @@ impl SpaceHeatSchedule {
         (-50.0..=50.0).contains(&self.threshold_c) && self.inactive_days.iter().all(|&d| d <= 365)
             && self.night_seconds.is_none_or(|r| r.iter().all(|&s| s <= 86400))
             && (0.0..=30.0).contains(&self.night_setback_c)
+            && self.building_gains.is_none_or(|gains| gains.effective_floor_area_m2.is_finite()
+                && gains.effective_floor_area_m2 > 0.0 && gains.design_temperature_difference_c.is_finite()
+                && gains.design_temperature_difference_c > 0.0)
     }
 }
 
@@ -263,6 +278,7 @@ impl ThermalControls {
             && self.boiler_limit_kw.is_none_or(|kw| (0.0..=10_000.0).contains(&kw))
             && self.space.as_ref().is_none_or(SpaceHeatSchedule::valid)
             && self.hot_water.as_ref().is_none_or(HotWaterWeights::valid)
+            && self.insulation_thickness_m.is_none_or(|thickness| thickness.is_finite() && thickness >= 0.0)
             && self.sanitation.is_none_or(|s| (self.boiler_target_c..=self.solar_target_c).contains(&s.target_c)
                 && s.start_second < s.interval_seconds && (3600..=365 * 86400).contains(&s.interval_seconds))
             && emitter

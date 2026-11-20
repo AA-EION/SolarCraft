@@ -311,7 +311,11 @@ fn read(source: &Path) -> Result<Imported> {
         Some("Perez") => TranspositionModel::Perez,
         _ => { warnings.push("The source transposition model has no verified binding; using SolarCraft Perez.".into()); TranspositionModel::Perez }
     });
-    let (installed_modules, target_kwp) = electrical(&mut project, root, &db, &sha, &mut warnings)?;
+    let legacy_module_inputs = weather_diffuse == diffuse::Model::ReindlReducedLegacy.source();
+    let (installed_modules, target_kwp) = electrical(&mut project, root, &db, &sha, legacy_module_inputs, &mut warnings)?;
+    if project.arrays.iter().any(|array| array.archived_module_mounting.is_some()) {
+        warnings.push("Module temperature uses the archived mounting, thermal mass and pre-soiling irradiance on hourly steps.".into());
+    }
     // PV*SOL simulates modules flagged for standard part-load operation with its two-diode
     // model (when the fit accepts them) and the others with its one-diode model.
     let standard_part_load = |m: &solarcraft_model::equipment::ModuleSpec| m.unverified.get("standardPartLoadOperation").and_then(serde_json::Value::as_bool) == Some(true);
@@ -422,7 +426,7 @@ fn read(source: &Path) -> Result<Imported> {
     project.weather = Some(solarcraft_model::WeatherRef { hash: weather_hash.clone(), provider: weather.provenance.provider.clone(),
         summary: format!("{weather_member} · {HOURS} hours") });
     derive::derive(&mut project);
-    if let Some(temperatures) = saved_temperatures {
+    if let Some(temperatures) = saved_temperatures.filter(|_| !legacy_module_inputs) {
         calibrate_module_temperature(&mut project, &weather, &weather_hash, temperatures, &mut warnings);
     }
     if system == "OnGridPVWithThermal" {
@@ -935,7 +939,7 @@ fn member(archive: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str, limit: u64) -> 
     }
 }
 
-fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, warnings: &mut Vec<String>) -> Result<(u32, f64)> {
+fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, legacy_module_inputs: bool, warnings: &mut Vec<String>) -> Result<(u32, f64)> {
     let fail = |message: String| e("PVSOL_IMPORT", message);
     let fields: Vec<_> = path_node(root, &["PVModule"]).into_iter().flat_map(|p| children(p, "Modulfelder")).collect();
     let wiring: Vec<_> = children(root, "Wechselrichter").flat_map(|root| children(root, "Verschaltung"))
@@ -961,6 +965,11 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
         array.azimuth = Field::user(number::<f64>(node, &["Modulausrichtung"]).filter(|v| (-360.0..=360.0).contains(v))
             .ok_or_else(|| fail(format!("Missing or invalid azimuth for {}.", array.name.value)))?.rem_euclid(360.0));
         array.module_id = Field::user(module.id.clone());
+        if legacy_module_inputs {
+            array.archived_module_mounting = number::<u8>(node, &["Einbausituation"]).filter(|code| *code <= 5);
+            array.archived_diode_loss_fraction = number::<f64>(node, &["Verluste", "VerlusteSimulation", "VerlusteInDioden"])
+                .filter(|&loss| loss > 0.0 && loss < 1.0);
+        }
         if module.bifaciality.is_some() {
             array.bifacial_rows = path_node(node, &["Bifaciality"]).and_then(|settings| read_bifacial_rows(&array, settings));
         }

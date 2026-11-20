@@ -166,7 +166,8 @@ pub struct InverterSpec {
     /// Inverter start threshold, W DC (source "minimum feed-in power").
     #[serde(default)]
     pub start_power_w: Option<f64>,
-    /// Efficiency change per 100 V deviation from `v_dc_nominal` (decrease for positive values).
+    /// Efficiency change per 100 V deviation from `v_dc_nominal`. PV*SOL catalog
+    /// records encode a relative loss magnitude, sometimes with a negative sign.
     #[serde(default)]
     pub eta_change_per_100v: Option<f64>,
     /// MPP adaptation efficiency below and above 20 % of the nominal DC power.
@@ -457,7 +458,16 @@ impl InverterSpec {
     /// voltage correction per 100 V from nominal, and the MPP adaptation efficiency.
     pub fn efficiency_v(&self, pdc_w: f64, v_dc: Option<f64>) -> f64 {
         let mut eta = self.efficiency(pdc_w);
-        if let (Some(c), Some(vn), Some(v)) = (self.eta_change_per_100v, self.v_dc_nominal, v_dc) { if v > 0.0 { eta -= c * (v - vn).abs() / 100.0; } }
+        if let (Some(change), Some(nominal), Some(voltage)) =
+            (self.eta_change_per_100v, self.v_dc_nominal, v_dc.filter(|voltage| *voltage > 0.0))
+        {
+            let deviation = (voltage - nominal).abs() / 100.0;
+            if self.catalog_ref.as_ref().is_some_and(|source| source.family == "pvinverter") {
+                eta *= 1.0 - deviation * change.abs();
+            } else {
+                eta -= deviation * change;
+            }
+        }
         if let Some([lo, hi]) = self.mpp_matching { let pn = self.pdc_nominal_w.unwrap_or_else(|| self.pdc0_w()); eta *= if pdc_w < 0.2 * pn { lo } else { hi }; }
         eta.clamp(0.0, 1.0)
     }
@@ -526,5 +536,29 @@ impl Library {
     pub fn ensure_inverter(&mut self, inv: InverterSpec) -> String {
         if self.inverter(&inv.id).is_none() { self.inverters.push(inv.clone()); }
         inv.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_voltage_derating_is_relative_and_symmetric() {
+        let mut inverter = InverterSpec::generic(500.0);
+        inverter.efficiency_curve = vec![[0.1, 0.98], [1.0, 0.98]];
+        inverter.pdc_nominal_w = Some(500_000.0);
+        inverter.v_dc_nominal = Some(550.0);
+        inverter.catalog_ref = Some(crate::plant::CatalogRef {
+            family: "pvinverter".into(), id: "example".into(), version: 1,
+            source_sha256: String::new(), dataset: "PVInverters".into(),
+        });
+        for change in [-0.0015, 0.0015] {
+            inverter.eta_change_per_100v = Some(change);
+            for voltage in [350.0, 750.0] {
+                assert!((inverter.efficiency_v(250_000.0, Some(voltage)) - 0.98 * 0.997).abs() < 1e-12);
+            }
+            assert_eq!(inverter.efficiency_v(250_000.0, Some(550.0)), 0.98);
+        }
     }
 }

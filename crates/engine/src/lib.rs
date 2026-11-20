@@ -238,6 +238,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     let iam_beam = |aoi: f64| iam::physical(aoi, 1.526, 4.0, 0.002);
     let tracking_iam = p.arrays.iter().any(|a| a.tracking.is_some())
         .then(|| tracking::DiffuseIam::new(iam_beam));
+    let user_temperature = p.simulation.mounting.is_user()
+        || p.simulation.faiman_u0.is_user() || p.simulation.faiman_u1.is_user();
 
     // 1. Per array: plane-of-array irradiance, shading, cell temperature and module diode parameters.
     struct ArrayHours {
@@ -270,6 +272,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             }
         };
         let area = n_mod * module.area();
+        let mut archived_temperature = a.archived_module_mounting.filter(|_| !user_temperature).and_then(|mounting| {
+            temperature::ClassicModuleTemperature::new(mounting, module.area(), module.weight_kg,
+                module.half_cell, w.hours[0].temp_air)
+        });
         let p_stc = n_mod * module.pmp_stc();
         dc_kwp += p_stc / 1000.0;
         area_tot += area;
@@ -365,6 +371,9 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             None
         };
         ah.area_average_shade = (archive.is_some() && ah.archived.is_none()) || (shade.is_some() && ah.shaded.is_none());
+        let voltage_factor = if archive.is_none() && shade.is_none() {
+            1.0 - a.archived_diode_loss_fraction.unwrap_or(0.0)
+        } else { 1.0 };
         if archive.is_some() {
             let treatment = if ah.archived.is_some() { "Saved Visual3D rates drive per-string I–V curves with module-level shading and diffuse residuals." }
                 else { "Saved Visual3D shading uses field averages for the current wiring." };
@@ -415,9 +424,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             }
             let mut archived_light = None;
             let soiling = f(l.soiling_pct.value);
-            let (rear_poa, rear_effective) = if let Some(profile) = rear_profile {
+            let (rear_poa, rear_effective, rear_thermal) = if let Some(profile) = rear_profile {
                 let irradiance = f64::from(profile.w_m2[local_hour[k] as usize]);
-                (irradiance, irradiance * bifaciality.unwrap_or_default())
+                let effective = irradiance * bifaciality.unwrap_or_default();
+                (irradiance, effective, effective)
             } else if let Some((sky_iam, ground_iam)) = rear_diffuse_iam {
                 let (rear, transmission) = if let Some(rows) = &finite_rows {
                     let beam_horizontal = dni * geo.zenith.to_radians().cos().max(0.0);
@@ -429,8 +439,9 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 } else { unreachable!("modeled rear source must exist") };
                 let incident = transmission * (rear.direct + rear.sky + rear.reflected);
                 let absorbed = transmission * (rear.direct * iam_beam(180.0 - aoi) + rear.sky * sky_iam + rear.reflected * ground_iam);
-                (incident, absorbed * bifaciality.unwrap_or_default() * soiling)
-            } else { (0.0, 0.0) };
+                let effective = absorbed * bifaciality.unwrap_or_default();
+                (incident, effective * soiling, effective)
+            } else { (0.0, 0.0, 0.0) };
             if let Some((s, baseline)) = archive.and_then(|s| s.diffuse_baseline.map(|baseline| (s, baseline))) {
                 let mut sky_directional = irr::directional_sky(model, &geo, &comp).min(poa.sky_diffuse);
                 if let (irr::SkyModel::HayDavies, Some(bourges)) = (model, s.bourges_clear_sky) {
@@ -461,7 +472,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let e_eff = after_iam * soiling + rear_effective;
             for (s, v) in [raw_ghi, ghi, poa.global, after_geo, after_shade, after_iam, after_iam * soiling, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
             let thermal_poa = poa.global + if modeled_rear { rear_poa } else { 0.0 };
-            let tc = temperature::faiman(thermal_poa, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
+            let tc = match &mut archived_temperature {
+                Some(classic) => classic.step(after_iam + rear_thermal, h.temp_air),
+                None => temperature::faiman(thermal_poa, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value),
+            };
             if let Some(shaded) = &mut ah.shaded {
                 shaded.hours[k] = partial_shading::Light { direct: directional * beam_iam * soiling,
                     diffuse: diffuse_iam * soiling + rear_effective, temperature: tc };
@@ -472,8 +486,9 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             e_tot[0] += e_eff / 1000.0 * p_stc;
             if e_eff > 0.0 {
                 e_tot[1] += module_curve.at(e_eff, 25.0).mpp().2 * n_mod;
-                let dp = module_curve.at(e_eff, tc);
-                e_tot[2] += dp.mpp().2 * n_mod;
+                let unadjusted = module_curve.at(e_eff, tc);
+                let dp = unadjusted.scale_voltage(voltage_factor);
+                e_tot[2] += unadjusted.mpp().2 * n_mod;
                 ah.voc[k] = dp.voc();
                 ah.params[k] = Some(dp);
             }
@@ -740,8 +755,12 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     let heating = p.heating.as_ref().map(|config| {
         let (series, reference, result) = if let Some(tank) = &p.heat_store {
             let temperatures: Vec<_> = w.hours.iter().map(|h| h.temp_air).collect();
-            let run = flexible::thermal_store(config, tank, &temperatures, &local_hour, &load_w, &hourly.ac_w);
-            let reference = flexible::thermal_store(config, tank, &temperatures, &local_hour, &reference_load, &vec![0.0; n]);
+            let facades = tank.controls.as_ref().and_then(|controls| controls.space.as_ref())
+                .filter(|schedule| schedule.building_gains.is_some())
+                .map(|_| flexible::facade_irradiance(w, &sun, &local_hour, p.site.albedo.value));
+            let run = flexible::thermal_store_with_facades(config, tank, &temperatures, &local_hour, &load_w, &hourly.ac_w, facades.as_deref());
+            let reference = flexible::thermal_store_with_facades(config, tank, &temperatures, &local_hour, &reference_load,
+                &vec![0.0; n], facades.as_deref());
             heat_store = Some(run.result);
             hourly.heat_store_kwh = run.stored;
             hourly.tank_top_c = run.top_c;

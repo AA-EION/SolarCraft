@@ -6,7 +6,7 @@ use roxmltree::Node;
 use serde_json::{json, Map, Value};
 use solarcraft_engine::{calendar::local_time, SimResult};
 use solarcraft_model::{
-    demand::{HeatStore, Heating, HotWaterWeights, SpaceHeatSchedule, TankSanitation, ThermalControls, ThermalEmitter},
+    demand::{BuildingHeatGains, HeatStore, Heating, HotWaterWeights, SpaceHeatSchedule, TankSanitation, ThermalControls, ThermalEmitter},
     plant::Variant,
     workflow::SystemType,
     Project,
@@ -212,25 +212,34 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, weather: &Weather
         })
     }).transpose()?;
     let setpoint_c = field(node, "HeatingProfileTRoomNominal")? - 273.15;
+    let nominal_kw = field(node, "HeatingProfileHeatingLoadAtNominalTemperature")? / 1000.0;
+    let nominal_outside_c = field(node, "HeatingProfileTAmbNominal")? - 273.15;
+    let nominal_difference_c = setpoint_c - nominal_outside_c;
     let schedule = flag(node, &["StorageTankHasHeatingConnected"]).then(|| {
         let range = |start, end| number::<u32>(node, &[start]).zip(number::<u32>(node, &[end]))
             .map(|(start, end)| [start, end]).ok_or_else(|| e("PVSOL_IMPORT", "A thermal schedule interval is missing."));
+        let building_gains = number::<f64>(node, &["HeatingProfileAreaEffective"])
+            .filter(|area| area.is_finite() && *area > 0.0 && nominal_kw > 0.0 && nominal_difference_c > 0.0)
+            .map(|effective_floor_area_m2| BuildingHeatGains {
+                effective_floor_area_m2, design_temperature_difference_c: nominal_difference_c,
+            });
         Ok(SpaceHeatSchedule {
             threshold_c: field(node, "HeatingProfileTHeatingThreshold")? - 273.15,
             inactive_days: range("HeatingProfileHeatingInactiveStart", "HeatingProfileHeatingInactiveEnd")?,
             night_seconds: flag(node, &["HeatingProfileIsNightTemperatureLowered"])
                 .then(|| range("HeatingProfileLoweredNightStart", "HeatingProfileLoweredNightEnd")).transpose()?,
             night_setback_c: field(node, "HeatingProfileDeltaTRoomNight")?,
+            building_gains,
         })
     }).transpose()?;
-    let nominal_kw = field(node, "HeatingProfileHeatingLoadAtNominalTemperature")? / 1000.0;
-    let nominal_outside_c = field(node, "HeatingProfileTAmbNominal")? - 273.15;
     let annual_kwh = field(node, "HeatingProfileEHeatingTargetYear")? / 3_600_000.0;
-    let degree_hours = schedule.as_ref().map_or(0.0, |shape|
-        shape.degree_hours(setpoint_c, weather.hours.iter().map(|h| h.temp_air)).iter().sum());
-    let heat_loss_kw_per_k = if annual_kwh > 0.0 && degree_hours > 0.0 {
-        annual_kwh / degree_hours
-    } else { (nominal_kw / (setpoint_c - nominal_outside_c).max(1.0)).max(0.001) };
+    let has_building_gains = schedule.as_ref().is_some_and(|shape| shape.building_gains.is_some());
+    let nominal_loss = (nominal_kw / nominal_difference_c.max(1.0)).max(0.001);
+    let heat_loss_kw_per_k = if has_building_gains { nominal_kw / nominal_difference_c } else {
+        let degree_hours: f64 = schedule.as_ref().map_or(0.0, |shape|
+            shape.degree_hours(setpoint_c, weather.hours.iter().map(|h| h.temp_air)).iter().sum());
+        if annual_kwh > 0.0 && degree_hours > 0.0 { annual_kwh / degree_hours } else { nominal_loss }
+    };
     let daily_hot_water_kwh = if flag(node, &["StorageTankHasDrinkingWaterConnected"]) {
         field(node, "WarmWaterProfileYearlyEnergyDemand")? / (3_600_000.0 * 365.0)
     } else { 0.0 };
@@ -247,7 +256,7 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, weather: &Weather
         standing_loss_pct_per_day: -100.0 * (-24.0 * hourly_loss_rate).exp_m1(),
         daily_hot_water_kwh, hot_water_hour: 19, layers: None,
         controls: Some(ThermalControls { ambient_c, solar_target_c, boiler_target_c, boiler_limit_kw,
-            emitter, space: schedule, hot_water, sanitation }),
+            emitter, space: schedule, hot_water, sanitation, insulation_thickness_m: Some(insulation) }),
     };
     if !heating.valid() || !heat_store.valid() {
         return Err(e("PVSOL_IMPORT", "The archived heating or thermal tank settings are outside supported limits."));
@@ -255,7 +264,12 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, weather: &Weather
     project.workflow.system = SystemType::GridThermal;
     project.heating = Some(heating);
     project.heat_store = Some(heat_store);
-    warnings.push("Imported the solar heater, mixed tank, fuel boiler and saved hourly water profile. The space-heating schedule uses the saved annual demand and outdoor temperatures to estimate hourly demand.".into());
+    warnings.push("Imported the solar heater, mixed tank, fuel boiler and saved hourly water profile. Tank standing losses account for the temperature of the water and insulation.".into());
+    if has_building_gains {
+        warnings.push("Modeled space-heating demand uses the saved design heat load and effective floor area with solar gains on four vertical façades and daytime internal gains.".into());
+    } else if project.heat_store.as_ref().and_then(|tank| tank.controls.as_ref()).is_some_and(|controls| controls.space.is_some()) {
+        warnings.push("The space-heating schedule uses the saved annual demand and outdoor temperatures to estimate hourly demand.".into());
+    }
     Ok(())
 }
 
@@ -290,7 +304,7 @@ mod tests {
                 ambient_c: 20.0, solar_target_c: 70.0, boiler_target_c: 60.0, boiler_limit_kw: None,
                 emitter: ThermalEmitter::HeatPump { pv_only: false, cop_a_minus7: 2.5, cop_a2: 3.0,
                     cop_a7: 3.5, blocked_seconds: vec![] },
-                space: None, hot_water: None, sanitation: None,
+                space: None, hot_water: None, sanitation: None, insulation_thickness_m: None,
             }),
         });
         let active = project.design_snapshot();

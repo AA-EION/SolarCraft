@@ -99,7 +99,7 @@ pub fn bind(source: &str, dataset: &str, path: &str) -> Binding {
         ("pvinverters", "maxAC_Power") => bnd(Consumed, "energy::inverter_ac clipping", ""),
         ("pvinverters", "dC_PowerRating") => bnd(Consumed, "efficiency-curve load reference (pdc_nominal_w)", "load reference of the curve (DC vs AC rating)"),
         ("pvinverters", "maxDC_Power") => bnd(Consumed, "energy::inverter_ac DC power limit", ""),
-        ("pvinverters", "nominalVoltageDC" | "changeOfEtaDependentOnVoltage") => bnd(Consumed, "InverterSpec::efficiency_v: η − c·|V − Vnom|/100 at the operating voltage", "exact formula in the selected model"),
+        ("pvinverters", "nominalVoltageDC" | "changeOfEtaDependentOnVoltage") => bnd(Consumed, "InverterSpec::efficiency_v: η × (1 − |c × (V − Vnom)|/100) at the operating voltage", "relative derating from the nominal-voltage conversion curve"),
         ("pvinverters", "feedInFrom") => bnd(Consumed, "energy::inverter_ac start threshold (DC side)", "power side at each consumer"),
         ("pvinverters", "nightConsumption") => bnd(Consumed, "standby load when no DC input (dispatch) and ledger night step", ""),
         ("pvinverters", "standbyConsumption") => bnd(Displayed, "InverterSpec.standby_w", "which state uses it vs night consumption"),

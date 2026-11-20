@@ -29,6 +29,8 @@ pub fn add_array(path: &Path, name: Option<&str>) -> Result<Value> {
     array.name = Field::user(name);
     array.roof = None;
     array.tracking = None;
+    array.archived_module_mounting = None;
+    array.archived_diode_loss_fraction = None;
     array.site_shade = None;
     array.archived_shading = None;
     array.bifacial_rows = None;

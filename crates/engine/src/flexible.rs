@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use solarcraft_model::demand::{ChargeStrategy, Fleet, FleetGroup, HeatStore, Heating};
 
 mod thermal;
+pub(crate) use thermal::facade_irradiance;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct VehicleResult {
@@ -327,8 +328,14 @@ impl<'a> StoreState<'a> {
 }
 
 pub fn thermal_store(heat: &Heating, tank: &HeatStore, temp: &[f64], local_hour: &[u32], load: &[f64], pv: &[f32]) -> TankRun {
+    thermal_store_with_facades(heat, tank, temp, local_hour, load, pv, None)
+}
+
+pub(crate) fn thermal_store_with_facades(heat: &Heating, tank: &HeatStore, temp: &[f64], local_hour: &[u32], load: &[f64],
+    pv: &[f32], facades: Option<&[[f64; 4]]>) -> TankRun
+{
     if let Some(controls) = &tank.controls {
-        return thermal::mixed_tank(heat, tank, controls, temp, local_hour, load, pv);
+        return thermal::mixed_tank(heat, tank, controls, temp, local_hour, load, pv, facades);
     }
     let n = local_hour.len();
     let mut run = TankRun { demand: Default::default(), result: Default::default(), electrical: vec![0.0; n], stored: vec![0.0; n],
