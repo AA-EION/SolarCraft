@@ -369,6 +369,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             warnings.push(Note { code: "ARCHIVED_3D_SHADING".into(), subject: a.name.value.clone(), value: 0.0,
                 text: treatment.into() });
         }
+        let site_shade = a.site_shade.as_ref().filter(|shade| archive.is_none()
+            && (!w.horizon_applied || matches!(shade, solarcraft_model::horizon::SiteShade::Uniform { .. })));
+        let fixed_site_diffuse = site_shade.filter(|_| a.tracking.is_none())
+            .map(|shade| shade.isotropic_transmission(a.tilt.value, a.azimuth.value));
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
             let sp = &sun[k];
@@ -398,6 +402,14 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let mut directional = poa.direct;
             let mut sky_s = poa.sky_diffuse * diff_f;
             let mut ground = poa.ground_diffuse;
+            if let Some(site) = site_shade {
+                let beam = site.directional_transmission(sp.apparent_elevation, sp.azimuth);
+                let sky = fixed_site_diffuse.unwrap_or_else(|| site.isotropic_transmission(tilt, surface_azimuth));
+                let circumsolar = irr::directional_sky(model, &geo, &comp).min(poa.sky_diffuse);
+                directional *= beam;
+                sky_s = ((poa.sky_diffuse - circumsolar) * sky + circumsolar * beam) * diff_f;
+                ground *= sky;
+            }
             let mut archived_light = None;
             let soiling = f(l.soiling_pct.value);
             let (rear_poa, rear_effective) = if let Some(profile) = rear_profile {
@@ -448,7 +460,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let thermal_poa = poa.global + if modeled_rear { rear_poa } else { 0.0 };
             let tc = temperature::faiman(thermal_poa, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             if let Some(shaded) = &mut ah.shaded {
-                shaded.hours[k] = partial_shading::Light { direct: poa.direct * beam_iam * soiling,
+                shaded.hours[k] = partial_shading::Light { direct: directional * beam_iam * soiling,
                     diffuse: diffuse_iam * soiling + rear_effective, temperature: tc };
             }
             if let (Some(shaded), Some(light)) = (&mut ah.archived, archived_light) {

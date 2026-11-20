@@ -22,6 +22,16 @@ pub fn module_voltages(m: &crate::equipment::ModuleSpec, t_cell: f64) -> (f64, f
     }
 }
 
+/// Sizing at an explicit datasheet test point uses the published Voc slope.
+/// With no such test point, use the normal native design assumption.
+pub fn cold_open_circuit_voltage(m: &crate::equipment::ModuleSpec, temperature_c: Option<f64>) -> f64 {
+    let voc = temperature_c.map_or_else(
+        || module_voltages(m, T_CELL_MIN).0,
+        |temperature| m.v_oc + m.beta_voc * (temperature - 25.0),
+    );
+    voc * (1.0 + m.voc_initial_increase.unwrap_or(0.0))
+}
+
 pub fn derive(p: &mut Project) {
     // Mounting default: rooftop for small systems, open rack for large ones.
     let total_kwp: f64 = p.arrays.iter().map(|a| a.target_kwp.value).sum();
@@ -77,12 +87,12 @@ pub fn derive(p: &mut Project) {
         // Strings per length: round to the target without a roof; never exceed the roof with one.
         let strings_for = |n: u32| -> u32 { if roof_cap.is_some() { (modules_total / n).max(1) } else { ((modules_total as f64 / n as f64).round() as u32).max(1) } };
         if !a.modules_per_string.is_user() {
-            let (voc_cold, _) = module_voltages(&module, T_CELL_MIN);
+            let voc_cold = cold_open_circuit_voltage(&module, p.simulation.cold_voltage_temperature_c);
             let (_, vmp_hot) = module_voltages(&module, T_CELL_MAX);
             // Limit: the inverter's DC maximum and the module's maximum system voltage, with the
             // module's initial (pre-stabilisation) Voc increase.
             let v_lim = module.max_system_voltage_v.map_or(inv.v_dc_max, |m| m.min(inv.v_dc_max));
-            let n_max = (v_lim / (voc_cold * (1.0 + module.voc_initial_increase.unwrap_or(0.0)))).floor().max(1.0) as u32;
+            let n_max = (v_lim / voc_cold).floor().max(1.0) as u32;
             let n_min = (inv.mppt_v_min / vmp_hot).ceil().max(1.0) as u32;
             // String capacity of the inverter(s): MPPTs × parallel strings per MPPT.
             let per_mppt = (inv.i_max_per_mppt / module.i_sc).floor().max(1.0) as u32;

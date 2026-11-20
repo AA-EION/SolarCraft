@@ -319,6 +319,10 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
             (tr(l,"Standing loss","Pérdida en reposo","Stillstandsverlust","Perda em repouso"), store.standing_loss_kwh),
             (tr(l,"Hot water demand","Demanda de agua caliente","Warmwasserbedarf","Demanda de água quente"), store.hot_water_kwh),
         ].into_iter().map(|(label,value)| vec![label, format!("{} kWh", n(value,1))]).collect();
+        if let Some(boiler) = store.boiler_heat_kwh {
+            rows.push(vec![tr(l,"Boiler heat supplied","Calor aportado por la caldera","Vom Kessel gelieferte Wärme","Calor fornecido pela caldeira"),
+                format!("{} kWh", n(boiler,1))]);
+        }
         if let (Some(top), Some(bottom)) = (store.end_top_c, store.end_bottom_c) {
             rows.push(vec![tr(l,"Final upper / lower layer","Capas superior e inferior al cierre","Obere und untere Schicht am Ende","Camadas superior e inferior no final"),
                 format!("{} / {} °C", n(top,1), n(bottom,1))]);

@@ -37,7 +37,9 @@ fn archive_with(path: &Path, storage_enabled: bool, catalog_coupling: Option<i32
           <Straenge><ModulfeldId>area</ModulfeldId><AnzahlInReihe>3</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings></Straenge>
           <Straenge><ModulfeldId>area</ModulfeldId><AnzahlInReihe>4</AnzahlInReihe><AnzahlStrings>1</AnzahlStrings></Straenge>
         </PolyStringVerschaltung></ModulfeldTeil><MPPListe>0</MPPListe></MPPListe>
-      </WRObj></Verschaltung></Wechselrichter>
+      </WRObj></Verschaltung><Verschaltungsgrenzen><TLeerU><Value>-17</Value></TLeerU>
+        <GLeerU><Value>1000</Value></GLeerU><NEC_Temperatures>false</NEC_Temperatures>
+      </Verschaltungsgrenzen></Wechselrichter>
     </PVData>"#;
     let mut xml = String::from_utf8(xml.to_vec()).unwrap();
     if storage_enabled {
@@ -112,6 +114,11 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     assert!(!destination.exists());
     call("import_pvsol", json!({"source": source,"file": destination}));
     let reopened = app::get_project(&destination).unwrap();
+    assert_eq!(reopened.simulation.cold_voltage_temperature_c, Some(-17.0));
+    let mut underrated = reopened.clone();
+    underrated.library.modules[0].max_system_voltage_v = Some(305.0);
+    assert!(solarcraft_model::validate::validate(&underrated).iter().any(|i| i.code == "MODULE_SYSTEM_VOLTAGE"
+        && i.severity == solarcraft_model::validate::Severity::Error && i.message.contains("308 V at -17 °C")));
     assert!(reopened.storage.is_none());
     assert!(reopened.library.inverters.iter().all(|i| i.battery_port.is_none()));
     assert_eq!(reopened.site.longitude.value, -74.1);

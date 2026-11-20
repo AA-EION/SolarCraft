@@ -168,6 +168,105 @@ pub struct HeatStore {
     pub hot_water_hour: u32,
     #[serde(default)]
     pub layers: Option<TankLayers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<ThermalControls>,
+}
+
+/// Mixed tank with a separate combustion boiler and a solar electric heater.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThermalControls {
+    pub ambient_c: f64,
+    pub solar_target_c: f64,
+    pub boiler_target_c: f64,
+    pub boiler_limit_kw: Option<f64>,
+    pub emitter: ThermalEmitter,
+    pub space: Option<SpaceHeatSchedule>,
+    pub hot_water: Option<HotWaterWeights>,
+    pub sanitation: Option<TankSanitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ThermalEmitter {
+    Resistance { modulating: bool, steps_kw: Vec<f64> },
+    HeatPump { pv_only: bool, cop_a_minus7: f64, cop_a2: f64, cop_a7: f64, blocked_seconds: Vec<[u32; 2]> },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceHeatSchedule {
+    pub threshold_c: f64,
+    /// Zero-based days of year, start included and end excluded.
+    pub inactive_days: [u32; 2],
+    pub night_seconds: Option<[u32; 2]>,
+    pub night_setback_c: f64,
+}
+
+impl SpaceHeatSchedule {
+    pub fn degree_hours(&self, setpoint_c: f64, temperatures: impl IntoIterator<Item = f64>) -> Vec<f64> {
+        let mut recent = [0.0; 6];
+        temperatures.into_iter().enumerate().map(|(h, temperature)| {
+            recent[h % 6] = temperature;
+            let count = (h + 1).min(recent.len());
+            let average = recent[..count].iter().sum::<f64>() / count as f64;
+            if average >= self.threshold_c || in_window(h as u32 / 24, self.inactive_days) { return 0.0; }
+            let is_night = self.night_seconds.is_some_and(|range| in_window(h as u32 % 24 * 3600, range));
+            let setback = if is_night { self.night_setback_c } else { 0.0 };
+            (setpoint_c - setback - temperature).max(0.0)
+        }).collect()
+    }
+
+    fn valid(&self) -> bool {
+        (-50.0..=50.0).contains(&self.threshold_c) && self.inactive_days.iter().all(|&d| d <= 365)
+            && self.night_seconds.is_none_or(|r| r.iter().all(|&s| s <= 86400))
+            && (0.0..=30.0).contains(&self.night_setback_c)
+    }
+}
+
+fn in_window(position: u32, [start, end]: [u32; 2]) -> bool {
+    if start <= end { start <= position && position < end } else { position >= start || position < end }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotWaterWeights {
+    pub month: [f64; 12],
+    pub weekday: [f64; 7],
+    /// Monday through Sunday, each with 24 local standard-time weights.
+    pub hour: [[f64; 24]; 7],
+}
+
+impl HotWaterWeights {
+    fn valid(&self) -> bool {
+        let nonzero = |v: &[f64]| v.iter().all(|x| (0.0..=1e8).contains(x)) && v.iter().any(|&x| x > 0.0);
+        nonzero(&self.month) && nonzero(&self.weekday)
+            && self.hour.iter().zip(self.weekday).all(|(h, w)| w == 0.0 || nonzero(h))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TankSanitation {
+    pub target_c: f64,
+    pub start_second: u32,
+    pub interval_seconds: u32,
+}
+
+impl ThermalControls {
+    fn valid(&self) -> bool {
+        let emitter = match &self.emitter {
+            ThermalEmitter::Resistance { steps_kw, .. } => !steps_kw.is_empty() && steps_kw.len() <= 24
+                && steps_kw.iter().all(|v| (0.01..=10_000.0).contains(v)),
+            ThermalEmitter::HeatPump { cop_a_minus7, cop_a2, cop_a7, blocked_seconds, .. } =>
+                [cop_a_minus7, cop_a2, cop_a7].into_iter().all(|cop| (1.0..=12.0).contains(cop))
+                    && blocked_seconds.len() <= 3 && blocked_seconds.iter().flatten().all(|&s| s <= 86400),
+        };
+        (0.0..=45.0).contains(&self.ambient_c) && (self.ambient_c + 5.0..=95.0).contains(&self.solar_target_c)
+            && (self.ambient_c..=self.solar_target_c).contains(&self.boiler_target_c)
+            && self.boiler_limit_kw.is_none_or(|kw| (0.0..=10_000.0).contains(&kw))
+            && self.space.as_ref().is_none_or(SpaceHeatSchedule::valid)
+            && self.hot_water.as_ref().is_none_or(HotWaterWeights::valid)
+            && self.sanitation.is_none_or(|s| (self.boiler_target_c..=self.solar_target_c).contains(&s.target_c)
+                && s.start_second < s.interval_seconds && (3600..=365 * 86400).contains(&s.interval_seconds))
+            && emitter
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +296,7 @@ impl HeatStore {
             && (0.0..100.0).contains(&self.standing_loss_pct_per_day)
             && (0.0..=10_000.0).contains(&self.daily_hot_water_kwh) && self.hot_water_hour < 24
             && self.layers.as_ref().is_none_or(TankLayers::valid)
+            && self.controls.as_ref().is_none_or(|c| self.layers.is_none() && c.valid())
     }
 }
 

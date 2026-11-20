@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Design validation. Each issue has a stable code, severity and field pointer
 //! so the UI, CLI and MCP report the same thing.
-use crate::derive::{module_voltages, T_CELL_MAX, T_CELL_MIN};
+use crate::derive::{cold_open_circuit_voltage, module_voltages, T_CELL_MAX, T_CELL_MIN};
 use crate::Project;
 use serde::Serialize;
 
@@ -24,12 +24,19 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
     if !(-180.0..=180.0).contains(&p.site.longitude.value) { push("SITE_LON_RANGE", Severity::Error, "/site/longitude".into(), "Longitude must be between −180 and 180°.".into()); }
     if !(0.0..=1.0).contains(&p.site.albedo.value) { push("SITE_ALBEDO_RANGE", Severity::Error, "/site/albedo".into(), "Albedo must be between 0 and 1.".into()); }
     if p.weather.is_none() { push("WEATHER_MISSING", Severity::Error, "/weather".into(), "No weather data. Fetch PVGIS data or import a weather file.".into()); }
+    if p.simulation.cold_voltage_temperature_c.is_some_and(|t| !(-100.0..=25.0).contains(&t)) {
+        push("COLD_VOLTAGE_TEMPERATURE", Severity::Error, "/simulation/cold_voltage_temperature_c".into(),
+            "Cold voltage test temperature must be between −100 and 25 °C.".into());
+    }
     let archived_arrays = p.arrays.iter().any(|a| a.archived_shading.is_some());
     let archived_counts = archived_arrays.then(|| crate::derive::modules_by_array(&crate::derive::electrical(p)));
     for (i, a) in p.arrays.iter().enumerate() {
         let base = format!("/arrays/{i}");
         if !(0.0..=90.0).contains(&a.tilt.value) { push("ARRAY_TILT_RANGE", Severity::Error, format!("{base}/tilt"), "Tilt must be between 0 and 90°.".into()); }
         if !(0.0..360.0).contains(&a.azimuth.value) { push("ARRAY_AZIMUTH_RANGE", Severity::Error, format!("{base}/azimuth"), "Azimuth must be in [0, 360)°, clockwise from north.".into()); }
+        if a.site_shade.as_ref().is_some_and(|shade| !shade.valid()) {
+            push("ARRAY_SITE_SHADE", Severity::Error, format!("{base}/site_shade"), "Check the uniform shading loss or the 360 horizon elevations.".into());
+        }
         if let Some(tracker) = a.tracking {
             if !tracker.valid() {
                 push("ARRAY_TRACKING", Severity::Error, format!("{base}/tracking"), "Check the tracker axis, travel and ground coverage values.".into());
@@ -37,6 +44,10 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
             if a.roof.is_some() || p.scene.as_ref().is_some_and(|scene| scene.fields.iter().any(|field| field.array_id.as_deref() == Some(a.id.as_str()))) {
                 push("TRACKER_STATIC_GEOMETRY", Severity::Warning, format!("{base}/tracking"), "The tracker moves during simulation. Fixed roof and scene shading are skipped for this array.".into());
             }
+        }
+        if a.site_shade.as_ref().is_some_and(|shade| !shade.valid()) {
+            push("SITE_SHADE_INVALID", Severity::Error, format!("{base}/site_shade"),
+                "Site shading needs a loss fraction between zero and one or 360 horizon angles between 0 and 90°.".into());
         }
         if let Some(rows) = a.bifacial_rows {
             if !rows.valid(a.tilt.value) {
@@ -121,6 +132,7 @@ type Push<'a> = dyn FnMut(&'static str, Severity, String, String) + 'a;
 /// Checks on the resolved inverter/MPPT stringing (manual or derived).
 fn electrical_issues(p: &Project, push: &mut Push) {
     let e = crate::derive::electrical(p);
+    let test_temperature = p.simulation.cold_voltage_temperature_c.unwrap_or(T_CELL_MIN);
     let manual = p.electrical.manual && !p.electrical.inverters.is_empty();
     let base_of = |u: usize| if manual { format!("/electrical/inverters/{u}") } else { "/arrays".to_string() };
     if e.inverters.is_empty() && !p.arrays.is_empty() { push("INVERTER_MISSING", Severity::Error, "/arrays/0/inverter_id".into(), "No inverter selected.".into()); }
@@ -144,9 +156,7 @@ fn electrical_issues(p: &Project, push: &mut Push) {
                 let Some(m) = p.library.module(&a.module_id.value) else { continue };
                 if g.modules_per_string == 0 || g.strings == 0 { push("STRING_EMPTY", Severity::Error, mp.clone(), format!("{lbl}: a string group has zero modules or strings.")); continue; }
                 let n = g.modules_per_string as f64;
-                let (voc_cold0, _) = module_voltages(m, T_CELL_MIN);
-                // Initial (pre-stabilisation) Voc increase applies to the configuration check.
-                let voc_cold = voc_cold0 * (1.0 + m.voc_initial_increase.unwrap_or(0.0));
+                let voc_cold = cold_open_circuit_voltage(m, p.simulation.cold_voltage_temperature_c);
                 let (_, vmp_hot) = module_voltages(m, T_CELL_MAX);
                 let (_, vmp_cold) = module_voltages(m, T_CELL_MIN);
                 if m.requires_transformer_inverter && inv.transformer == Some(false) { push("MODULE_NEEDS_TRANSFORMER", Severity::Error, mp.clone(), format!("{lbl}: {} {} may only be used with a transformer inverter; {} {} is transformerless.", m.manufacturer, m.model, inv.manufacturer, inv.model)); }
@@ -175,10 +185,10 @@ fn electrical_issues(p: &Project, push: &mut Push) {
                 let count: u32 = chain.iter().map(|&i| groups[i].modules_per_string).sum();
                 lens.push(count);
                 if let Some(vmax) = series.iter().filter_map(|item| item.3).reduce(f64::min).filter(|&vmax| voc > vmax) {
-                    push("MODULE_SYSTEM_VOLTAGE", Severity::Error, mp.clone(), format!("{lbl}: string Voc {voc:.0} V at {T_CELL_MIN} °C exceeds the module's maximum system voltage {vmax:.0} V."));
+                    push("MODULE_SYSTEM_VOLTAGE", Severity::Error, mp.clone(), format!("{lbl}: string Voc {voc:.0} V at {test_temperature} °C exceeds the module's maximum system voltage {vmax:.0} V."));
                 }
                 if voc > inv.v_dc_max {
-                    push("STRING_VOC_MAX", Severity::Error, mp.clone(), format!("{lbl}: {count} modules in series reach Voc {voc:.0} V at {T_CELL_MIN} °C, above the inverter maximum {:.0} V.", inv.v_dc_max));
+                    push("STRING_VOC_MAX", Severity::Error, mp.clone(), format!("{lbl}: {count} modules in series reach Voc {voc:.0} V at {test_temperature} °C, above the inverter maximum {:.0} V.", inv.v_dc_max));
                 }
                 let regular = chain.iter().all(|&i| groups[i].optimizer.is_none());
                 if regular && hot < inp.v_min { push("STRING_VMP_MIN", Severity::Warning, mp.clone(), format!("{lbl}: string Vmp at {T_CELL_MAX} °C is {hot:.0} V, below the MPPT minimum {:.0} V: the simulation shows the loss on hot days.", inp.v_min)); }

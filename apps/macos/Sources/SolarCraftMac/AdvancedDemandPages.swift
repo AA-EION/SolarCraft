@@ -174,19 +174,24 @@ struct ThermalStoreControls: View {
         .init("hot_water_hour","tank_dhw_hour",19,whole:true),
     ]
     var body: some View {
+        let controls = m.section("heat_store")["controls"] as? JSONDict
         DisclosureGroup(m.t("tank")) {
             Text(m.t("tank_hint")).foregroundStyle(.secondary)
             ForEach(specs) { s in NumField(label:m.t(s.label), value:s.field($fields)) }
-            DisclosureGroup(m.t("tank_layers")) {
-                Toggle(m.t("tank_layers"), isOn: $layered)
-                if layered {
-                    ForEach(layerSpecs) { field in NumField(label:m.t(field.label), value:field.field($layers)) }
+            if controls == nil {
+                DisclosureGroup(m.t("tank_layers")) {
+                    Toggle(m.t("tank_layers"), isOn: $layered)
+                    if layered {
+                        ForEach(layerSpecs) { field in NumField(label:m.t(field.label), value:field.field($layers)) }
+                    }
                 }
             }
             HStack {
                 Button(m.t("apply")) {
                     guard var value = payload(specs, fields) else { m.error = m.t("issues"); return }
-                    if layered {
+                    if let controls {
+                        value["controls"] = controls
+                    } else if layered {
                         guard let spec = payload(layerSpecs, layers) else { m.error = m.t("issues"); return }
                         value["layers"] = spec
                     }

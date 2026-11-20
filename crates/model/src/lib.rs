@@ -9,6 +9,7 @@
 pub mod derive;
 pub mod equipment;
 pub mod tracking;
+pub mod horizon;
 pub mod archived_shading;
 pub mod plant;
 pub mod validate;
@@ -118,6 +119,8 @@ pub struct Array {
     pub roof: Option<RoofLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracking: Option<tracking::Tracker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_shade: Option<horizon::SiteShade>,
     /// Hourly field-average losses carried in from a saved 3D calculation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_shading: Option<ArchivedShading>,
@@ -249,6 +252,10 @@ pub struct SimulationSettings {
     pub transposition: Field<TranspositionModel>,
     #[serde(default)]
     pub pv_model: PvModel,
+    /// Archived string-design cell temperature at 1000 W/m². At this
+    /// test point the electrical check uses the datasheet Voc coefficient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_voltage_temperature_c: Option<f64>,
     /// Faiman U0 (W/m²K) and U1 (W·s/m³K).
     pub faiman_u0: Field<f64>,
     pub faiman_u1: Field<f64>,
@@ -346,13 +353,13 @@ impl Project {
                 strings: Field::default(0),
                 inverter_id: Field::default(String::new()),
                 inverter_count: Field::default(1),
-                roof: None, tracking: None, archived_shading: None, bifacial_rows: None,
+                roof: None, tracking: None, site_shade: None, archived_shading: None, bifacial_rows: None,
             }],
             losses: Losses {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),
                 mismatch_pct: Field::default(1.0), dc_wiring_pct: Field::default(1.5), ac_wiring_pct: Field::default(0.5), availability_pct: Field::default(0.0),
             },
-            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
+            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), cold_voltage_temperature_c: None, faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],

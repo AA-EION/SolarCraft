@@ -168,6 +168,7 @@ public sealed partial class MainWindow
         var panel = new StackPanel { Spacing = 9 };
         panel.Children.Add(Note(T("tank_hint")));
         var current = _project?["heat_store"];
+        var controls = current?["controls"];
         var fields = MakeFields(panel, current, [
             ("capacity_kwh", "tank_capacity", 8, false), ("initial_kwh", "tank_initial", 0, false),
             ("charge_kw", "tank_charge", 3, false), ("discharge_kw", "tank_discharge", 3, false),
@@ -189,12 +190,14 @@ public sealed partial class MainWindow
         layered.Checked += (_, _) => ShowLayers();
         layered.Unchecked += (_, _) => ShowLayers();
         ShowLayers();
-        panel.Children.Add(new Expander { Header = T("tank_layers"), Content = layerPanel, IsExpanded = layers is JsonObject });
+        if (controls is null)
+            panel.Children.Add(new Expander { Header = T("tank_layers"), Content = layerPanel, IsExpanded = layers is JsonObject });
         var save = Btn(T("apply"), () =>
         {
             if (!Try(() => {
                 var value = ReadFields(fields);
-                if (layered.IsChecked == true) value["layers"] = ReadFields(layerFields);
+                if (controls is not null) value["controls"] = controls.DeepClone();
+                else if (layered.IsChecked == true) value["layers"] = ReadFields(layerFields);
                 Api.Invoke("set_section", new { file = _file, section = "heat_store", value });
             })) return;
             Reload();

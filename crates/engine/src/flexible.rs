@@ -3,6 +3,8 @@ use crate::calendar;
 use serde::{Deserialize, Serialize};
 use solarcraft_model::demand::{ChargeStrategy, Fleet, FleetGroup, HeatStore, Heating};
 
+mod thermal;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct VehicleResult {
     pub name: String,
@@ -221,6 +223,8 @@ pub struct TankResult {
     pub end_bottom_c: Option<f64>,
     #[serde(default)]
     pub tank_to_hot_water_kwh: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boiler_heat_kwh: Option<f64>,
 }
 
 pub struct TankRun {
@@ -320,6 +324,9 @@ impl<'a> StoreState<'a> {
 }
 
 pub fn thermal_store(heat: &Heating, tank: &HeatStore, temp: &[f64], local_hour: &[u32], load: &[f64], pv: &[f32]) -> TankRun {
+    if let Some(controls) = &tank.controls {
+        return thermal::mixed_tank(heat, tank, controls, temp, local_hour, load, pv);
+    }
     let n = local_hour.len();
     let mut run = TankRun { demand: Default::default(), result: Default::default(), electrical: vec![0.0; n], stored: vec![0.0; n],
         top_c: vec![], bottom_c: vec![] };
@@ -381,7 +388,7 @@ mod tests {
         let tank = HeatStore {
             capacity_kwh: 10.0, initial_kwh: 6.0, charge_kw: 3.0, discharge_kw: 5.0, standing_loss_pct_per_day: 0.0,
             daily_hot_water_kwh: 4.0, hot_water_hour: 19,
-            layers: Some(solarcraft_model::demand::TankLayers {
+            controls: None, layers: Some(solarcraft_model::demand::TankLayers {
                 top_fraction: 0.4, ambient_c: 20.0, target_c: 65.0, space_supply_c: 32.0, hot_water_supply_c: 50.0,
                 conductance_w_per_k: 20.0,
             }),

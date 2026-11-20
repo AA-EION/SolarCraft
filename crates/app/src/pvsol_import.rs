@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
 mod archived_photo;
+mod diffuse;
 mod grid_storage;
+mod horizon;
 mod archived_routes;
 mod archived_scene;
 mod archived_shade;
 mod island;
+mod thermal;
+mod wbv_timing;
 
 use crate::{e, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -206,8 +210,8 @@ fn read(source: &Path) -> Result<Imported> {
     let db = member(&mut archive, "DB.json", 16 * 1024 * 1024)?.ok_or_else(|| bad("An embedded DB.json is required."))?;
     let db: Value = serde_json::from_slice(strip_bom(&db)).map_err(|error| e("PVSOL_IMPORT", error))?;
     let mut warnings = vec![
-        "The imported copy replays the editable PV design. EV and heat pump controls, financial settings, and unsupported layout assets require separate migration.".into(),
-        "SolarCraft uses one-hour intervals on a reference non-leap standard-time calendar and estimates irradiance at the midpoint. Module temperature and electrical models may differ from the archived run.".into(),
+        "The imported copy replays the editable PV design. EV workflows, financial settings, and unsupported layout assets require separate migration.".into(),
+        "SolarCraft uses one-hour intervals on a reference non-leap standard-time calendar. Module temperature and electrical models may differ from the archived run.".into(),
     ];
     let sim_xml = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?;
     let (mut saved, monthly_rear) = sim_xml.as_deref().map(read_saved_xml).transpose()?.unwrap_or_default();
@@ -256,12 +260,23 @@ fn read(source: &Path) -> Result<Imported> {
     } else { return Err(bad("Select a project with one identifiable embedded WBV weather file.")); };
     let wbv = member(&mut archive, &weather_member, 256 * 1024)?.ok_or_else(|| bad("The embedded WBV member is missing."))?;
     let spectral = number::<f64>(root, &["Meteo", "VerlusteDurchSpektrumsAbweichung"]).unwrap_or(0.0);
-    let (weather, timezone, weather_diffuse) = read_weather(&wbv, &weather_member, diffuse.as_deref(), spectral)?;
-    if diffuse.is_none() || weather_diffuse != "saved_hourly_diffuse" {
-        warnings.push("WBV supplies global irradiance only. SolarCraft estimates diffuse and direct irradiance with Erbs.".into());
-    } else {
-        warnings.push("The diffuse input comes from the saved hourly series with the reference spectral factor removed. Direct normal irradiance is reconstructed using SolarCraft's midpoint solar position.".into());
+    let tracking = path_node(root, &["PVModule"]).into_iter().flat_map(|node| children(node, "Modulfelder"))
+        .any(|field| number::<u32>(field, &["PVTracking", "KindOfTracking"]).is_some_and(|mode| (1..=4).contains(&mode)));
+    let mut diffuse_model = diffuse::Model::for_saved(value(root, &["Meteo", "DiffuseModelType"]), tracking);
+    if value(root, &["Meteo", "IsIrradianceInOneMinuteResolution"])
+        .is_some_and(|v| v.eq_ignore_ascii_case("false") || v == "0") {
+        diffuse_model = diffuse_model.hourly_hofmann();
     }
+    let midpoint_default = tracking || system == "OnGridPVWithThermal";
+    let (weather, timezone, weather_diffuse) = read_weather(&wbv, &weather_member, diffuse.as_deref(), spectral, diffuse_model, midpoint_default)?;
+    warnings.push(match weather_diffuse.as_str() {
+        "saved_hourly_diffuse" => "The diffuse input is the saved hourly series with the reference spectral factor removed.",
+        "reindl_reduced_from_wbv_global" => "SolarCraft reconstructs the archived reduced Reindl irradiance split from WBV global irradiance.",
+        "erbs_fallback_for_tracked_reindl" => "The tracked reduced Reindl result remains unverified. SolarCraft uses Erbs with the archived tracker geometry.",
+        "hofmann_hourly_base_from_wbv_global" => "SolarCraft uses the hourly Hofmann base irradiance split with neutral climatology factors.",
+        "erbs_fallback_for_hofmann" => "The archived Hofmann irradiance split is unavailable and SolarCraft estimates it with Erbs.",
+        _ => "WBV supplies global irradiance only. SolarCraft estimates diffuse and direct irradiance with Erbs.",
+    }.into());
     if spectral != 0.0 {
         warnings.push(format!("PV*SOL's separate spectral correction ({:.3}%) is not mapped to the SolarCraft PV engine.", spectral * 100.0));
     }
@@ -269,6 +284,15 @@ fn read(source: &Path) -> Result<Imported> {
         .unwrap_or_else(|| source_name.trim_end_matches(".pvprj"));
     let mut project = Project::new(&format!("pvsol-{}", &sha[..20]), title, weather.latitude, weather.longitude);
     project.mode = DesignMode::Detailed;
+    if let Some(limits) = path_node(root, &["Wechselrichter", "Verschaltungsgrenzen"]) {
+        if !flag(limits, &["NEC_Temperatures"]) && number::<f64>(limits, &["GLeerU"]) == Some(1000.0) {
+            project.simulation.cold_voltage_temperature_c = number::<f64>(limits, &["TLeerU"])
+                .filter(|t| (-100.0..=25.0).contains(t));
+        }
+    }
+    if let Some(temperature) = project.simulation.cold_voltage_temperature_c {
+        warnings.push(format!("The cold string voltage check uses the archived {temperature} °C test point and the module datasheet coefficient at 1000 W/m²."));
+    }
     project.site.name = Field::user(weather_member.trim_end_matches(".wbv").to_owned());
     project.site.elevation = Field::user(weather.elevation);
     project.site.utc_offset_h = Some(Field::user(timezone));
@@ -391,6 +415,11 @@ fn read(source: &Path) -> Result<Imported> {
     derive::derive(&mut project);
     if let Some(temperatures) = saved_temperatures {
         calibrate_module_temperature(&mut project, &weather, &weather_hash, temperatures, &mut warnings);
+    }
+    if system == "OnGridPVWithThermal" {
+        if let Err(error) = thermal::apply(&mut project, root, &weather, &mut warnings) {
+            warnings.push(format!("The saved thermal system could not be imported: {}", error.message));
+        }
     }
     let reference = Reference { source_name: source_name.to_owned(), sha256: sha, format, system_type: system.to_owned(),
         weather_member, weather_diffuse, load_source, load_annual_kwh, installed_modules,
@@ -521,9 +550,6 @@ fn apply_field_settings(project: &mut Project, root: Node<'_, '_>, warnings: &mu
     } else if !lengths.is_empty() {
         warnings.push("The source's DC cable lengths are not mapped; SolarCraft keeps its default DC wiring loss.".into());
     }
-    if fields.iter().any(|&field| flag(field, &["Verluste", "VerschattungsObjekt", "IsHorizon"])) {
-        warnings.push("The source contains a 2D horizon mask, which is not applied by the imported design.".into());
-    }
 }
 
 fn read_project_load(root: Node<'_, '_>) -> Result<Option<(Vec<f64>, u32)>> {
@@ -587,8 +613,8 @@ fn read_load_values(encoded: &str, minutes: u32, count: usize) -> Result<Vec<f64
     }).collect::<Option<Vec<_>>>().ok_or_else(|| e("PVSOL_IMPORT", "The embedded load profile contains an invalid power reading."))
 }
 
-fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f64) -> Result<(Weather, f64, String)> {
-    use solarcraft_pv::{days_from_civil, irradiance::{dni_extra, erbs}, spa::{delta_t_estimate, solar_position, Observer}};
+fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f64, model: diffuse::Model, midpoint_default: bool) -> Result<(Weather, f64, String)> {
+    use solarcraft_pv::{days_from_civil, spa::{delta_t_estimate, solar_position, Observer}};
     const HEADER: usize = 2517;
     let error = |message| e("PVSOL_IMPORT", message);
     if bytes.len() != HEADER + HOURS * 12 || bytes.get(513..520) != Some(b"T;G;WGS") || bytes[512] != 7 {
@@ -607,33 +633,47 @@ fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f6
     let year = 2025;
     let start = days_from_civil(year, 1, 1) * 86400 - (tz * 3600.0).round() as i64;
     let observer = Observer::new(lat, lon, elevation);
-    let mut hours = Vec::with_capacity(HOURS);
-    for (index, row) in bytes[HEADER..].as_chunks::<12>().0.iter().enumerate() {
+    let delta_t = delta_t_estimate(year as f64);
+    let zeniths_at = |offset| (0..HOURS).map(|index| {
+        let instant = start + index as i64 * 3600 + offset;
+        solar_position(instant as f64, &observer, delta_t).zenith
+    }).collect::<Vec<_>>();
+    let samples: Vec<_> = bytes[HEADER..].as_chunks::<12>().0.iter().map(|row| {
         let at = |i| f64::from(f32::from_le_bytes(row[i..i + 4].try_into().unwrap()));
         let (temp_air, ghi, wind) = (at(0), at(4), at(8));
         if !(-100.0..=100.0).contains(&temp_air) || !(0.0..=1800.0).contains(&ghi) || !(0.0..=100.0).contains(&wind) {
             return Err(error("An embedded WBV weather row is missing or outside the supported range."));
         }
-        // Row k is centred on hour mark k:00 local standard time (the daily irradiance profile is
-        // symmetric about solar noon there), not on k:30. The calendar slot stays hour k.
+        Ok((temp_air, ghi, wind))
+    }).collect::<Result<_>>()?;
+    let hour_mark = zeniths_at(0);
+    let global: Vec<_> = samples.iter().map(|&(_, ghi, _)| ghi).collect();
+    let midpoint = wbv_timing::infer_midpoint(&global, &hour_mark).unwrap_or(midpoint_default);
+    let sun_offset = if midpoint { 1800 } else { 0 };
+    let zeniths = if midpoint { zeniths_at(sun_offset) } else { hour_mark };
+    let mut hours = Vec::with_capacity(HOURS);
+    for (index, (temp_air, ghi, wind)) in samples.into_iter().enumerate() {
         let unix_start = start + index as i64 * 3600;
-        let unix_mid = unix_start;
-        let sun = solar_position(unix_mid as f64, &observer, delta_t_estimate(year as f64));
+        let unix_mid = unix_start + sun_offset;
+        let zenith = zeniths[index];
         let (dni, dhi) = if let Some(saved) = diffuse {
-            let cosine = sun.zenith.to_radians().cos();
+            let cosine = zenith.to_radians().cos();
             let dhi = (saved[index] / (1.0 - spectral)).clamp(0.0, ghi);
             if cosine > 0.065 {
                 let dni = ((ghi - dhi) / cosine).min(1450.0);
                 (dni, ghi - dni * cosine)
             } else { (0.0, ghi) }
         } else {
-            erbs(ghi, sun.zenith, dni_extra((index / 24 + 1) as f64, 1366.1))
+            let adjacent_dark = index > 0 && index + 1 < HOURS
+                && (zeniths[index - 1] >= 90.0 || zeniths[index + 1] >= 90.0);
+            model.split_with_neighbors(ghi, zenith, (index / 24 + 1) as u32, adjacent_dark)
         };
         hours.push(Hour { unix_mid, unix_start: Some(unix_start), ghi, dni, dhi, temp_air, wind, pressure: observer.pressure * 100.0 });
     }
-    let basis = if diffuse.is_some() { "saved_hourly_diffuse" } else { "erbs_from_wbv_global" };
+    let basis = if diffuse.is_some() { "saved_hourly_diffuse" } else { model.source() };
+    let position = if midpoint { "sun_at_interval_midpoint" } else { "sun_at_hour_mark" };
     let provenance = Provenance { provider: "PV*SOL embedded WBV".into(), dataset: label.into(),
-        url: String::new(), retrieved_unix: 0, licence: "Imported from the supplied local project.".into(), notes: vec![basis.into()] };
+        url: String::new(), retrieved_unix: 0, licence: "Imported from the supplied local project.".into(), notes: vec![basis.into(), position.into()] };
     Ok((Weather { latitude: lat, longitude: lon, elevation, horizon_applied: false, provenance, hours }, tz, basis.into()))
 }
 
@@ -922,6 +962,10 @@ fn electrical(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: &str, 
             } else if flag(tracking, &["Backtracking"]) {
                 warnings.push(format!("{} uses SolarCraft's moving-row backtracking with the saved ground coverage ratio.", array.name.value));
             }
+        }
+        match horizon::read(node) {
+            Ok(shade) => array.site_shade = shade,
+            Err(reason) => warnings.push(format!("{}: {reason}", array.name.value)),
         }
         project.arrays.push(array);
     }
