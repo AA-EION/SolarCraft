@@ -1,15 +1,133 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Import the mixed storage tank, solar electricity heater and fuel boiler.
-use super::{children, flag, number, path_node, value};
+use super::{children, flag, number, path_node, value, Channel, HOURS, WS_PER_KWH};
 use crate::{e, Result};
 use roxmltree::Node;
+use serde_json::{json, Map, Value};
+use solarcraft_engine::{calendar::local_time, SimResult};
 use solarcraft_model::{
     demand::{HeatStore, Heating, HotWaterWeights, SpaceHeatSchedule, TankSanitation, ThermalControls, ThermalEmitter},
+    plant::Variant,
     workflow::SystemType,
     Project,
 };
 use solarcraft_weather::Weather;
+use std::collections::BTreeMap;
 use std::f64::consts::PI;
+
+const PUMP_ELECTRIC: &str = "heat_pump_electricity";
+const PUMP_SOLAR: &str = "heat_pump_direct_solar";
+const PUMP_HEAT: &str = "heat_pump_heat";
+const BOILER_HEAT: &str = "boiler_heat";
+const TANK_LOSSES: &str = "thermal_storage_losses";
+const ROD_ELECTRIC: &str = "heating_rod_electricity";
+
+pub(super) fn read_reference(root: Node<'_, '_>, saved: &mut BTreeMap<String, Channel>) {
+    let Some(thermal) = path_node(root, &["ThermalResult"]) else { return; };
+    for (channel, tag) in [
+        (PUMP_ELECTRIC, "HeatpumpElectricalEnergyConsumption"),
+        (PUMP_SOLAR, "HeatpumpElectricalSolarEnergyConsumption"),
+        (PUMP_HEAT, "HeatpumpThermalEnergyDelivery"),
+        (BOILER_HEAT, "BoilerEnergyDelivery"),
+        (TANK_LOSSES, "StorageLosses"),
+        (ROD_ELECTRIC, "EnergyUsedInHeatingRod"),
+    ] {
+        let Some(node) = path_node(thermal, &[tag]) else { continue; };
+        let energy = |n, path: &[&str]| number::<f64>(n, path)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .map(|v| v / WS_PER_KWH);
+        let annual_kwh = energy(node, &["YearlyValue"]);
+        let monthly_kwh = children(node, "MonthlyValues").map(|n| energy(n, &["value"]))
+            .collect::<Option<Vec<_>>>().filter(|months| months.len() == 12);
+        if annual_kwh.is_some() || monthly_kwh.is_some() {
+            saved.insert(channel.into(), Channel { annual_kwh, monthly_kwh, ..Default::default() });
+        }
+    }
+}
+
+pub(super) fn read_hourly_reference(hours: Option<Vec<f64>>, saved: &mut BTreeMap<String, Channel>) {
+    let Some(hours) = hours.filter(|hours| hours.len() == HOURS && hours.iter().all(|v| v.is_finite() && *v >= 0.0)
+        && hours.iter().any(|v| *v > 0.0)) else { return; };
+    let channel = saved.entry(PUMP_ELECTRIC.into()).or_default();
+    channel.hourly_kwh = Some(hours);
+    channel.hourly_source = Some("OecForeCast.json / HeatPumpElectricalConsumption".into());
+}
+
+pub(super) fn add_pv_surplus_variant(project: &mut Project, saved: &BTreeMap<String, Channel>, warnings: &mut Vec<String>) {
+    let Some((electric, solar)) = saved.get(PUMP_ELECTRIC).and_then(Channel::annual)
+        .zip(saved.get(PUMP_SOLAR).and_then(Channel::annual))
+        .filter(|(electric, solar)| *electric > 0.0 && *solar <= *electric && *solar / *electric >= 0.99)
+    else { return; };
+    let mut variant = project.clone();
+    let Some(controls) = variant.heat_store.as_mut().and_then(|tank| tank.controls.as_mut()) else { return; };
+    let ThermalEmitter::HeatPump { pv_only, .. } = &mut controls.emitter else { return; };
+    if *pv_only { return; }
+    *pv_only = true;
+    project.variants.push(Variant {
+        id: "var-1".into(),
+        name: "PV-surplus heat pump (sensitivity)".into(),
+        created_unix: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs() as i64),
+        design: variant.design_snapshot(),
+    });
+    warnings.push(format!("The project records Standard heat pump dispatch. Saved results attribute {:.2}% of pump electricity to direct PV. The PV-surplus heat pump variant tests that dispatch assumption and can be edited.", 100.0 * solar / electric));
+}
+
+pub(super) fn compare_reference(project: &Project, run: &SimResult, saved: &BTreeMap<String, Channel>, comparison: &mut Map<String, Value>) {
+    let Some(controls) = project.heat_store.as_ref().and_then(|tank| tank.controls.as_ref()) else { return; };
+    let (Some(heating), Some(tank)) = (&run.heating, &run.heat_store) else { return; };
+    let mut compare = |name: &str, modeled: f64, basis: &str, with_hours: bool| {
+        let Some(channel) = saved.get(name) else { return; };
+        let pvsol = channel.annual();
+        let delta = pvsol.map(|value| modeled - value);
+        let hours = with_hours.then(|| aligned_electricity(run)).flatten();
+        let monthly = hours.as_ref().zip(channel.monthly()).map(|(hours, reference)| {
+            let mut months = [0.0; 12];
+            for (hour, value) in hours.iter().enumerate() {
+                months[local_time(hour as u32).month as usize - 1] += value;
+            }
+            months.iter().zip(reference).enumerate().map(|(month, (actual, saved))| {
+                json!({"month":month + 1, "solarcraft_kwh":actual, "pvsol_kwh":saved, "delta_kwh":actual - saved})
+            }).collect::<Vec<_>>()
+        });
+        let hourly = hours.as_ref().zip(channel.hourly_kwh.as_ref().filter(|hours| hours.len() == HOURS)).map(|(hours, reference)| {
+            let differences = hours.iter().zip(reference).map(|(actual, saved)| actual - saved);
+            let mae = differences.clone().map(f64::abs).sum::<f64>() / HOURS as f64;
+            let rmse = (differences.map(|delta| delta * delta).sum::<f64>() / HOURS as f64).sqrt();
+            json!({"rows":HOURS, "mae_kwh":mae, "rmse_kwh":rmse, "source":channel.hourly_source,
+                "alignment":"ordered local standard-time hour from January 1"})
+        });
+        comparison.insert(name.into(), json!({"solarcraft_kwh":modeled, "pvsol_kwh":pvsol, "solarcraft_basis":basis,
+            "delta_kwh":delta, "delta_pct":delta.zip(pvsol.filter(|v| *v > 1e-9)).map(|(d, v)| d / v * 100.0),
+            "monthly":monthly, "hourly":hourly}));
+    };
+    match controls.emitter {
+        ThermalEmitter::HeatPump { pv_only, .. } => {
+            let basis = if pv_only { "heat pump electricity, limited to direct PV surplus" } else { "heat pump electricity, Standard dispatch" };
+            compare(PUMP_ELECTRIC, heating.pump_electric_kwh, basis, true);
+            compare(PUMP_HEAT, heating.pump_heat_kwh, "heat delivered by the heat pump", false);
+            if let Some(solar) = tank.direct_solar_electric_kwh {
+                compare(PUMP_SOLAR, solar, "pump electricity covered by concurrent PV after base load", false);
+            }
+        }
+        ThermalEmitter::Resistance { .. } => compare(ROD_ELECTRIC, heating.backup_kwh, "resistance heater electricity", true),
+    }
+    if let Some(boiler) = tank.boiler_heat_kwh {
+        compare(BOILER_HEAT, boiler, "heat delivered by the fuel boiler", false);
+    }
+    compare(TANK_LOSSES, tank.standing_loss_kwh, "thermal tank standing loss", false);
+}
+
+fn aligned_electricity(run: &SimResult) -> Option<Vec<f64>> {
+    if run.local_hour.len() != HOURS || run.hourly.heating_wh.len() != HOURS { return None; }
+    let mut ordered = vec![f64::NAN; HOURS];
+    for (&hour, &wh) in run.local_hour.iter().zip(&run.hourly.heating_wh) {
+        let slot = ordered.get_mut(hour as usize)?;
+        if !slot.is_nan() || !wh.is_finite() { return None; }
+        *slot = f64::from(wh) / 1000.0;
+    }
+    Some(ordered)
+}
 
 fn field(node: Node<'_, '_>, name: &str) -> Result<f64> {
     number::<f64>(node, &[name]).filter(|n| n.is_finite())
@@ -47,7 +165,10 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, weather: &Weather
             let cop_at_10c = field(node, "HeatPumpCOP_A10_W35")?;
             let pv_only = match number::<u32>(node, &["HeatPumpOperationMode"]) {
                 Some(0) => false,
-                Some(1) => true,
+                Some(1) => {
+                    warnings.push("The project records legacy PV-optimized heat pump dispatch. SolarCraft approximates it by limiting the pump to PV surplus.".into());
+                    true
+                }
                 _ => return Err(e("PVSOL_IMPORT", "The heat pump operation mode is unsupported.")),
             };
             let periods = if flag(node, &["HeatPumpHasSwitchOff"]) {
@@ -136,4 +257,53 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, weather: &Weather
     project.heat_store = Some(heat_store);
     warnings.push("Imported the solar heater, mixed tank, fuel boiler and saved hourly water profile. The space-heating schedule uses the saved annual demand and outdoor temperatures to estimate hourly demand.".into());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_solar_dispatch_keeps_standard_as_active_design() {
+        let archive = roxmltree::Document::parse(r#"
+            <Results><ThermalResult>
+                <HeatpumpElectricalEnergyConsumption>
+                    <YearlyValue>3600000000</YearlyValue>
+                </HeatpumpElectricalEnergyConsumption>
+                <HeatpumpElectricalSolarEnergyConsumption>
+                    <YearlyValue>3592800000</YearlyValue>
+                </HeatpumpElectricalSolarEnergyConsumption>
+            </ThermalResult></Results>
+        "#).unwrap();
+        let mut saved = BTreeMap::new();
+        read_reference(archive.root_element(), &mut saved);
+        read_hourly_reference(Some(vec![0.0; HOURS - 1]), &mut saved);
+        assert_eq!(saved[PUMP_ELECTRIC].annual(), Some(1000.0));
+        assert_eq!(saved[PUMP_SOLAR].annual(), Some(998.0));
+        assert!(saved[PUMP_ELECTRIC].hourly_kwh.is_none());
+
+        let mut project = Project::new("thermal-test", "Thermal test", 52.0, 13.0);
+        project.heat_store = Some(HeatStore {
+            capacity_kwh: 10.0, initial_kwh: 8.0, charge_kw: 6.0, discharge_kw: 10.0,
+            standing_loss_pct_per_day: 0.0, daily_hot_water_kwh: 3.0, hot_water_hour: 1, layers: None,
+            controls: Some(ThermalControls {
+                ambient_c: 20.0, solar_target_c: 70.0, boiler_target_c: 60.0, boiler_limit_kw: None,
+                emitter: ThermalEmitter::HeatPump { pv_only: false, cop_a_minus7: 2.5, cop_a2: 3.0,
+                    cop_a7: 3.5, blocked_seconds: vec![] },
+                space: None, hot_water: None, sanitation: None,
+            }),
+        });
+        let active = project.design_snapshot();
+        let mut warnings = Vec::new();
+        add_pv_surplus_variant(&mut project, &saved, &mut warnings);
+        assert_eq!(project.design_snapshot(), active);
+        assert_eq!(project.variants.len(), 1);
+        assert_eq!(warnings.len(), 1);
+        let variant = project.variants[0].design.clone();
+        project.apply_snapshot(&variant).unwrap();
+        assert!(matches!(
+            project.heat_store.unwrap().controls.unwrap().emitter,
+            ThermalEmitter::HeatPump { pv_only: true, .. },
+        ));
+    }
 }

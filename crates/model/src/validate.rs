@@ -24,6 +24,10 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
     if !(-180.0..=180.0).contains(&p.site.longitude.value) { push("SITE_LON_RANGE", Severity::Error, "/site/longitude".into(), "Longitude must be between −180 and 180°.".into()); }
     if !(0.0..=1.0).contains(&p.site.albedo.value) { push("SITE_ALBEDO_RANGE", Severity::Error, "/site/albedo".into(), "Albedo must be between 0 and 1.".into()); }
     if p.weather.is_none() { push("WEATHER_MISSING", Severity::Error, "/weather".into(), "No weather data. Fetch PVGIS data or import a weather file.".into()); }
+    if p.simulation.spectral_loss_fraction.is_some_and(|loss| !(0.0..1.0).contains(&loss)) {
+        push("SPECTRAL_LOSS", Severity::Error, "/simulation/spectral_loss_fraction".into(),
+            "Spectral irradiance loss must be at least zero and below 100%.".into());
+    }
     if p.simulation.cold_voltage_temperature_c.is_some_and(|t| !(-100.0..=25.0).contains(&t)) {
         push("COLD_VOLTAGE_TEMPERATURE", Severity::Error, "/simulation/cold_voltage_temperature_c".into(),
             "Cold voltage test temperature must be between −100 and 25 °C.".into());
@@ -34,9 +38,6 @@ pub fn validate_active(p: &Project) -> Vec<Issue> {
         let base = format!("/arrays/{i}");
         if !(0.0..=90.0).contains(&a.tilt.value) { push("ARRAY_TILT_RANGE", Severity::Error, format!("{base}/tilt"), "Tilt must be between 0 and 90°.".into()); }
         if !(0.0..360.0).contains(&a.azimuth.value) { push("ARRAY_AZIMUTH_RANGE", Severity::Error, format!("{base}/azimuth"), "Azimuth must be in [0, 360)°, clockwise from north.".into()); }
-        if a.site_shade.as_ref().is_some_and(|shade| !shade.valid()) {
-            push("ARRAY_SITE_SHADE", Severity::Error, format!("{base}/site_shade"), "Check the uniform shading loss or the 360 horizon elevations.".into());
-        }
         if let Some(tracker) = a.tracking {
             if !tracker.valid() {
                 push("ARRAY_TRACKING", Severity::Error, format!("{base}/tracking"), "Check the tracker axis, travel and ground coverage values.".into());

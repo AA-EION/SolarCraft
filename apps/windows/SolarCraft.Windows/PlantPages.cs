@@ -142,7 +142,7 @@ public sealed partial class MainWindow
             {
                 foreach (var (key, channel) in channels)
                     if (channel?["annual_kwh"] is not null)
-                        PvsolComparisonPanel.Children.Add(Note($"{T(key == "pv_dc" ? "pvsol_dc" : "pvsol_ac")} · {F(N(channel, "annual_kwh"), 2)} kWh"));
+                        PvsolComparisonPanel.Children.Add(Note($"{PvsolChannelName(key)} · {F(N(channel, "annual_kwh"), 2)} kWh"));
                 PvsolComparisonPanel.Children.Add(Note(T("pvsol_run_to_compare")));
             }
             return;
@@ -154,8 +154,10 @@ public sealed partial class MainWindow
             row?[key] is null ? "—" : F(N(row, key), digits);
         foreach (var (key, row) in comparison)
         {
-            var title = T(key == "pv_dc" ? "pvsol_dc" : "pvsol_ac");
+            var title = PvsolChannelName(key);
             var track = new StackPanel { Spacing = 6 };
+            if (row?["solarcraft_basis"] is JsonValue basis)
+                track.Children.Add(Note(basis.GetValue<string>()));
             var months = Arr(row?["monthly"]);
             if (months.Count > 0)
                 track.Children.Add(Table([T("pvsol_month"), "PV*SOL (kWh)", "SolarCraft (kWh)", "Δ (kWh)"],
@@ -166,6 +168,13 @@ public sealed partial class MainWindow
             PvsolComparisonPanel.Children.Add(new Expander { Header = $"{title} · PV*SOL {Cell(row,"pvsol_kwh")} → SolarCraft {Cell(row,"solarcraft_kwh")} kWh · Δ {Cell(row,"delta_pct")}%", Content = track });
         }
     }
+
+    private string PvsolChannelName(string key) => T(key switch
+    {
+        "pv_dc" => "pvsol_dc",
+        "inverter_ac" => "pvsol_ac",
+        _ => "pvsol_" + key
+    });
 
     private void BuildEngineering()
     {

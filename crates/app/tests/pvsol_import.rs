@@ -18,7 +18,9 @@ fn archive_with(path: &Path, storage_enabled: bool, catalog_coupling: Option<i32
     };
     let xml = br#"<PVData>
       <Versionsnummer>15</Versionsnummer><AnlagenTyp><SystemType>EnergySoftware.PVSOL.OnGridPVAdvanced</SystemType></AnlagenTyp>
-      <Meteo><TranspositionModelType><Value>HayDavies</Value></TranspositionModelType></Meteo>
+      <Meteo><TranspositionModelType><Value>HayDavies</Value></TranspositionModelType>
+        <VerlusteDurchSpektrumsAbweichung><Value>0.01</Value></VerlusteDurchSpektrumsAbweichung>
+      </Meteo>
       <PVModule><Modulfelder><ModulfeldID>area</ModulfeldID><Modulname>South roof</Modulname>
         <ModulID>m</ModulID><ModulVersion><Value>2</Value></ModulVersion><Modulanzahl><Value>2</Value></Modulanzahl>
         <Modulneigung><Value>28</Value></Modulneigung><Modulausrichtung><Value>180</Value></Modulausrichtung>
@@ -115,6 +117,7 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     call("import_pvsol", json!({"source": source,"file": destination}));
     let reopened = app::get_project(&destination).unwrap();
     assert_eq!(reopened.simulation.cold_voltage_temperature_c, Some(-17.0));
+    assert_eq!(reopened.simulation.spectral_loss_fraction, Some(0.01));
     let mut underrated = reopened.clone();
     underrated.library.modules[0].max_system_voltage_v = Some(305.0);
     assert!(solarcraft_model::validate::validate(&underrated).iter().any(|i| i.code == "MODULE_SYSTEM_VOLTAGE"
@@ -141,7 +144,10 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     assert!(series[0].series_chain.is_some() && series[0].series_chain == series[1].series_chain);
     assert!(app::pvsol_import::import(&source, Some(&destination)).is_err());
     assert!(call("compare_pvsol",json!({"file":destination}))["comparison"].is_null());
-    app::simulate(&destination, |_| true).unwrap();
+    let run = app::simulate(&destination, |_| true).unwrap();
+    let spectral = run.irradiance_ledger.iter().find(|stage| stage.key == "spectral").unwrap();
+    assert!((spectral.delta_pct + 1.0).abs() < 1e-9);
+    assert!((run.annual.ghi_kwh_m2 - run.irradiance_ledger[0].value).abs() < 1e-9);
     let result = call("compare_pvsol",json!({"file":destination}));
     assert_eq!(result["imported_input_hash_matches"], true);
     assert_eq!(result["comparison"]["inverter_ac"]["monthly"].as_array().unwrap().len(), 12);

@@ -225,6 +225,9 @@ pub struct TankResult {
     pub tank_to_hot_water_kwh: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boiler_heat_kwh: Option<f64>,
+    /// Electricity covered by simultaneous PV after base load, before batteries and EV charging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_solar_electric_kwh: Option<f64>,
 }
 
 pub struct TankRun {

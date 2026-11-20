@@ -98,6 +98,7 @@ strings! {
     total => ["Total", "Total", "Summe", "Total"],
     irradiation => ["Irradiation in the module plane", "Irradiación en el plano de los módulos", "Einstrahlung in Modulebene", "Irradiação no plano dos módulos"],
     irr_ghi => ["Global horizontal irradiation", "Irradiación global horizontal", "Globalstrahlung horizontal", "Irradiação global horizontal"],
+    irr_spectral => ["After spectral correction", "Tras la corrección espectral", "Nach Spektralkorrektur", "Após correção espectral"],
     irr_poa => ["Global incident in plane", "Global incidente en el plano", "Globalstrahlung in Modulebene", "Global incidente no plano"],
     irr_shading => ["Near shading (obstacles)", "Sombreado cercano (obstáculos)", "Nahverschattung (Hindernisse)", "Sombreamento próximo (obstáculos)"],
     irr_iam => ["Reflection (incidence angle)", "Reflexión (ángulo de incidencia)", "Reflexion (Einfallswinkel)", "Reflexão (ângulo de incidência)"],

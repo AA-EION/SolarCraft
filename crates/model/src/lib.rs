@@ -252,6 +252,9 @@ pub struct SimulationSettings {
     pub transposition: Field<TranspositionModel>,
     #[serde(default)]
     pub pv_model: PvModel,
+    /// Broadband irradiance fraction lost to the archived spectral correction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spectral_loss_fraction: Option<f64>,
     /// Archived string-design cell temperature at 1000 W/m². At this
     /// test point the electrical check uses the datasheet Voc coefficient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,7 +362,7 @@ impl Project {
                 soiling_pct: Field::default(2.0), module_quality_pct: Field::default(0.0), lid_pct: Field::default(1.0),
                 mismatch_pct: Field::default(1.0), dc_wiring_pct: Field::default(1.5), ac_wiring_pct: Field::default(0.5), availability_pct: Field::default(0.0),
             },
-            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), cold_voltage_temperature_c: None, faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
+            simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), spectral_loss_fraction: None, cold_voltage_temperature_c: None, faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],

@@ -170,8 +170,9 @@ pub struct SimError(pub String);
 impl std::fmt::Display for SimError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) } }
 impl std::error::Error for SimError {}
 
-const IRR_KEYS: [(&str, &str); 7] = [
-    ("ghi", "Global horizontal irradiation"), ("poa", "Global incident in plane (transposition)"), ("shading", "After near shading (obstacles)"),
+const IRR_KEYS: [(&str, &str); 8] = [
+    ("ghi", "Global horizontal irradiation"), ("spectral", "After spectral correction"),
+    ("poa", "Global incident in plane (transposition)"), ("shading", "After near shading (obstacles)"),
     ("bypass", "After partial-shading mismatch (bypass diodes)"),
     ("iam", "After incidence angle (reflection)"), ("soiling", "After soiling"), ("effective", "Effective irradiation on modules"),
 ];
@@ -219,9 +220,10 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     };
     let l = &p.losses;
     let f = |x: f64| 1.0 - x / 100.0;
+    let spectral = 1.0 - p.simulation.spectral_loss_fraction.unwrap_or(0.0);
     let elec = solarcraft_model::derive::electrical(p);
     let assigned = solarcraft_model::derive::modules_by_array(&elec);
-    let mut irr_tot = [0.0f64; 7];
+    let mut irr_tot = [0.0f64; IRR_KEYS.len()];
     let mut e_tot = [0.0f64; 16];
     let mut area_tot = 0.0;
     let mut monthly = vec![Month::default(); 12];
@@ -376,7 +378,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         for (k, h) in w.hours.iter().enumerate() {
             if ai == 0 && k % 876 == 0 && !progress(0.6 * k as f64 / n as f64) { return Err(SimError("cancelled".into())); }
             let sp = &sun[k];
-            let (ghi, dni, dhi) = (h.ghi.max(0.0), h.dni.max(0.0), h.dhi.max(0.0));
+            let raw_ghi = h.ghi.max(0.0);
+            let (ghi, dni, dhi) = (raw_ghi * spectral, h.dni.max(0.0) * spectral, h.dhi.max(0.0) * spectral);
             let (tilt, surface_azimuth, (iam_sky, iam_gnd)) = match a.tracking.zip(tracking_iam.as_ref()) {
                 Some((tracker, optics)) => {
                     let (tilt, surface_azimuth) = tracking::plane(tracker, sp, a.tilt.value, a.azimuth.value);
@@ -456,7 +459,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let diffuse_iam = sky_s * iam_sky + ground * iam_gnd;
             let after_iam = dir_s * beam_iam + diffuse_iam;
             let e_eff = after_iam * soiling + rear_effective;
-            for (s, v) in [ghi, poa.global, after_geo, after_shade, after_iam, after_iam * soiling, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
+            for (s, v) in [raw_ghi, ghi, poa.global, after_geo, after_shade, after_iam, after_iam * soiling, e_eff].into_iter().enumerate() { irr_tot[s] += v * area; }
             let thermal_poa = poa.global + if modeled_rear { rear_poa } else { 0.0 };
             let tc = temperature::faiman(thermal_poa, h.temp_air, h.wind.max(0.0), p.simulation.faiman_u0.value, p.simulation.faiman_u1.value);
             if let Some(shaded) = &mut ah.shaded {
@@ -474,7 +477,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 ah.voc[k] = dp.voc();
                 ah.params[k] = Some(dp);
             }
-            monthly[month_of[k]].ghi_kwh_m2 += ghi * area / 1000.0;
+            monthly[month_of[k]].ghi_kwh_m2 += raw_ghi * area / 1000.0;
             monthly[month_of[k]].poa_kwh_m2 += poa.global * area / 1000.0;
             irradiation.poa_kwh_m2[month_of[k]] += poa.global / 1000.0;
             irradiation.effective_kwh_m2[month_of[k]] += e_eff / 1000.0;
@@ -841,7 +844,9 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         }
         out
     };
-    let irradiance_ledger = mk(&IRR_KEYS, &irr_tot, 1.0 / area_tot / 1000.0);
+    let mut irradiance_ledger = mk(&IRR_KEYS, &irr_tot, 1.0 / area_tot / 1000.0);
+    let poa = irradiance_ledger[2].value;
+    if spectral == 1.0 { irradiance_ledger.remove(1); }
     let energy_ledger = if nonlinear_hours > 0 {
         let mut keys = E_KEYS.to_vec();
         let mut totals = e_tot.to_vec();
@@ -855,7 +860,6 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     }
     let closure = energy_ledger[0].value + energy_ledger.iter().skip(1).map(|s| s.delta).sum::<f64>() - energy_ledger.last().unwrap().value;
     let ac_kwh = energy_ledger.last().unwrap().value;
-    let poa = irradiance_ledger[1].value;
     Ok(SimResult {
         manifest: RunManifest { inputs_hash, engine: ENGINE_VERSION.into(), weather_hash: weather_hash.into(), weather_provider: w.provenance.provider.clone(), transposition: format!("{:?}", p.simulation.transposition.value), pv_model: p.simulation.pv_model, hours: n, ledger_closure_error_kwh: closure },
         annual: Annual { dc_kwp, ac_kw, ghi_kwh_m2: irradiance_ledger[0].value, poa_kwh_m2: poa, ac_kwh, specific_yield_kwh_kwp: ac_kwh / dc_kwp, performance_ratio: ac_kwh / (poa * dc_kwp) },

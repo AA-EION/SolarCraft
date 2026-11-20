@@ -76,6 +76,7 @@ pub(super) fn mixed_tank(heat: &Heating, tank: &HeatStore, controls: &ThermalCon
     let pv_only = !matches!(controls.emitter, ThermalEmitter::HeatPump { pv_only: false, .. });
     let mut stored = tank.initial_kwh;
     let mut boiler_total = 0.0;
+    let mut solar_electric = 0.0;
     for (h, i) in order.into_iter().enumerate() {
         let loss = stored * loss_fraction;
         let water = hot_water.as_ref().map_or_else(
@@ -113,6 +114,7 @@ pub(super) fn mixed_tank(heat: &Heating, tank: &HeatStore, controls: &ThermalCon
         }
         run.result.charge_heat_kwh += input_heat + boiler;
         run.result.charge_electric_kwh += electric;
+        solar_electric += electric.min(spare_kw);
         run.result.discharge_heat_kwh += delivered;
         run.result.standing_loss_kwh += loss;
         run.result.hot_water_kwh += water;
@@ -121,6 +123,7 @@ pub(super) fn mixed_tank(heat: &Heating, tank: &HeatStore, controls: &ThermalCon
     }
     run.result.end_kwh = stored;
     run.result.boiler_heat_kwh = Some(boiler_total);
+    run.result.direct_solar_electric_kwh = Some(solar_electric);
     run
 }
 
@@ -140,8 +143,10 @@ mod tests {
         let direct = mixed_tank(&heat, &tank, &controls, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[0.0; 3]);
         assert_eq!(direct.electrical, [0.0; 3]);
         assert_eq!(direct.result.boiler_heat_kwh, Some(3.0));
+        assert_eq!(direct.result.direct_solar_electric_kwh, Some(0.0));
         let solar = mixed_tank(&heat, &tank, &controls, &[7.0; 3], &[0, 1, 2], &[0.0; 3], &[1000.0, 0.0, 0.0]);
         assert!((solar.demand.pump_heat_kwh - 2.0).abs() < 1e-9);
+        assert_eq!(solar.result.direct_solar_electric_kwh, Some(solar.demand.pump_electric_kwh));
         assert!((solar.result.boiler_heat_kwh.unwrap() - 1.0).abs() < 1e-9);
         assert!((solar.result.boiler_heat_kwh.unwrap() + solar.demand.pump_heat_kwh - solar.result.discharge_heat_kwh).abs() < 1e-9);
         let mut standard = controls;

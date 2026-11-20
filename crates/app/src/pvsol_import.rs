@@ -170,6 +170,7 @@ pub fn compare(path: &Path) -> Result<Value> {
             "delta_kwh":delta, "delta_pct":delta.zip(reference_annual.filter(|v| v.abs() > 1e-9)).map(|(d, v)| d / v * 100.0),
             "monthly":monthly, "hourly":hourly}));
     }
+    thermal::compare_reference(&project, &run, &saved.channels, &mut comparison);
     Ok(json!({"reference":overview(&saved),"input_hash":run.manifest.inputs_hash,
         "imported_input_hash_matches": saved.initial_inputs_hash == run.manifest.inputs_hash, "comparison":comparison}))
 }
@@ -214,7 +215,8 @@ fn read(source: &Path) -> Result<Imported> {
         "SolarCraft uses one-hour intervals on a reference non-leap standard-time calendar. Module temperature and electrical models may differ from the archived run.".into(),
     ];
     let sim_xml = member(&mut archive, "SimResults.xml", 24 * 1024 * 1024)?;
-    let (mut saved, monthly_rear) = sim_xml.as_deref().map(read_saved_xml).transpose()?.unwrap_or_default();
+    let (mut saved, monthly_rear, has_current_model) = sim_xml.as_deref()
+        .map(|bytes| read_saved_xml(bytes, system == "OnGridPVWithThermal")).transpose()?.unwrap_or_default();
     let saved_temperatures = sim_xml.as_deref().and_then(read_saved_temperatures);
     let (core, diffuse, rear) = match member(&mut archive, "core.results.3600", 80 * 1024 * 1024)? {
         Some(bytes) => read_core(&bytes)?,
@@ -239,6 +241,9 @@ fn read(source: &Path) -> Result<Imported> {
             channel.hourly_source = Some("OecForeCast.json / PvErzeugungHourly".into());
         }
     }
+    if system == "OnGridPVWithThermal" {
+        thermal::read_hourly_reference(hourly("HeatPumpElectricalConsumption"), &mut saved);
+    }
     for (name, channel) in &saved {
         if let Some((annual, hours)) = channel.annual_kwh.zip(channel.hourly_kwh.as_ref()) {
             let sum = hours.iter().sum::<f64>();
@@ -260,9 +265,15 @@ fn read(source: &Path) -> Result<Imported> {
     } else { return Err(bad("Select a project with one identifiable embedded WBV weather file.")); };
     let wbv = member(&mut archive, &weather_member, 256 * 1024)?.ok_or_else(|| bad("The embedded WBV member is missing."))?;
     let spectral = number::<f64>(root, &["Meteo", "VerlusteDurchSpektrumsAbweichung"]).unwrap_or(0.0);
+    let spectral = if (0.0..0.5).contains(&spectral) { spectral } else {
+        warnings.push("The source spectral correction is outside the supported range.".into());
+        0.0
+    };
     let tracking = path_node(root, &["PVModule"]).into_iter().flat_map(|node| children(node, "Modulfelder"))
         .any(|field| number::<u32>(field, &["PVTracking", "KindOfTracking"]).is_some_and(|mode| (1..=4).contains(&mode)));
-    let mut diffuse_model = diffuse::Model::for_saved(value(root, &["Meteo", "DiffuseModelType"]), tracking);
+    let legacy_replay = (tracking || format <= 20) && !has_current_model
+        && saved.get(AC).and_then(|channel| channel.hourly_source.as_deref()) == Some("OecForeCast.json / PvErzeugungHourly");
+    let mut diffuse_model = diffuse::Model::for_saved(value(root, &["Meteo", "DiffuseModelType"]), legacy_replay);
     if value(root, &["Meteo", "IsIrradianceInOneMinuteResolution"])
         .is_some_and(|v| v.eq_ignore_ascii_case("false") || v == "0") {
         diffuse_model = diffuse_model.hourly_hofmann();
@@ -272,18 +283,16 @@ fn read(source: &Path) -> Result<Imported> {
     warnings.push(match weather_diffuse.as_str() {
         "saved_hourly_diffuse" => "The diffuse input is the saved hourly series with the reference spectral factor removed.",
         "reindl_reduced_from_wbv_global" => "SolarCraft reconstructs the archived reduced Reindl irradiance split from WBV global irradiance.",
-        "erbs_fallback_for_tracked_reindl" => "The tracked reduced Reindl result remains unverified. SolarCraft uses Erbs with the archived tracker geometry.",
+        "reindl_reduced_legacy_from_wbv_global" => "The saved generation ledger lacks a current simulation marker. SolarCraft uses the legacy reduced Reindl split based on extraterrestrial horizontal irradiance.",
         "hofmann_hourly_base_from_wbv_global" => "SolarCraft uses the hourly Hofmann base irradiance split with neutral climatology factors.",
         "erbs_fallback_for_hofmann" => "The archived Hofmann irradiance split is unavailable and SolarCraft estimates it with Erbs.",
         _ => "WBV supplies global irradiance only. SolarCraft estimates diffuse and direct irradiance with Erbs.",
     }.into());
-    if spectral != 0.0 {
-        warnings.push(format!("PV*SOL's separate spectral correction ({:.3}%) is not mapped to the SolarCraft PV engine.", spectral * 100.0));
-    }
     let title = value(root, &["ProjektdatenV1", "Projekttitel"]).filter(|v| !v.is_empty())
         .unwrap_or_else(|| source_name.trim_end_matches(".pvprj"));
     let mut project = Project::new(&format!("pvsol-{}", &sha[..20]), title, weather.latitude, weather.longitude);
     project.mode = DesignMode::Detailed;
+    project.simulation.spectral_loss_fraction = (spectral > 0.0).then_some(spectral);
     if let Some(limits) = path_node(root, &["Wechselrichter", "Verschaltungsgrenzen"]) {
         if !flag(limits, &["NEC_Temperatures"]) && number::<f64>(limits, &["GLeerU"]) == Some(1000.0) {
             project.simulation.cold_voltage_temperature_c = number::<f64>(limits, &["TLeerU"])
@@ -419,6 +428,8 @@ fn read(source: &Path) -> Result<Imported> {
     if system == "OnGridPVWithThermal" {
         if let Err(error) = thermal::apply(&mut project, root, &weather, &mut warnings) {
             warnings.push(format!("The saved thermal system could not be imported: {}", error.message));
+        } else {
+            thermal::add_pv_surplus_variant(&mut project, &saved, &mut warnings);
         }
     }
     let reference = Reference { source_name: source_name.to_owned(), sha256: sha, format, system_type: system.to_owned(),
@@ -677,9 +688,9 @@ fn read_weather(bytes: &[u8], label: &str, diffuse: Option<&[f64]>, spectral: f6
     Ok((Weather { latitude: lat, longitude: lon, elevation, horizon_applied: false, provenance, hours }, tz, basis.into()))
 }
 
-type SavedXml = (BTreeMap<String, Channel>, Option<[f64; 12]>);
+type SavedXml = (BTreeMap<String, Channel>, Option<[f64; 12]>, bool);
 
-fn read_saved_xml(bytes: &[u8]) -> Result<SavedXml> {
+fn read_saved_xml(bytes: &[u8], has_thermal: bool) -> Result<SavedXml> {
     let document = document(bytes, "SimResults.xml")?;
     let root = document.root_element();
     if value(root, &["ModelString"]).is_none_or(str::is_empty) { return Ok(SavedXml::default()); }
@@ -695,7 +706,8 @@ fn read_saved_xml(bytes: &[u8]) -> Result<SavedXml> {
             saved.insert(key.into(), Channel { annual_kwh: annual, monthly_kwh: monthly, ..Default::default() });
         }
     }
-    Ok((saved, read_monthly_rear(root)))
+    if has_thermal { thermal::read_reference(root, &mut saved); }
+    Ok((saved, read_monthly_rear(root), true))
 }
 
 /// Monthly mean ambient and module temperature (°C, all hours) of the archived run,

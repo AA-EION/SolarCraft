@@ -8,15 +8,15 @@ use std::f64::consts::TAU;
 pub(super) enum Model {
     Erbs,
     ReindlReduced,
-    TrackedReindlFallback,
+    ReindlReducedLegacy,
     HofmannHourly,
     HofmannFallback,
 }
 
 impl Model {
-    pub(super) fn for_saved(name: Option<&str>, tracking: bool) -> Self {
-        match (name, tracking) {
-            (Some("ReindlReduced"), true) => Self::TrackedReindlFallback,
+    pub(super) fn for_saved(name: Option<&str>, legacy_reindl: bool) -> Self {
+        match (name, legacy_reindl) {
+            (Some("ReindlReduced"), true) => Self::ReindlReducedLegacy,
             (Some("ReindlReduced"), false) => Self::ReindlReduced,
             (Some("Hofmann"), _) => Self::HofmannFallback,
             _ => Self::Erbs,
@@ -34,24 +34,27 @@ impl Model {
         match self {
             Self::Erbs => "erbs_from_wbv_global",
             Self::ReindlReduced => "reindl_reduced_from_wbv_global",
-            Self::TrackedReindlFallback => "erbs_fallback_for_tracked_reindl",
+            Self::ReindlReducedLegacy => "reindl_reduced_legacy_from_wbv_global",
             Self::HofmannHourly => "hofmann_hourly_base_from_wbv_global",
             Self::HofmannFallback => "erbs_fallback_for_hofmann",
         }
     }
 
     pub(super) fn split_with_neighbors(self, ghi: f64, zenith_deg: f64, day: u32, adjacent_dark: bool) -> (f64, f64) {
-        let sky_factor = match self {
-            Self::ReindlReduced => 0.81,
-            Self::HofmannHourly => 0.78,
-            Self::Erbs | Self::HofmannFallback | Self::TrackedReindlFallback => return erbs(ghi, zenith_deg, dni_extra(f64::from(day), 1366.1)),
+        let (sky_factor, sky_exponent) = match self {
+            Self::ReindlReduced => (0.81, 1.15),
+            // The earlier horizontal component normalizes by extraterrestrial
+            // horizontal irradiance. The MeteoBlock implementation uses Bourges.
+            Self::ReindlReducedLegacy => (1.0, 1.0),
+            Self::HofmannHourly => (0.78, 1.15),
+            Self::Erbs | Self::HofmannFallback => return erbs(ghi, zenith_deg, dni_extra(f64::from(day), 1366.1)),
         };
         let sine = zenith_deg.to_radians().cos();
         if ghi <= 0.0 || sine < 0.08 {
             return (0.0, ghi);
         }
         let extra = 1367.0 * (1.0 + 0.033 * (TAU * f64::from(day) / 365.0).cos());
-        let clearness = ghi / (sky_factor * extra * sine.powf(1.15));
+        let clearness = ghi / (sky_factor * extra * sine.powf(sky_exponent));
         let fraction = match self {
             Self::HofmannHourly => hofmann_hourly_fraction(clearness.min(if adjacent_dark { 1.0 } else { 1.5 })),
             _ => reindl_reduced_fraction(clearness, sine),
@@ -61,7 +64,7 @@ impl Model {
     }
 }
 
-// The reduced Reindl option uses Bourges clear-sky irradiance for its ratio.
+// The two saved Reindl implementations share this piecewise fraction formula.
 fn reindl_reduced_fraction(clearness: f64, sine: f64) -> f64 {
     let fraction = if clearness <= 0.3 {
         1.02 - 0.254 * clearness + 0.0123 * sine
@@ -91,6 +94,17 @@ mod tests {
         assert!((dhi - 120.491_571).abs() < 1e-5);
         assert!((dni * 0.5 + dhi - 300.0).abs() < 1e-10);
         assert_eq!(Model::ReindlReduced.split_with_neighbors(100.0, 87.0, 172, false), (0.0, 100.0));
+    }
+
+    #[test]
+    fn legacy_reindl_uses_extraterrestrial_horizontal_irradiance() {
+        let legacy = Model::for_saved(Some("ReindlReduced"), true);
+        let (dni, dhi) = legacy.split_with_neighbors(300.0, 60.0, 172, false);
+        let extra = 1367.0 * (1.0 + 0.033 * (TAU * 172.0 / 365.0).cos());
+        let clearness = 300.0 / (extra * 0.5);
+        assert!((dhi - 300.0 * (1.4 - 1.749 * clearness + 0.177 * 0.5)).abs() < 1e-10);
+        assert!((dni * 0.5 + dhi - 300.0).abs() < 1e-10);
+        assert_eq!(legacy.source(), "reindl_reduced_legacy_from_wbv_global");
     }
 
     #[test]
