@@ -39,7 +39,7 @@ struct PvsolComparison: View {
     }
 
     private func orderedChannels(_ channels: JSONDict) -> [String] {
-        let pv = ["pv_dc", "inverter_ac"]
+        let pv = ["pv_dc", "inverter_ac", "inverter_ac_gross"]
         return pv.filter { channels[$0] != nil } + channels.keys.filter { !pv.contains($0) }.sorted()
     }
 
@@ -65,6 +65,11 @@ struct PvsolComparison: View {
             }
             if let hourly = row["hourly"] as? JSONDict {
                 Text(m.t("pvsol_hourly_error") + " " + number(hourly,"mae_kwh",3) + " kWh · " + str(hourly,"source"))
+            }
+            if let switching = row["switching"] as? JSONDict {
+                Text(m.t("pvsol_pump_switching") + " · > " + number(switching,"reporting_threshold_w",0) + " W")
+                SimpleTable(header: ["pvsol_pump_on_matched", "pvsol_pump_on_archive_only", "pvsol_pump_on_model_only"].map { m.t($0) },
+                    rows: [["matched_on_hours", "missed_on_hours", "extra_on_hours"].map { number(switching,$0,0) }])
             }
         }
     }

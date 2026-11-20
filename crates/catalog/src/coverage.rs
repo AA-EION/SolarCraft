@@ -103,7 +103,7 @@ pub fn bind(source: &str, dataset: &str, path: &str) -> Binding {
         ("pvinverters", "feedInFrom") => bnd(Consumed, "energy::inverter_ac start threshold (DC side)", "power side at each consumer"),
         ("pvinverters", "nightConsumption") => bnd(Consumed, "standby load when no DC input (dispatch) and ledger night step", ""),
         ("pvinverters", "standbyConsumption") => bnd(Displayed, "InverterSpec.standby_w", "which state uses it vs night consumption"),
-        ("pvinverters", "matchingEtaMPP20" | "matchingEtaMPP100") => bnd(Consumed, "InverterSpec::efficiency_v MPP adaptation factor (below/above 20 % of nominal DC)", "exact 20 % boundary"),
+        ("pvinverters", "matchingEtaMPP20" | "matchingEtaMPP100") => bnd(Consumed, "InverterSpec::adapted_tracker_dc scales tracker DC power before AC conversion", ""),
         ("pvinverters", "parallelOperating") => bnd(Validated, "validate MPPT_INTERCONNECT; engine combines interconnected trackers", ""),
         ("pvinverters", "maxCurrentDC" | "maxShortCircuitCurrentDC") => bnd(Validated, "validate INVERTER_IDC_TOTAL / INVERTER_ISC_TOTAL", ""),
         ("pvinverters", "dC_InputCount") => bnd(Validated, "validate INVERTER_CONNECTORS", ""),

@@ -6,7 +6,7 @@
 //! of hourly calculations, so the loss waterfall closes exactly (checked).
 //! Stages: horizontal → plane of array → IAM → soiling → effective
 //! irradiance; nominal STC energy → irradiance level → temperature → MPP
-//! voltage window → module quality/LID → mismatch → DC wiring → inverter
+//! voltage window → module quality/LID → mismatch → DC wiring → MPPT adaptation → inverter
 //! efficiency → clipping → night tare → AC wiring → availability → grid.
 use serde::{Deserialize, Serialize};
 use solarcraft_model::validate::Severity;
@@ -176,11 +176,11 @@ const IRR_KEYS: [(&str, &str); 8] = [
     ("bypass", "After partial-shading mismatch (bypass diodes)"),
     ("iam", "After incidence angle (reflection)"), ("soiling", "After soiling"), ("effective", "Effective irradiation on modules"),
 ];
-const E_KEYS: [(&str, &str); 16] = [
+const E_KEYS: [(&str, &str); 17] = [
     ("nominal", "Nominal energy at STC efficiency"), ("irradiance_level", "Irradiance level"), ("temperature", "Module temperature"),
     ("strings", "Parallel-string mismatch"), ("mpp_window", "Inverter input limits (MPP window, current)"), ("quality", "Module quality"), ("lid", "Light-induced degradation"),
     ("mismatch", "Mismatch"), ("dc_wiring", "DC wiring"), ("dc_out", "Array DC output"),
-    ("inverter", "Inverter efficiency"), ("clipping", "Inverter clipping (power limit)"), ("night", "Inverter night consumption"),
+    ("mppt_adaptation", "MPPT adaptation"), ("inverter", "Inverter efficiency"), ("clipping", "Inverter clipping (power limit)"), ("night", "Inverter night consumption"),
     ("ac_wiring", "AC wiring"), ("availability", "Availability"), ("grid", "Energy to grid"),
 ];
 
@@ -224,7 +224,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     let elec = solarcraft_model::derive::electrical(p);
     let assigned = solarcraft_model::derive::modules_by_array(&elec);
     let mut irr_tot = [0.0f64; IRR_KEYS.len()];
-    let mut e_tot = [0.0f64; 16];
+    let mut e_tot = [0.0f64; E_KEYS.len()];
     let mut area_tot = 0.0;
     let mut monthly = vec![Month::default(); 12];
     for (i, m) in monthly.iter_mut().enumerate() { m.month = i as u32 + 1; }
@@ -543,6 +543,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
         ac_kw += inv.pac_max_w / 1000.0;
         let mut dc = vec![0.0f64; n];
         let mut before_wiring = vec![0.0f64; n];
+        let mut after_wiring = vec![0.0f64; n];
         let mut ur = UnitResult { id: u.id.clone(), name: u.name.clone(), inverter_id: inv.id.clone(), ac_kw: inv.pac_max_w / 1000.0, ..Default::default() };
         // Trackers: interconnected MPPT inputs act as one tracker (parallel), the rest singly.
         let mut trackers: Vec<Vec<usize>> = u.interconnected.iter().filter(|g| !g.is_empty()).cloned().collect();
@@ -600,6 +601,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let v_min = ins.iter().map(|i| i.v_min).fold(f64::MIN, f64::max);
             let v_max = ins.iter().map(|i| i.v_max).fold(f64::MAX, f64::min);
             let i_max: f64 = ins.iter().map(|i| i.i_max).sum();
+            let tracker_rating = inv.tracker_dc_rating(i_max);
             let p_max: f64 = if ins.iter().all(|i| i.p_max_w.is_some()) { ins.iter().filter_map(|i| i.p_max_w).sum() } else { f64::INFINITY };
             let mut native_composite_hours = 0;
             for k in 0..n {
@@ -685,7 +687,7 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                 mr.limit_loss_kwh += (t.p_combined - t.p_operating) / 1000.0;
                 before_wiring[k] += t.p_operating;
                 let raw = t.p_operating * dc_chain;
-                let d = if let Some(links) = circuit_links {
+                let wired = if let Some(links) = circuit_links {
                     let squared_current = |link: &wiring::Link| (raw / if t.v_operating > 0.0 { t.v_operating } else { link.design_voltage }).powi(2);
                     let loss: f64 = links.iter().map(|link| link.resistance * squared_current(link)).sum();
                     let scale = if loss > 0.0 { (0.45 * raw / loss).min(1.0) } else { 1.0 };
@@ -694,6 +696,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
                     }
                     raw - loss * scale
                 } else { dc_wire.after_wire(raw, mr.stc_kw * 1000.0) };
+                let d = inv.adapted_tracker_dc(wired, tracker_rating);
+                after_wiring[k] += wired;
                 mr.dc_kwh += d / 1000.0;
                 dc[k] += d;
                 vw[k] += t.v_operating * d;
@@ -717,13 +721,14 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             let lid = qual * f(l.lid_pct.value);
             let mm = lid * f(l.mismatch_pct.value);
             let dcw = dc[k];
-            hourly.dc_cable_wh[k] += (mm - dcw).max(0.0) as f32;
+            let wired = after_wiring[k];
+            hourly.dc_cable_wh[k] += (mm - wired).max(0.0) as f32;
             let vk = Some(v_dc[k]).filter(|v| *v > 0.0);
             let (unclipped, clipped) = if dcw > 0.0 { let (ac, used) = energy::inverter_ac(inv, dcw, vk); (if used > 0.0 { dcw * inv.efficiency_v(dcw, vk) } else { 0.0 }, ac) } else { (0.0, 0.0) };
             let night = if dcw > 0.0 { clipped } else { -inv.night_w };
             let acw = unit_ac_wire.after_wire(night, inv.pac_max_w);
             let avail = acw * f(l.availability_pct.value);
-            for (s, v) in [qual, lid, mm, dcw, dcw, unclipped, clipped, night, acw, avail, avail].into_iter().enumerate() { e_tot[5 + s] += v; }
+            for (s, v) in [qual, lid, mm, wired, wired, dcw, unclipped, clipped, night, acw, avail, avail].into_iter().enumerate() { e_tot[5 + s] += v; }
             ur.dc_kwh += dcw / 1000.0; ur.ac_kwh += avail.max(0.0) / 1000.0; ur.clipped_kwh += (unclipped - clipped) / 1000.0;
             monthly[month_of[k]].dc_kwh += dcw / 1000.0;
             monthly[month_of[k]].ac_kwh += avail / 1000.0;

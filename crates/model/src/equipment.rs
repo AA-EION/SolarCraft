@@ -170,7 +170,7 @@ pub struct InverterSpec {
     /// records encode a relative loss magnitude, sometimes with a negative sign.
     #[serde(default)]
     pub eta_change_per_100v: Option<f64>,
-    /// MPP adaptation efficiency below and above 20 % of the nominal DC power.
+    /// Catalog MPP adaptation efficiencies in the 20% and 100% fields.
     #[serde(default)]
     pub mpp_matching: Option<[f64; 2]>,
     /// MPPT interconnection rule: 0 none allowed, 1 any, 2 none or all.
@@ -454,21 +454,45 @@ impl InverterSpec {
         i
     }
 
-    /// AC efficiency at a DC input power (W) and DC voltage (V): the part-load curve, the
-    /// voltage correction per 100 V from nominal, and the MPP adaptation efficiency.
+    fn has_pvsol_catalog_curve(&self) -> bool {
+        self.catalog_ref.as_ref().is_some_and(|source| source.family == "pvinverter")
+    }
+
+    /// Rated DC power for a tracker or group of interconnected tracker inputs.
+    pub fn tracker_dc_rating(&self, input_current_a: f64) -> f64 {
+        let nominal = self.pdc_nominal_w.unwrap_or_else(|| self.pdc0_w());
+        if self.mppt_count <= 1 { return nominal; }
+        let total = self.i_dc_max.filter(|value| *value > 0.0)
+            .unwrap_or_else(|| (0..self.mppt_count as usize).map(|i| self.input(i).i_max).sum());
+        if total > 0.0 { nominal * (input_current_a / total).min(1.0) } else { nominal }
+    }
+
+    /// Power received from a PV*SOL catalog MPPT at the inverter's DC terminals.
+    pub fn adapted_tracker_dc(&self, pdc_w: f64, tracker_rating: f64) -> f64 {
+        let Some([eta20, eta100]) = self.mpp_matching.filter(|_| self.has_pvsol_catalog_curve() && tracker_rating > 0.0)
+            else { return pdc_w; };
+        let partial_load = (pdc_w / (0.2 * tracker_rating)).clamp(0.0, 1.0);
+        let eta = eta100 - 2.0 * (eta100 - eta20) * (1.0 - partial_load);
+        pdc_w * eta.clamp(0.0, 1.0)
+    }
+
+    /// AC conversion efficiency at a DC input power (W) and DC voltage (V).
     pub fn efficiency_v(&self, pdc_w: f64, v_dc: Option<f64>) -> f64 {
         let mut eta = self.efficiency(pdc_w);
         if let (Some(change), Some(nominal), Some(voltage)) =
             (self.eta_change_per_100v, self.v_dc_nominal, v_dc.filter(|voltage| *voltage > 0.0))
         {
             let deviation = (voltage - nominal).abs() / 100.0;
-            if self.catalog_ref.as_ref().is_some_and(|source| source.family == "pvinverter") {
+            if self.has_pvsol_catalog_curve() {
                 eta *= 1.0 - deviation * change.abs();
             } else {
                 eta -= deviation * change;
             }
         }
-        if let Some([lo, hi]) = self.mpp_matching { let pn = self.pdc_nominal_w.unwrap_or_else(|| self.pdc0_w()); eta *= if pdc_w < 0.2 * pn { lo } else { hi }; }
+        if let Some([lo, hi]) = self.mpp_matching.filter(|_| !self.has_pvsol_catalog_curve()) {
+            let nominal = self.pdc_nominal_w.unwrap_or_else(|| self.pdc0_w());
+            eta *= if pdc_w < 0.2 * nominal { lo } else { hi };
+        }
         eta.clamp(0.0, 1.0)
     }
 
@@ -560,5 +584,30 @@ mod tests {
             }
             assert_eq!(inverter.efficiency_v(250_000.0, Some(550.0)), 0.98);
         }
+    }
+
+    #[test]
+    fn catalog_mppt_adaptation_is_at_tracker_dc_terminals() {
+        let mut inverter = InverterSpec::generic(20.0);
+        inverter.mppt_count = 2;
+        inverter.pdc_nominal_w = Some(20_000.0);
+        inverter.i_dc_max = Some(40.0);
+        inverter.efficiency_curve = vec![[0.05, 0.98], [1.0, 0.98]];
+        inverter.mpp_matching = Some([0.94, 0.96]);
+        inverter.catalog_ref = Some(crate::plant::CatalogRef {
+            family: "pvinverter".into(), id: "example".into(), version: 1,
+            source_sha256: String::new(), dataset: "PVInverters".into(),
+        });
+        let rating = inverter.tracker_dc_rating(10.0);
+        assert_eq!(rating, 5_000.0);
+        for (input, expected_eta) in [(250.0, 0.93), (500.0, 0.94), (1_000.0, 0.96), (2_000.0, 0.96)] {
+            assert!((inverter.adapted_tracker_dc(input, rating) - input * expected_eta).abs() < 1e-12);
+        }
+        assert_eq!(inverter.efficiency_v(2_000.0, None), 0.98);
+        inverter.mppt_count = 1;
+        assert_eq!(inverter.tracker_dc_rating(10.0), 20_000.0);
+        inverter.catalog_ref = None;
+        assert_eq!(inverter.adapted_tracker_dc(2_000.0, rating), 2_000.0);
+        assert_eq!(inverter.efficiency_v(2_000.0, None), 0.98 * 0.94);
     }
 }

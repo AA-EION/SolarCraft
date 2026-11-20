@@ -59,6 +59,12 @@ pub fn dc_for_ac(spec: &InverterSpec, ac: f64, v: Option<f64>) -> f64 {
 pub struct Flows {
     pub pv_dc: Vec<f32>,
     pub pv_ac: Vec<f32>,
+    /// PV inverter AC delivery before the export limiter, including shared hybrid battery output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inverter_ac_gross: Vec<f32>,
+    /// Inverter AC delivery net of its standby and hybrid AC grid-charging draw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inverter_ac_net: Vec<f32>,
     pub clipped: Vec<f32>,
     pub load: Vec<f32>,
     pub load_served: Vec<f32>,
@@ -338,7 +344,9 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
         let load = load_w.get(k).copied().unwrap_or(0.0);
         let served_target = if outage && !islanded { load * crit } else { load };
         // Inverter standby when a unit has no DC input.
-        let mut standby: f64 = units.iter().enumerate().filter(|(i, u)| u.dc_w[k] <= 0.0 && Some(*i) != hybrid_unit).map(|(_, u)| u.spec.night_w).sum();
+        let other_inverter_idle: f64 = units.iter().enumerate()
+            .filter(|(i, u)| u.dc_w[k] <= 0.0 && Some(*i) != hybrid_unit).map(|(_, u)| u.spec.night_w).sum();
+        let mut standby = other_inverter_idle;
         if let Some(bi) = batinv { standby += bi.standby_w; }
         let pv_dc: f64 = units.iter().map(|u| u.dc_w[k].max(0.0)).sum();
         let e_before = batt.as_ref().map_or(0.0, |x| x.acc.total());
@@ -505,6 +513,18 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
         if let Some((unit, links)) = hybrid_unit.and_then(|i| ac_links[i].map(|links| (&units[i], links))) {
             record_ac(&mut f, links, hy_ac - ac_hybrid.after_wire(hy_ac, unit.spec.pac_max_w));
         }
+        let mut hybrid_idle = 0.0;
+        let hybrid_delivery = hybrid_unit.map_or(0.0, |i| {
+            let unit = &units[i];
+            if hy_ac <= 0.0 && ch_grid <= 0.0 {
+                hybrid_idle = if unit.dc_w[k] <= 0.0 { unit.spec.night_w } else {
+                    unit.spec.standby_w.unwrap_or(unit.spec.night_w)
+                };
+            }
+            ac_hybrid.delivered(hy_ac, unit.spec.pac_max_w)
+        });
+        standby += hybrid_idle;
+        balance -= hybrid_idle;
         let (mut gen_out, mut gen_charge) = (0.0, 0.0);
         if outage {
             if let Some(g) = generator {
@@ -574,13 +594,20 @@ pub(crate) fn dispatch_bus(p: &Project, units: &[UnitInput], load_w: &[f64], loc
         let resid = (pv_dc + import + gen_out + vehicle_ac + vehicle_export) - (served + standby + export + curtailed + clipped + inv_loss + ac_wiring + conv_loss + (e_after - e_before) + sd);
         // Supply available from PV and storage reaches the island load before
         // the generator. Generator charging and surplus stay off the load ledger.
-        let grid_to_load = (import - ch_grid).clamp(0.0, served);
+        let grid_to_load = if full_feed_in && !outage { served } else {
+            (import - ch_grid - hybrid_idle).clamp(0.0, served)
+        };
         let generator_to_load = (served - grid_to_load - supply.max(0.0)).max(0.0)
             .min((gen_out - gen_charge).max(0.0));
         let on_site_to_load = (served - grid_to_load - generator_to_load).max(0.0);
         let pv_to_load = pv_ac_h.min(on_site_to_load);
         let ev_to_load = (vehicle_ac + vehicle_offset).min((on_site_to_load - pv_to_load).max(0.0));
         let battery_to_load = on_site_to_load - pv_to_load - ev_to_load;
+        let gross_inverter_ac = ac_other + hybrid_delivery;
+        let inverter_idle = (other_inverter_idle + hybrid_idle - unserved_standby).max(0.0);
+        let hybrid_reverse = if hybrid_unit.is_some() { ch_grid } else { 0.0 };
+        push(&mut f.inverter_ac_gross, gross_inverter_ac);
+        push(&mut f.inverter_ac_net, gross_inverter_ac - inverter_idle - hybrid_reverse);
         for (v, x) in [(&mut f.pv_dc, pv_dc), (&mut f.pv_ac, pv_ac_h), (&mut f.clipped, clipped), (&mut f.load, load), (&mut f.load_served, served), (&mut f.pv_to_load, pv_to_load),
                        (&mut f.grid_to_load, grid_to_load), (&mut f.generator_to_load, generator_to_load), (&mut f.ev_to_load, ev_to_load), (&mut f.ev_to_grid, ev_to_grid), (&mut f.battery_to_load, battery_to_load),
                        (&mut f.batt_charge, ch_in + ch_grid), (&mut f.batt_charge_grid, ch_grid), (&mut f.batt_discharge, dis_out), (&mut f.batt_to_grid, to_grid), (&mut f.import, import), (&mut f.export, export),

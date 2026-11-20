@@ -313,6 +313,9 @@ pub struct Project {
     pub ev: Option<demand::Ev>,
     #[serde(default)]
     pub fleet: Option<demand::Fleet>,
+    /// EV source configuration retained separately from the simulated fleet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported_ev_groups: Vec<demand::ImportedEvGroup>,
     #[serde(default)]
     pub heating: Option<demand::Heating>,
     #[serde(default)]
@@ -372,7 +375,7 @@ impl Project {
             simulation: SimulationSettings { mounting: Field::default(Mounting::RoofMounted), transposition: Field::default(TranspositionModel::Perez), pv_model: PvModel::default(), spectral_loss_fraction: None, cold_voltage_temperature_c: None, faiman_u0: Field::default(25.0), faiman_u1: Field::default(6.84) },
             weather: None,
             library,
-            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
+            electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, imported_ev_groups: vec![], heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
             tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None,
             use_archived_scene_shading: false, roof_photos: vec![],
         };

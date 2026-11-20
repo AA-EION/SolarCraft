@@ -165,6 +165,12 @@ public sealed partial class MainWindow
                         Cell(m,"solarcraft_kwh"), Cell(m,"delta_kwh") })));
             if (row?["hourly"] is JsonObject hourly)
                 track.Children.Add(Note($"{T("pvsol_hourly_error")} {Cell(hourly,"mae_kwh",3)} kWh · {S(hourly,"source")}"));
+            if (row?["switching"] is JsonObject switching)
+            {
+                track.Children.Add(Note($"{T("pvsol_pump_switching")} · > {Cell(switching,"reporting_threshold_w",0)} W"));
+                track.Children.Add(Table([T("pvsol_pump_on_matched"), T("pvsol_pump_on_archive_only"), T("pvsol_pump_on_model_only")],
+                    new IList<string>[] { new[] { Cell(switching,"matched_on_hours",0), Cell(switching,"missed_on_hours",0), Cell(switching,"extra_on_hours",0) } }));
+            }
             PvsolComparisonPanel.Children.Add(new Expander { Header = $"{title} · PV*SOL {Cell(row,"pvsol_kwh")} → SolarCraft {Cell(row,"solarcraft_kwh")} kWh · Δ {Cell(row,"delta_pct")}%", Content = track });
         }
     }

@@ -2,6 +2,7 @@
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
 mod archived_photo;
 mod diffuse;
+mod ev;
 mod grid_storage;
 mod horizon;
 mod archived_routes;
@@ -29,6 +30,7 @@ const WS_PER_KWH: f64 = 3_600_000.0;
 const MAX_ARCHIVE: u64 = 128 * 1024 * 1024;
 const REFERENCE_KIND: &str = "pvsol_reference";
 const AC: &str = "inverter_ac";
+const AC_GROSS: &str = "inverter_ac_gross";
 const DC: &str = "pv_dc";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -84,6 +86,8 @@ struct Reference {
     initial_inputs_hash: String,
     warnings: Vec<String>,
     channels: BTreeMap<String, Channel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heat_pump_switching: Option<thermal::ArchivedSwitching>,
 }
 
 struct Imported {
@@ -126,30 +130,44 @@ pub fn compare(path: &Path) -> Result<Value> {
     let Some(run) = crate::current_results(&store, &project)? else {
         return Ok(json!({"reference": overview(&saved), "comparison": null}));
     };
-    // The archived generator-side hybrid comparison includes storage delivery through
-    // the shared inverter. A separate AC battery converter has its own meter.
+    // The hybrid meter includes storage delivery through the shared inverter.
+    // Old SolarCraft runs have only the dispatch balance and PV-only series.
     let f = &run.flows;
+    let mut seen_hours = [false; HOURS];
+    let comparable_clock = run.local_hour.len() == HOURS && run.local_hour.iter().all(|&hour| {
+        seen_hours.get_mut(hour as usize).is_some_and(|seen| !std::mem::replace(seen, true))
+    });
     let hybrid_output = saved.dc_hybrid
-        && project.storage.as_ref().is_some_and(|storage| matches!(storage.coupling, Coupling::DcHybrid { .. }))
-        && [&f.pv_to_load, &f.battery_to_load, &f.export, &f.curtailed, &f.ev_to_grid]
-        .iter().all(|v| v.len() == HOURS) && run.local_hour.len() == HOURS;
-    let delivered: Vec<f32> = if hybrid_output {
+        && project.storage.as_ref().is_some_and(|storage| matches!(storage.coupling, Coupling::DcHybrid { .. }));
+    let has_hybrid_meter = hybrid_output && f.inverter_ac_net.len() == HOURS && run.local_hour.len() == HOURS;
+    let legacy_hybrid = hybrid_output && !has_hybrid_meter && run.local_hour.len() == HOURS
+        && [&f.pv_to_load, &f.battery_to_load, &f.export, &f.curtailed, &f.ev_to_grid].iter().all(|v| v.len() == HOURS);
+    let delivered: Vec<f32> = if legacy_hybrid {
         (0..HOURS).map(|k| f.pv_to_load[k] + f.battery_to_load[k] + f.export[k] - f.ev_to_grid[k] + f.curtailed[k]).collect()
     } else { vec![] };
-    let delivered_monthly = {
+    let meter_months = |hours: &[f32]| {
         let mut m = vec![0.0; 12];
-        for (k, wh) in delivered.iter().enumerate() {
-            m[solarcraft_engine::calendar::local_time(run.local_hour[k]).month as usize - 1] += f64::from(*wh) / 1000.0;
+        for (&wh, &hour) in hours.iter().zip(&run.local_hour) {
+            m[solarcraft_engine::calendar::local_time(hour).month as usize - 1] += f64::from(wh) / 1000.0;
         }
         m
     };
-    let (ac_hours, ac_months, ac_basis) = if hybrid_output {
-        (&delivered, delivered_monthly, "PV and battery delivered to the AC side (load, grid, feed-in limiter)")
+    let (ac_hours, ac_months, ac_basis) = if has_hybrid_meter {
+        (&f.inverter_ac_net, meter_months(&f.inverter_ac_net), "PV and battery delivered by the shared inverter, net of standby and grid charging")
+    } else if legacy_hybrid {
+        (&delivered, meter_months(&delivered), "PV and battery delivered to the AC side (older run, estimated from load, grid and curtailment)")
     } else {
         (&run.hourly.ac_w, run.monthly.iter().map(|m| m.ac_kwh).collect::<Vec<_>>(), "inverter AC output")
     };
-    let comparable = [(AC, ac_hours, ac_months, ac_basis),
-        (DC, &run.hourly.dc_w, run.monthly.iter().map(|m| m.dc_kwh).collect::<Vec<_>>(), "PV DC at the inverter input before MPP matching")];
+    let dc_basis = if run.energy_ledger.iter().any(|stage| stage.key == "mppt_adaptation") {
+        "PV DC at the inverter input after MPP adaptation"
+    } else { "PV DC at the inverter input before MPP adaptation" };
+    let mut comparable = vec![(AC, ac_hours, ac_months, ac_basis),
+        (DC, &run.hourly.dc_w, run.monthly.iter().map(|m| m.dc_kwh).collect::<Vec<_>>(), dc_basis)];
+    if f.inverter_ac_gross.len() == HOURS && run.local_hour.len() == HOURS {
+        comparable.push((AC_GROSS, &f.inverter_ac_gross, meter_months(&f.inverter_ac_gross),
+            "Positive PV inverter AC output before the grid feed-in limiter, including DC-linked battery output"));
+    }
     let mut comparison = Map::new();
     for (name, hours, months, basis) in comparable {
         let Some(channel) = saved.channels.get(name) else { continue; };
@@ -159,8 +177,9 @@ pub fn compare(path: &Path) -> Result<Value> {
         let monthly = channel.monthly().map(|reference| months.iter().zip(reference).enumerate()
             .map(|(month, (actual, saved))| json!({"month":month + 1,"solarcraft_kwh":actual,"pvsol_kwh":saved,"delta_kwh":actual - saved}))
             .collect::<Vec<_>>());
-        let hourly = channel.hourly_kwh.as_ref().filter(|rows| rows.len() == HOURS && hours.len() == HOURS).map(|rows| {
-            let differences = hours.iter().zip(rows).map(|(&actual, &reference)| f64::from(actual) / 1000.0 - reference);
+        let hourly = channel.hourly_kwh.as_ref().filter(|rows| comparable_clock && rows.len() == HOURS && hours.len() == HOURS).map(|rows| {
+            let differences = hours.iter().zip(&run.local_hour)
+                .map(|(&actual, &hour)| f64::from(actual) / 1000.0 - rows[hour as usize]);
             let mae = differences.clone().map(f64::abs).sum::<f64>() / HOURS as f64;
             let rmse = (differences.map(|delta| delta * delta).sum::<f64>() / HOURS as f64).sqrt();
             json!({"rows":HOURS,"mae_kwh":mae,"rmse_kwh":rmse,"source":channel.hourly_source,
@@ -187,7 +206,7 @@ fn overview(reference: &Reference) -> Value {
         "tracking_arrays": reference.tracking_arrays, "archived_shade_arrays": reference.archived_shade_arrays,
         "photoplan_arrays": reference.photoplan_arrays, "nonlinear_shade_arrays": reference.nonlinear_shade_arrays,
         "archived_scene_fields": reference.archived_scene_fields,
-        "warnings":reference.warnings,"channels":channels})
+        "warnings":reference.warnings,"channels":channels,"heat_pump_switching":reference.heat_pump_switching})
 }
 
 fn read(source: &Path) -> Result<Imported> {
@@ -241,9 +260,10 @@ fn read(source: &Path) -> Result<Imported> {
             channel.hourly_source = Some("OecForeCast.json / PvErzeugungHourly".into());
         }
     }
-    if system == "OnGridPVWithThermal" {
-        thermal::read_hourly_reference(hourly("HeatPumpElectricalConsumption"), &mut saved);
-    }
+    let heat_pump_switching = if system == "OnGridPVWithThermal" {
+        thermal::read_hourly_reference(hourly("HeatPumpElectricalConsumption"), hourly("PvErzeugungHourly").as_deref(),
+            hourly("PowerConsumptionHourly").as_deref(), &mut saved)
+    } else { None };
     for (name, channel) in &saved {
         if let Some((annual, hours)) = channel.annual_kwh.zip(channel.hourly_kwh.as_ref()) {
             let sum = hours.iter().sum::<f64>();
@@ -436,6 +456,7 @@ fn read(source: &Path) -> Result<Imported> {
             thermal::add_pv_surplus_variant(&mut project, &saved, &mut warnings);
         }
     }
+    ev::apply(&mut project, root, &db, &mut warnings);
     let reference = Reference { source_name: source_name.to_owned(), sha256: sha, format, system_type: system.to_owned(),
         weather_member, weather_diffuse, load_source, load_annual_kwh, installed_modules,
         inverters: project.electrical.inverters.len(), target_kwp,
@@ -446,7 +467,8 @@ fn read(source: &Path) -> Result<Imported> {
         archived_shade_arrays, photoplan_arrays: project.roof_photos.len(),
         dc_hybrid: project.storage.as_ref().is_some_and(|storage| matches!(storage.coupling, Coupling::DcHybrid { .. }))
             && !island,
-        initial_inputs_hash: solarcraft_engine::inputs_hash(&project, &weather_hash), warnings, channels: saved };
+        initial_inputs_hash: solarcraft_engine::inputs_hash(&project, &weather_hash),
+        warnings, channels: saved, heat_pump_switching };
     Ok(Imported { project, weather: bytes, load, photo_blobs, reference })
 }
 
@@ -700,12 +722,16 @@ fn read_saved_xml(bytes: &[u8], has_thermal: bool) -> Result<SavedXml> {
     if value(root, &["ModelString"]).is_none_or(str::is_empty) { return Ok(SavedXml::default()); }
     let mut saved = BTreeMap::new();
     for (key, group, section) in [(AC, "EnergiebilanzResultsWr", "EB_WR5_PVEnergieAC"),
+        (AC_GROSS, "EnergiebilanzResultsWr", "EB_WR6_EingespeisteEnergie"),
         (DC, "EnergiebilanzResultsVerschaltung", "EB_PV17_ErzeugtePVEnergie")] {
         let Some(node) = path_node(root, &[group, section]) else { continue; };
         let annual = number::<f64>(node, &["YearlyValue"]).filter(|v| v.is_finite()).map(|v| v / WS_PER_KWH);
         let monthly: Option<Vec<_>> = children(node, "MonthlyValues").map(|n| number::<f64>(n, &["value"])
             .filter(|v| v.is_finite()).map(|v| v / WS_PER_KWH)).collect();
         let monthly = monthly.filter(|v| v.len() == 12);
+        if key == AC_GROSS && annual.or_else(|| monthly.as_ref().map(|m| m.iter().sum())).is_none_or(|value| value <= 0.0) {
+            continue;
+        }
         if annual.is_some() || monthly.is_some() {
             saved.insert(key.into(), Channel { annual_kwh: annual, monthly_kwh: monthly, ..Default::default() });
         }

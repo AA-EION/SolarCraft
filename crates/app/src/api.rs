@@ -43,7 +43,7 @@ pub const METHODS: &[&str] = &[
 ];
 
 /// Project sections that `set_section` replaces as a whole (validated on save).
-pub const SECTIONS: &[&str] = &["ev", "fleet", "heating", "heat_store", "island_plan", "island_clusters", "hourly_cables", "grid", "loads", "storage", "tariff", "economics", "electrical", "losses", "simulation", "customer", "site"];
+pub const SECTIONS: &[&str] = &["ev", "fleet", "imported_ev_groups", "heating", "heat_store", "island_plan", "island_clusters", "hourly_cables", "grid", "loads", "storage", "tariff", "economics", "electrical", "losses", "simulation", "customer", "site"];
 
 fn lib_path(p: &Value) -> PathBuf { p.get("library").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::userlib::default_path) }
 fn cat_path(p: &Value) -> PathBuf { p.get("catalog").and_then(Value::as_str).map(PathBuf::from).unwrap_or_else(app::catalog_ops::default_catalog) }

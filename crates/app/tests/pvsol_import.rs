@@ -93,7 +93,8 @@ fn archive_with(path: &Path, storage_enabled: bool, catalog_coupling: Option<i32
     let months = "<MonthlyValues><value>3600000</value></MonthlyValues>".repeat(12);
     let saved = format!("<SimResultsXML><ModelString>synthetic</ModelString><EnergiebilanzResultsWr>
         <EB_WR5_PVEnergieAC><YearlyValue>43200000</YearlyValue>{months}</EB_WR5_PVEnergieAC>
-        </EnergiebilanzResultsWr></SimResultsXML>");
+        <EB_WR6_EingespeisteEnergie><YearlyValue>86400000</YearlyValue>{}</EB_WR6_EingespeisteEnergie>
+        </EnergiebilanzResultsWr></SimResultsXML>", months.replace("3600000", "7200000"));
     add("SimResults.xml", saved.as_bytes());
     let mut rows = "time\tEnergieBilanz.WRAcEnergie\tEnergieBilanz.PVErzeugteEnergie\n\tWs\tWs\n".to_owned();
     for i in 1..=8760 { rows.push_str(&format!("{}\t1,25\t2,5\n", i * 3600)); }
@@ -151,6 +152,8 @@ fn project_import_creates_an_editable_copy_and_compares_a_separate_reference() {
     let result = call("compare_pvsol",json!({"file":destination}));
     assert_eq!(result["imported_input_hash_matches"], true);
     assert_eq!(result["comparison"]["inverter_ac"]["monthly"].as_array().unwrap().len(), 12);
+    assert_eq!(result["comparison"]["inverter_ac_gross"]["pvsol_kwh"], 24.0);
+    assert!(result["comparison"]["inverter_ac_gross"]["hourly"].is_null());
     assert_eq!(result["comparison"]["pv_dc"]["hourly"]["rows"], 8760);
     app::set_fields(&destination, &[("/arrays/0/tilt".into(), json!(31))]).unwrap();
     assert!(call("compare_pvsol",json!({"file":destination}))["comparison"].is_null());

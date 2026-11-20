@@ -171,6 +171,29 @@ fn integrated_converter_keeps_its_charge_rating() {
 }
 
 #[test]
+fn hybrid_ac_meters_distinguish_active_battery_output_from_idle_draw() {
+    use solarcraft_engine::energy::{dispatch, UnitInput};
+    use solarcraft_model::equipment::InverterSpec;
+    use solarcraft_model::plant::{Coupling, GridService};
+
+    let mut project = dispatch_fixture(Coupling::DcHybrid { unit_id: "pv".into() });
+    project.storage.as_mut().unwrap().grid_service = GridService::None;
+    let mut inverter = InverterSpec::generic_hybrid(5.0);
+    inverter.night_w = 5.0;
+    inverter.standby_w = Some(3.0);
+    inverter.efficiency_curve = vec![[0.0, 1.0], [1.0, 1.0]];
+    inverter.battery_port.as_mut().unwrap().dc_dc_efficiency = 1.0;
+    let unit = UnitInput { id: "pv", spec: &inverter, dc_w: vec![0.0, 0.0, 50.0], v_dc: vec![0.0, 0.0, 350.0] };
+    let result = dispatch(&project, &[unit], &[100.0, 0.0, 0.0], &[0, 1, 12], 1.0).unwrap();
+    assert_eq!(result.flows.inverter_ac_gross, [100.0, 0.0, 0.0]);
+    assert_eq!(result.flows.inverter_ac_net, [100.0, -5.0, -3.0]);
+    assert_eq!(result.flows.import, [0.0, 5.0, 3.0]);
+    assert_eq!(result.flows.grid_to_load, [0.0; 3]);
+    assert!((result.balance.standby_kwh - 0.008).abs() < 1e-12);
+    assert!(result.balance.max_abs_residual_wh < 1e-6);
+}
+
+#[test]
 fn customer_load_sources_and_unserved_demand_reconcile() {
     use solarcraft_engine::energy::dispatch;
     use solarcraft_model::equipment::{GeneratorSpec, Provenance};

@@ -348,6 +348,9 @@ fn plant_issues(p: &Project, push: &mut Push) {
     if (system.needs_heating() && p.heating.is_none()) || p.heating.as_ref().is_some_and(|heat| !heat.valid()) {
         push("HEATING_CONFIGURATION", Severity::Error, "/heating".into(), "Configure a valid heating demand, heat pump and backup capacity.".into());
     }
+    if !p.imported_ev_groups.is_empty() {
+        push("IMPORTED_EV_NOT_SIMULATED", Severity::Warning, "/imported_ev_groups".into(), "Imported EV source groups and availability are retained for editing but do not contribute to simulation. Configure a SolarCraft EV or fleet separately.".into());
+    }
     if p.fleet.as_ref().is_some_and(|fleet| !fleet.valid()) {
         push("EV_FLEET", Severity::Error, "/fleet".into(), "Check vehicle groups, weekday schedules, state of charge and shared charger limits.".into());
     }

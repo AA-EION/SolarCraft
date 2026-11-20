@@ -27,6 +27,27 @@ impl Ev {
     }
 }
 
+/// Editable source configuration retained when EV dispatch semantics are unresolved.
+/// The availability slots retain their original order; no weekday origin is assumed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedEvGroup {
+    pub name: Option<String>,
+    pub vehicle_count: Option<u32>,
+    pub equipment_id: Option<String>,
+    pub equipment_revision: Option<u32>,
+    pub manufacturer: Option<String>,
+    pub equipment_name: Option<String>,
+    pub battery_kwh: Option<f64>,
+    pub charging_kw: Option<f64>,
+    pub consumption_kwh_per_100km: Option<f64>,
+    pub desired_range_km: Option<f64>,
+    pub charging_mode_code: Option<i32>,
+    pub automatic_phase_switching: Option<bool>,
+    /// Source value; its units and control semantics are not yet established.
+    pub surplus_start_threshold: Option<f64>,
+    pub availability_slots: Vec<Option<bool>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Heating {
     pub setpoint_c: f64,

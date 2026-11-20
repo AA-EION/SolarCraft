@@ -3,6 +3,7 @@
 use super::{children, flag, number, path_node, value, Channel, HOURS, WS_PER_KWH};
 use crate::{e, Result};
 use roxmltree::Node;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use solarcraft_engine::{calendar::local_time, SimResult};
 use solarcraft_model::{
@@ -21,6 +22,22 @@ const PUMP_HEAT: &str = "heat_pump_heat";
 const BOILER_HEAT: &str = "boiler_heat";
 const TANK_LOSSES: &str = "thermal_storage_losses";
 const ROD_ELECTRIC: &str = "heating_rod_electricity";
+// A reporting cutoff for classifying hourly means, independent of pump controls.
+const SWITCHING_THRESHOLD_W: f64 = 1.0;
+const SWITCHING_THRESHOLD_KWH: f64 = SWITCHING_THRESHOLD_W / 1000.0;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct ArchivedSwitching {
+    hourly_rows: usize,
+    reporting_threshold_w: f64,
+    pump_on_hours: usize,
+    pv_surplus_hours: usize,
+    pump_on_with_surplus_hours: usize,
+    pump_on_without_surplus_hours: usize,
+    pump_kwh_covered_by_concurrent_pv: f64,
+    pump_kwh_beyond_concurrent_pv: f64,
+    source: String,
+}
 
 pub(super) fn read_reference(root: Node<'_, '_>, saved: &mut BTreeMap<String, Channel>) {
     let Some(thermal) = path_node(root, &["ThermalResult"]) else { return; };
@@ -45,12 +62,41 @@ pub(super) fn read_reference(root: Node<'_, '_>, saved: &mut BTreeMap<String, Ch
     }
 }
 
-pub(super) fn read_hourly_reference(hours: Option<Vec<f64>>, saved: &mut BTreeMap<String, Channel>) {
-    let Some(hours) = hours.filter(|hours| hours.len() == HOURS && hours.iter().all(|v| v.is_finite() && *v >= 0.0)
-        && hours.iter().any(|v| *v > 0.0)) else { return; };
+pub(super) fn read_hourly_reference(hours: Option<Vec<f64>>, pv: Option<&[f64]>, base_load: Option<&[f64]>,
+    saved: &mut BTreeMap<String, Channel>) -> Option<ArchivedSwitching>
+{
+    let hours = hours.filter(|hours| hours.len() == HOURS && hours.iter().all(|v| v.is_finite() && *v >= 0.0)
+        && hours.iter().any(|v| *v > 0.0))?;
+    let switching = pv.zip(base_load).and_then(|(pv, base_load)| archived_switching(&hours, pv, base_load));
     let channel = saved.entry(PUMP_ELECTRIC.into()).or_default();
     channel.hourly_kwh = Some(hours);
     channel.hourly_source = Some("OecForeCast.json / HeatPumpElectricalConsumption".into());
+    switching
+}
+
+fn archived_switching(pump: &[f64], pv: &[f64], base_load: &[f64]) -> Option<ArchivedSwitching> {
+    if pv.len() != HOURS || base_load.len() != HOURS
+        || pv.iter().any(|v| !v.is_finite()) || base_load.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return None;
+    }
+    let mut observed = ArchivedSwitching {
+        hourly_rows: HOURS, reporting_threshold_w: SWITCHING_THRESHOLD_W, pump_on_hours: 0,
+        pv_surplus_hours: 0, pump_on_with_surplus_hours: 0, pump_on_without_surplus_hours: 0,
+        pump_kwh_covered_by_concurrent_pv: 0.0, pump_kwh_beyond_concurrent_pv: 0.0,
+        source: "OecForeCast.json / HeatPumpElectricalConsumption, PvErzeugungHourly, PowerConsumptionHourly".into(),
+    };
+    for ((&pump, &pv), &base_load) in pump.iter().zip(pv).zip(base_load) {
+        let surplus = (pv - base_load).max(0.0);
+        let pump_on = pump > SWITCHING_THRESHOLD_KWH;
+        let has_surplus = surplus > SWITCHING_THRESHOLD_KWH;
+        observed.pump_on_hours += usize::from(pump_on);
+        observed.pv_surplus_hours += usize::from(has_surplus);
+        observed.pump_on_with_surplus_hours += usize::from(pump_on && has_surplus);
+        observed.pump_on_without_surplus_hours += usize::from(pump_on && !has_surplus);
+        observed.pump_kwh_covered_by_concurrent_pv += pump.min(surplus);
+        observed.pump_kwh_beyond_concurrent_pv += (pump - surplus).max(0.0);
+    }
+    Some(observed)
 }
 
 pub(super) fn add_pv_surplus_variant(project: &mut Project, saved: &BTreeMap<String, Channel>, warnings: &mut Vec<String>) {
@@ -90,16 +136,23 @@ pub(super) fn compare_reference(project: &Project, run: &SimResult, saved: &BTre
                 json!({"month":month + 1, "solarcraft_kwh":actual, "pvsol_kwh":saved, "delta_kwh":actual - saved})
             }).collect::<Vec<_>>()
         });
-        let hourly = hours.as_ref().zip(channel.hourly_kwh.as_ref().filter(|hours| hours.len() == HOURS)).map(|(hours, reference)| {
+        let aligned = hours.as_ref().zip(channel.hourly_kwh.as_ref().filter(|hours| hours.len() == HOURS));
+        let hourly = aligned.map(|(hours, reference)| {
             let differences = hours.iter().zip(reference).map(|(actual, saved)| actual - saved);
             let mae = differences.clone().map(f64::abs).sum::<f64>() / HOURS as f64;
             let rmse = (differences.map(|delta| delta * delta).sum::<f64>() / HOURS as f64).sqrt();
             json!({"rows":HOURS, "mae_kwh":mae, "rmse_kwh":rmse, "source":channel.hourly_source,
                 "alignment":"ordered local standard-time hour from January 1"})
         });
-        comparison.insert(name.into(), json!({"solarcraft_kwh":modeled, "pvsol_kwh":pvsol, "solarcraft_basis":basis,
+        let mut row = json!({"solarcraft_kwh":modeled, "pvsol_kwh":pvsol, "solarcraft_basis":basis,
             "delta_kwh":delta, "delta_pct":delta.zip(pvsol.filter(|v| *v > 1e-9)).map(|(d, v)| d / v * 100.0),
-            "monthly":monthly, "hourly":hourly}));
+            "monthly":monthly, "hourly":hourly});
+        if name == PUMP_ELECTRIC {
+            if let Some((hours, reference)) = aligned {
+                row["switching"] = compare_switching(hours, reference);
+            }
+        }
+        comparison.insert(name.into(), row);
     };
     match controls.emitter {
         ThermalEmitter::HeatPump { pv_only, .. } => {
@@ -116,6 +169,23 @@ pub(super) fn compare_reference(project: &Project, run: &SimResult, saved: &BTre
         compare(BOILER_HEAT, boiler, "heat delivered by the fuel boiler", false);
     }
     compare(TANK_LOSSES, tank.standing_loss_kwh, "thermal tank standing loss", false);
+}
+
+fn compare_switching(modeled: &[f64], saved: &[f64]) -> Value {
+    let mut matched_on = 0;
+    let mut missed_on = 0;
+    let mut extra_on = 0;
+    for (&modeled, &saved) in modeled.iter().zip(saved) {
+        match (modeled > SWITCHING_THRESHOLD_KWH, saved > SWITCHING_THRESHOLD_KWH) {
+            (true, true) => matched_on += 1,
+            (false, true) => missed_on += 1,
+            (true, false) => extra_on += 1,
+            (false, false) => {}
+        }
+    }
+    json!({"reporting_threshold_w":SWITCHING_THRESHOLD_W, "hourly_rows":HOURS,
+        "pvsol_pump_on_hours":matched_on + missed_on, "solarcraft_pump_on_hours":matched_on + extra_on,
+        "matched_on_hours":matched_on, "missed_on_hours":missed_on, "extra_on_hours":extra_on})
 }
 
 fn aligned_electricity(run: &SimResult) -> Option<Vec<f64>> {
@@ -278,6 +348,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn distinguishes_hourly_switching_from_concurrent_pv_attribution() {
+        let mut pump = vec![0.0; HOURS];
+        let mut pv = vec![0.0; HOURS];
+        let mut base_load = vec![0.0; HOURS];
+        pump[..4].copy_from_slice(&[0.2, 0.35, 0.01, 0.001]);
+        pv[..4].copy_from_slice(&[0.7, 0.5, -0.2, 0.201]);
+        base_load[..4].copy_from_slice(&[0.4, 0.3, 0.1, 0.001]);
+        let mut saved = BTreeMap::new();
+        let observed = read_hourly_reference(Some(pump.clone()), Some(&pv), Some(&base_load), &mut saved).unwrap();
+        assert_eq!(observed.pump_on_hours, 3);
+        assert_eq!(observed.pv_surplus_hours, 3);
+        assert_eq!(observed.pump_on_with_surplus_hours, 2);
+        assert_eq!(observed.pump_on_without_surplus_hours, 1);
+        assert!((observed.pump_kwh_covered_by_concurrent_pv - 0.401).abs() < 1e-10);
+        assert!((observed.pump_kwh_beyond_concurrent_pv - 0.160).abs() < 1e-10);
+
+        let mut modeled = pump.clone();
+        modeled[2] = 0.0;
+        modeled[4] = 0.1;
+        let switching = compare_switching(&modeled, &pump);
+        assert_eq!(switching["matched_on_hours"], 2);
+        assert_eq!(switching["missed_on_hours"], 1);
+        assert_eq!(switching["extra_on_hours"], 1);
+
+        let missing = read_hourly_reference(Some(pump), Some(&pv[..HOURS - 1]), Some(&base_load), &mut saved);
+        assert!(missing.is_none());
+        assert_eq!(saved[PUMP_ELECTRIC].hourly_kwh.as_ref().map(Vec::len), Some(HOURS));
+    }
+
+    #[test]
     fn saved_solar_dispatch_keeps_standard_as_active_design() {
         let archive = roxmltree::Document::parse(r#"
             <Results><ThermalResult>
@@ -291,7 +391,7 @@ mod tests {
         "#).unwrap();
         let mut saved = BTreeMap::new();
         read_reference(archive.root_element(), &mut saved);
-        read_hourly_reference(Some(vec![0.0; HOURS - 1]), &mut saved);
+        assert!(read_hourly_reference(Some(vec![0.0; HOURS - 1]), None, None, &mut saved).is_none());
         assert_eq!(saved[PUMP_ELECTRIC].annual(), Some(1000.0));
         assert_eq!(saved[PUMP_SOLAR].annual(), Some(998.0));
         assert!(saved[PUMP_ELECTRIC].hourly_kwh.is_none());

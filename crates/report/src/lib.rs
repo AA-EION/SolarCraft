@@ -154,6 +154,7 @@ pub fn build_view_for(inp: &ReportInput, report_type: ReportType) -> View {
             (_, "strings") => match l { Lang::Es => "Desajuste de cadenas en paralelo", Lang::De => "Fehlanpassung paralleler Strings", _ => "Descasamento de strings em paralelo" }.into(),
             (_, "quality") => match l { Lang::Es => "Calidad de módulo", Lang::De => "Modulqualität", _ => "Qualidade do módulo" }.into(),
             (_, "dc_out") => match l { Lang::Es => "Salida CC del generador", Lang::De => "DC-Ausgang Generator", _ => "Saída CC do gerador" }.into(),
+            (_, "mppt_adaptation") => tr(l, "MPPT adaptation", "Adaptación MPPT", "MPP-Anpassung", "Adaptação MPPT"),
             (_, "inverter") => match l { Lang::Es => "Eficiencia del inversor", Lang::De => "Wechselrichterwirkungsgrad", _ => "Eficiência do inversor" }.into(),
             (_, "clipping") => match l { Lang::Es => "Recorte por límite de potencia", Lang::De => "Begrenzung (Leistungslimit)", _ => "Corte por limite de potência" }.into(),
             (_, "night") => match l { Lang::Es => "Consumo nocturno del inversor", Lang::De => "Nachtverbrauch Wechselrichter", _ => "Consumo noturno do inversor" }.into(),

@@ -60,7 +60,7 @@ struct DemandEditorPage: View {
 
     var body: some View {
         Form {
-            if isEv { FleetControls() }
+            if isEv { ImportedEvControls(); FleetControls() }
             if !isEv || m.section("fleet").isEmpty {
                 Toggle(m.t(isEv ? "ev_page" : "heat_page"), isOn: $enabled).disabled(required)
                 if enabled {
@@ -159,6 +159,32 @@ struct IslandControlsPage: View {
             costs = Dictionary(uniqueKeysWithValues: (economics + replacements).map { ($0.id, num(existing, $0.id, $0.preset)) })
             charge = input["charge_battery"] as? Bool ?? false
             currency = m.section("tariff")["currency"] as? String ?? "EUR"
+        }
+    }
+}
+
+private struct ImportedEvControls: View {
+    @EnvironmentObject var m: AppModel
+    @State private var draft = ""
+    private var groups: [JSONDict] { dicts(m.raw["imported_ev_groups"]) }
+
+    var body: some View {
+        if !groups.isEmpty {
+            Section(m.t("imported_ev_title")) {
+                Text(m.t("imported_ev_hint")).foregroundStyle(.secondary)
+                Text(m.t("imported_ev_json"))
+                TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 250)
+                Button(m.t("apply")) {
+                    guard let data = draft.data(using: .utf8),
+                          let value = try? JSONSerialization.jsonObject(with: data) as? [JSONDict] else {
+                        m.error = m.t("imported_ev_json"); return
+                    }
+                    m.setSection("imported_ev_groups", value)
+                }.buttonStyle(.borderedProminent)
+            }.onAppear {
+                if let data = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted, .sortedKeys]),
+                   let text = String(data: data, encoding: .utf8) { draft = text }
+            }
         }
     }
 }
