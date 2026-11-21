@@ -235,7 +235,9 @@ struct StorageLoadsPage: View {
         case "export_window": gs = ["kind": "export_window", "start_hour": Int(gsStart), "end_hour": Int(gsEnd), "power_kw": gsPower]
         default: gs = ["kind": "none"]
         }
+        let previous = m.section("storage")
         let value: JSONDict = [
+            "timed_charge": previous["timed_charge"] ?? NSNull(), "timed_discharge": previous["timed_discharge"] ?? NSNull(),
             "battery_id": batteryId, "units": units, "coupling": c, "model": model, "soc_min_pct": socMin, "soc_max_pct": socMax, "initial_soc_pct": initSoc,
             "backup_reserve_pct": backup, "grid_services_pct": services, "charge_priority": ["backup", "self_consumption", "grid_services"],
             "grid_charge_backup": gridCharge, "grid_service": gs,

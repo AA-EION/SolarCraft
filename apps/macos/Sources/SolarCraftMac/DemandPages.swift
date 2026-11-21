@@ -165,7 +165,6 @@ struct IslandControlsPage: View {
 
 private struct ImportedEvControls: View {
     @EnvironmentObject var m: AppModel
-    @State private var draft = ""
     private var groups: [JSONDict] { dicts(m.raw["imported_ev_groups"]) }
 
     var body: some View {
@@ -173,17 +172,12 @@ private struct ImportedEvControls: View {
             Section(m.t("imported_ev_title")) {
                 Text(m.t("imported_ev_hint")).foregroundStyle(.secondary)
                 Text(m.t("imported_ev_json"))
-                TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 250)
-                Button(m.t("apply")) {
-                    guard let data = draft.data(using: .utf8),
-                          let value = try? JSONSerialization.jsonObject(with: data) as? [JSONDict] else {
-                        m.error = m.t("imported_ev_json"); return
-                    }
-                    m.setSection("imported_ev_groups", value)
-                }.buttonStyle(.borderedProminent)
-            }.onAppear {
                 if let data = try? JSONSerialization.data(withJSONObject: groups, options: [.prettyPrinted, .sortedKeys]),
-                   let text = String(data: data, encoding: .utf8) { draft = text }
+                   let text = String(data: data, encoding: .utf8) {
+                    ScrollView([.horizontal, .vertical]) {
+                        Text(text).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                    }.frame(height: 250)
+                }
             }
         }
     }

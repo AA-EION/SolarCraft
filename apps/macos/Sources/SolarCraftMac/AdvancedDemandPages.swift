@@ -110,6 +110,11 @@ private struct FleetGroupSheet: View {
     @State private var fields: [String: Double] = [:]
     @State private var days = Set<Int>()
     @State private var strategy = "solar_preferred"
+    @State private var schedule = ""
+    @State private var minimumKW = 0.0
+    @State private var surplusFraction = 0.0
+    private var weekly: JSONDict? { record["weekly_schedule"] as? JSONDict }
+    private var surplusStart: JSONDict? { record["surplus_start"] as? JSONDict }
     private let specs: [InputSpec] = [
         .init("vehicles","fleet_vehicles",1,whole:true), .init("battery_kwh","fleet_battery",60),
         .init("initial_soc_pct","initial_soc",60), .init("departure_soc_pct","fleet_departure",60),
@@ -122,15 +127,31 @@ private struct FleetGroupSheet: View {
         Form {
             TextField(m.t("fleet_group"), text: $name)
             Text(m.t("fleet_per_vehicle")).foregroundStyle(.secondary)
-            ForEach(specs) { s in NumField(label:m.t(s.label), value:s.field($fields)) }
-            LabeledContent(m.t("fleet_arrival_days")) {
-                HStack {
-                    ForEach(0..<7) { i in
-                        Toggle(Calendar.current.shortWeekdaySymbols[(i + 1) % 7], isOn: Binding(
-                            get: { days.contains(i) }, set: { if $0 { days.insert(i) } else { days.remove(i) } }
-                        )).toggleStyle(.checkbox)
+            ForEach(specs) { s in
+                if weekly == nil || (s.id != "arrival_hour" && s.id != "departure_hour") {
+                    NumField(label:m.t(s.label), value:s.field($fields))
+                }
+            }
+            if let weekly {
+                Text(m.t(str(weekly, "origin") == "year_start" ? "fleet_weekly_year" : "fleet_weekly_monday"))
+                    .foregroundStyle(.secondary)
+                LabeledContent(m.t("fleet_weekly")) {
+                    TextEditor(text: $schedule).font(.system(.body, design: .monospaced)).frame(minHeight: 135)
+                }
+            } else {
+                LabeledContent(m.t("fleet_arrival_days")) {
+                    HStack {
+                        ForEach(0..<7) { i in
+                            Toggle(Calendar.current.shortWeekdaySymbols[(i + 1) % 7], isOn: Binding(
+                                get: { days.contains(i) }, set: { if $0 { days.insert(i) } else { days.remove(i) } }
+                            )).toggleStyle(.checkbox)
+                        }
                     }
                 }
+            }
+            if surplusStart != nil {
+                NumField(label: m.t("fleet_surplus_min_kw"), value: $minimumKW)
+                NumField(label: m.t("fleet_surplus_fraction"), value: $surplusFraction)
             }
             Picker(m.t("ev_strategy"), selection: $strategy) {
                 Text(m.t("ev_solar")).tag("solar_preferred")
@@ -143,9 +164,25 @@ private struct FleetGroupSheet: View {
                     value["name"] = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     value["weekdays"] = days.sorted()
                     value["strategy"] = strategy
+                    if var weekly {
+                        let bits = schedule.filter { !$0.isWhitespace }
+                        guard bits.count == 168, bits.allSatisfy({ $0 == "0" || $0 == "1" }),
+                              bits.contains("1"), num(value, "trip_kwh") == 0 || bits.contains("0") else {
+                            m.error = m.t("fleet_weekly"); return
+                        }
+                        weekly["slots"] = bits.map { $0 == "1" }
+                        value["weekly_schedule"] = weekly
+                    }
+                    if surplusStart != nil {
+                        guard minimumKW >= 0, minimumKW <= num(value, "charge_kw"),
+                              (0...1).contains(surplusFraction) else {
+                            m.error = m.t("fleet_surplus_fraction"); return
+                        }
+                        value["surplus_start"] = ["minimum_kw": minimumKW, "fraction": surplusFraction]
+                    }
                     save(value)
                     dismiss()
-                }.buttonStyle(.borderedProminent).disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || days.isEmpty)
+                }.buttonStyle(.borderedProminent).disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (weekly == nil && days.isEmpty))
             }
         }.padding(16).frame(width: 595, height: 560)
         .onAppear {
@@ -153,6 +190,11 @@ private struct FleetGroupSheet: View {
             fields = numberInputs(specs, record)
             days = Set(record["weekdays"] as? [Int] ?? Array(0..<5))
             strategy = record["strategy"] as? String ?? "solar_preferred"
+            if let slots = weekly?["slots"] as? [Bool] {
+                schedule = (0..<7).map { day in slots.dropFirst(day * 24).prefix(24).map { $0 ? "1" : "0" }.joined() }.joined(separator: "\n")
+            }
+            minimumKW = num(surplusStart ?? [:], "minimum_kw")
+            surplusFraction = num(surplusStart ?? [:], "fraction")
         }
     }
 }

@@ -348,8 +348,8 @@ fn plant_issues(p: &Project, push: &mut Push) {
     if (system.needs_heating() && p.heating.is_none()) || p.heating.as_ref().is_some_and(|heat| !heat.valid()) {
         push("HEATING_CONFIGURATION", Severity::Error, "/heating".into(), "Configure a valid heating demand, heat pump and backup capacity.".into());
     }
-    if !p.imported_ev_groups.is_empty() {
-        push("IMPORTED_EV_NOT_SIMULATED", Severity::Warning, "/imported_ev_groups".into(), "Imported EV source groups and availability are retained for editing but do not contribute to simulation. Configure a SolarCraft EV or fleet separately.".into());
+    if !p.imported_ev_groups.is_empty() && p.fleet.is_none() {
+        push("IMPORTED_EV_NOT_SIMULATED", Severity::Warning, "/imported_ev_groups".into(), "This project has archived EV data but no active fleet. Reimport the source archive or configure a fleet on the Electric Vehicles page.".into());
     }
     if p.fleet.as_ref().is_some_and(|fleet| !fleet.valid()) {
         push("EV_FLEET", Severity::Error, "/fleet".into(), "Check vehicle groups, weekday schedules, state of charge and shared charger limits.".into());
@@ -395,6 +395,16 @@ fn plant_issues(p: &Project, push: &mut Push) {
     if !all_islands_have_loads && !(0.0..=1.0).contains(&p.loads.critical_fraction) { push("LOAD_CRITICAL", Severity::Error, "/loads/critical_fraction".into(), "Critical load share must be between 0 and 1.".into()); }
     if let Some(st) = &p.storage {
         let Some(b) = p.library.battery(&st.battery_id) else { push("BATTERY_MISSING", Severity::Error, "/storage/battery_id".into(), format!("Battery '{}' is not in the project library.", st.battery_id)); return };
+        for (name, timed) in [("timed_charge", &st.timed_charge), ("timed_discharge", &st.timed_discharge)] {
+            if let Some(t) = timed {
+                if !t.target_soc_pct.is_finite() || !(st.soc_min_pct..=st.soc_max_pct).contains(&t.target_soc_pct)
+                    || !t.power_kw.is_finite() || t.power_kw <= 0.0 || t.power_kw > 1e8
+                    || t.periods.is_empty() || t.periods.len() > 3
+                    || t.periods.iter().any(|p| p[0] >= 86400 || p[1] > 86400) {
+                    push("STORAGE_TIMED_OPERATION", Severity::Error, format!("/storage/{name}"), "Timed battery operation needs a target in the SOC window, positive power and one to three daily periods.".into());
+                }
+            }
+        }
         if st.units == 0 { push("BATTERY_UNITS", Severity::Error, "/storage/units".into(), "At least one battery unit is required.".into()); }
         if st.soc_min_pct < b.soc_min_pct - 1e-9 || st.soc_max_pct > b.soc_max_pct + 1e-9 || st.soc_min_pct >= st.soc_max_pct {
             push("STORAGE_SOC_WINDOW", Severity::Error, "/storage/soc_min_pct".into(), format!("Operating SOC window {:.0}–{:.0} % must lie inside the battery's {:.0}–{:.0} % and be non-empty.", st.soc_min_pct, st.soc_max_pct, b.soc_min_pct, b.soc_max_pct));

@@ -27,8 +27,7 @@ impl Ev {
     }
 }
 
-/// Editable source configuration retained when EV dispatch semantics are unresolved.
-/// The availability slots retain their original order; no weekday origin is assumed.
+/// Archived EV configuration and its original ordered availability slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportedEvGroup {
     pub name: Option<String>,
@@ -43,9 +42,44 @@ pub struct ImportedEvGroup {
     pub desired_range_km: Option<f64>,
     pub charging_mode_code: Option<i32>,
     pub automatic_phase_switching: Option<bool>,
-    /// Source value; its units and control semantics are not yet established.
+    /// Fraction of minimum charger power needed to start surplus charging.
     pub surplus_start_threshold: Option<f64>,
     pub availability_slots: Vec<Option<bool>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WeeklyScheduleOrigin {
+    #[default]
+    Monday,
+    YearStart,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WeeklyFleetSchedule {
+    pub slots: Vec<bool>,
+    #[serde(default)]
+    pub origin: WeeklyScheduleOrigin,
+}
+
+impl WeeklyFleetSchedule {
+    pub fn departures(&self) -> usize {
+        self.slots.iter().copied()
+            .zip(self.slots.iter().copied().cycle().skip(1))
+            .filter(|&(before, after)| before && !after)
+            .count()
+    }
+
+    fn valid(&self, trip_kwh: f64) -> bool {
+        self.slots.len() == 168 && self.slots.contains(&true)
+            && (trip_kwh == 0.0 || self.departures() > 0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SurplusChargeStart {
+    pub minimum_kw: f64,
+    pub fraction: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,20 +145,31 @@ pub struct FleetGroup {
     pub discharge_efficiency: f64,
     #[serde(default)]
     pub strategy: ChargeStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_schedule: Option<WeeklyFleetSchedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surplus_start: Option<SurplusChargeStart>,
 }
 
 fn unity_efficiency() -> f64 { 1.0 }
 
 impl FleetGroup {
     pub fn valid(&self) -> bool {
+        let schedule_valid = match &self.weekly_schedule {
+            Some(schedule) => schedule.valid(self.trip_kwh),
+            None => !self.weekdays.is_empty() && self.weekdays.len() <= 7
+                && self.weekdays.iter().all(|&d| d < 7)
+                && (0..7).filter(|d| self.weekdays.contains(d)).count() == self.weekdays.len()
+                && self.arrival_hour < 24 && self.departure_hour < 24,
+        };
         !self.name.trim().is_empty() && self.name.len() <= 100 && (1..=1000).contains(&self.vehicles)
             && (0.1..=1000.0).contains(&self.battery_kwh) && (0.0..=100.0).contains(&self.initial_soc_pct)
             && (0.0..=100.0).contains(&self.departure_soc_pct) && (0.0..=self.battery_kwh).contains(&self.trip_kwh)
-            && !self.weekdays.is_empty() && self.weekdays.len() <= 7 && self.weekdays.iter().all(|&d| d < 7)
-            && (0..7).filter(|d| self.weekdays.contains(d)).count() == self.weekdays.len()
-            && self.arrival_hour < 24 && self.departure_hour < 24
+            && schedule_valid
             && (0.01..=500.0).contains(&self.charge_kw) && (0.05..=1.0).contains(&self.charge_efficiency)
             && (0.0..=500.0).contains(&self.discharge_kw) && (0.05..=1.0).contains(&self.discharge_efficiency)
+            && self.surplus_start.as_ref().is_none_or(|start|
+                (0.0..=self.charge_kw).contains(&start.minimum_kw) && (0.0..=1.0).contains(&start.fraction))
     }
 }
 

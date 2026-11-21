@@ -138,7 +138,7 @@ pub(super) fn apply(project: &mut Project, bytes: &[u8], db: &Value, sha: &str, 
         model: BatteryModel::Detailed, soc_min_pct: soc_min, soc_max_pct: 100.0, initial_soc_pct: soc_min.max(50.0),
         backup_reserve_pct: 0.0, grid_services_pct: 0.0,
         charge_priority: vec![EnergyUse::Backup, EnergyUse::SelfConsumption, EnergyUse::GridServices],
-        grid_charge_backup: false, grid_service: GridService::None, outages: vec![], generator_id,
+        grid_charge_backup: false, grid_service: GridService::None, outages: vec![], generator_id, timed_charge: None, timed_discharge: None,
     });
     if banks > 1 {
         warnings.push(format!("The {banks} identical battery clusters share one AC bus and are represented as one equivalent bank. Cluster-specific balancing is not replayed."));

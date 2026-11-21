@@ -36,18 +36,11 @@ public sealed partial class MainWindow
         if (_project?["imported_ev_groups"] is not JsonArray groups || groups.Count == 0) return;
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(Note(T("imported_ev_hint")));
-        var draft = new TextBox { Header = T("imported_ev_json"), AcceptsReturn = true,
+        var draft = new TextBox { Header = T("imported_ev_json"), AcceptsReturn = true, IsReadOnly = true,
             TextWrapping = TextWrapping.NoWrap, Height = 250,
             Text = groups.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }) };
         panel.Children.Add(draft);
-        panel.Children.Add(Btn(T("apply"), () => {
-            if (!Try(() => {
-                var value = JsonNode.Parse(draft.Text) as JsonArray ?? throw new FormatException(T("imported_ev_json"));
-                Api.Invoke("set_section", new { file = _file, section = "imported_ev_groups", value });
-            })) return;
-            Reload();
-        }, true));
-        EvPage.Children.Insert(0, new Expander { Header = T("imported_ev_title"), Content = panel, IsExpanded = true });
+        EvPage.Children.Insert(0, new Expander { Header = T("imported_ev_title"), Content = panel });
     }
 
     private void DemandEditor(Panel panel, string section, bool required, (string key, string label, double fallback, bool whole)[] specs,

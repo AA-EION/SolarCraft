@@ -138,7 +138,7 @@ fn dispatch_fixture(coupling: solarcraft_model::plant::Coupling) -> Project {
         charge_priority: vec![EnergyUse::Backup, EnergyUse::SelfConsumption, EnergyUse::GridServices],
         grid_charge_backup: false,
         grid_service: GridService::ExportWindow { start_hour: 0, end_hour: 24, power_kw: 4.0 },
-        outages: vec![], generator_id: None,
+        outages: vec![], generator_id: None, timed_charge: None, timed_discharge: None,
     });
     project
 }
@@ -219,4 +219,66 @@ fn customer_load_sources_and_unserved_demand_reconcile() {
     assert!((demand - b.load_kwh).abs() < 1e-12);
     assert!((b.autarky - 750.0 / 2800.0).abs() < 1e-12);
     assert!(b.max_abs_residual_wh < 1e-6);
+}
+
+#[test]
+fn timed_battery_operations_respect_windows_targets_and_converter_limits() {
+    use solarcraft_engine::energy::dispatch;
+    use solarcraft_model::plant::{Coupling, GridService, TimedBatteryOperation};
+    let mut p = dispatch_fixture(Coupling::Integrated);
+    let st = p.storage.as_mut().unwrap();
+    st.initial_soc_pct = 20.0;
+    st.grid_services_pct = 0.0;
+    st.grid_service = GridService::None;
+    st.timed_charge = Some(TimedBatteryOperation { target_soc_pct: 30.0, power_kw: 4.0, periods: vec![[22*3600, 2*3600]] });
+    st.timed_discharge = Some(TimedBatteryOperation { target_soc_pct: 20.0, power_kw: 3.0, periods: vec![[12*3600, 13*3600]] });
+    let r = dispatch(&p, &[], &[1000.0; 4], &[22, 23, 3, 12], 1.0).unwrap();
+    assert_eq!(r.flows.batt_charge_grid[0], 2000.0);
+    assert_eq!(r.flows.batt_discharge[0], 0.0);
+    assert_eq!(r.flows.batt_charge_grid[1], 0.0);
+    assert_eq!(r.flows.batt_discharge[3], 1000.0); // at the target, normal load dispatch resumes
+    assert!(r.balance.max_abs_residual_wh < 1e-6);
+}
+
+#[test]
+fn timed_discharge_exports_only_to_the_target_and_grid_limit() {
+    use solarcraft_engine::energy::dispatch;
+    use solarcraft_model::plant::{Coupling, GridService, TimedBatteryOperation};
+    let mut p = dispatch_fixture(Coupling::Integrated);
+    let st = p.storage.as_mut().unwrap();
+    st.initial_soc_pct = 50.0;
+    st.grid_services_pct = 0.0;
+    st.grid_service = GridService::None;
+    st.timed_discharge = Some(TimedBatteryOperation { target_soc_pct: 40.0, power_kw: 4.0, periods: vec![[0, 3600]] });
+    p.grid.export_limit_kw = Some(1.0);
+    let r = dispatch(&p, &[], &[0.0], &[0], 1.0).unwrap();
+    assert_eq!(r.flows.export[0], 1000.0);
+    assert_eq!(r.flows.batt_discharge[0], 1000.0);
+    assert!(r.balance.max_abs_residual_wh < 1e-6);
+}
+
+
+#[test]
+fn hybrid_timed_charge_at_night_respects_port_and_reconciles() {
+    use solarcraft_engine::energy::{dispatch, UnitInput};
+    use solarcraft_model::equipment::InverterSpec;
+    use solarcraft_model::plant::{Coupling, GridService, TimedBatteryOperation};
+    let mut p = dispatch_fixture(Coupling::DcHybrid { unit_id: "pv".into() });
+    let st = p.storage.as_mut().unwrap();
+    st.initial_soc_pct = 20.0;
+    st.grid_services_pct = 0.0;
+    st.grid_service = GridService::None;
+    st.timed_charge = Some(TimedBatteryOperation { target_soc_pct: 80.0, power_kw: 4.0, periods: vec![[0, 3600]] });
+    let mut inverter = InverterSpec::generic_hybrid(5.0);
+    inverter.night_w = 0.0;
+    inverter.efficiency_curve = vec![[0.0, 1.0], [1.0, 1.0]];
+    let port = inverter.battery_port.as_mut().unwrap();
+    port.p_charge_max_w = 1000.0;
+    port.dc_dc_efficiency = 1.0;
+    let unit = UnitInput { id: "pv", spec: &inverter, dc_w: vec![0.0], v_dc: vec![0.0] };
+    let r = dispatch(&p, &[unit], &[500.0], &[0], 1.0).unwrap();
+    assert_eq!(r.flows.batt_charge_grid[0], 1000.0);
+    assert_eq!(r.flows.batt_discharge[0], 0.0);
+    assert_eq!(r.flows.import[0], 1500.0);
+    assert!(r.balance.max_abs_residual_wh < 1e-6);
 }

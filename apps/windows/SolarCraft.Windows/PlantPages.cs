@@ -537,6 +537,7 @@ public sealed partial class MainWindow
                 ["backup_reserve_pct"] = backup.Value, ["grid_services_pct"] = services.Value, ["charge_priority"] = new JsonArray("backup", "self_consumption", "grid_services"),
                 ["grid_charge_backup"] = gridCharge.IsChecked == true, ["grid_service"] = gsv, ["outages"] = outs,
                 ["generator_id"] = Sel(generator) is "" ? null : Sel(generator),
+                ["timed_charge"] = s?["timed_charge"]?.DeepClone(), ["timed_discharge"] = s?["timed_discharge"]?.DeepClone(),
             });
         }, true));
         IssuesInto(p, x => x.StartsWith("/storage") || x.StartsWith("/loads") || x.StartsWith("STORAGE") || x.StartsWith("BATTERY"));

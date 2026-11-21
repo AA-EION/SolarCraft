@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline import and comparison for the observed ZIP-based PV*SOL project formats.
+mod archived_cables;
 mod archived_photo;
 mod diffuse;
 mod ev;
@@ -9,6 +10,7 @@ mod archived_routes;
 mod archived_scene;
 mod archived_shade;
 mod island;
+mod tariff;
 mod thermal;
 mod wbv_timing;
 
@@ -344,7 +346,8 @@ fn read(source: &Path) -> Result<Imported> {
         warnings.push("Modules with standard part-load operation use the two-diode model with PV*SOL's preferred parameter fit.".into());
     }
     // Non-storage designs can still contain a populated BatSys template.
-    if system.starts_with("OnGridPVWithBatteries") {
+    let has_ev = system.starts_with("OnGridPVWithEMobility");
+    if system.starts_with("OnGridPVWithBatteries") || system.starts_with("OnGridPVWithEMobilityAndBatteries") {
         if let Err(error) = grid_storage::apply(&mut project, root, &db, &sha, &mut warnings) {
             warnings.push(format!("The saved battery system could not be imported: {}", error.message));
         }
@@ -362,6 +365,7 @@ fn read(source: &Path) -> Result<Imported> {
     if let Some(volts) = number::<f64>(root, &["ACNetz", "NetzSpannung"]).filter(|v| (minimum_bus_voltage..=500.0).contains(v)) {
         project.grid.voltage_v = volts;
     }
+    archived_cables::apply(&mut project, root, &mut warnings);
     project.grid.feed_in = if system.starts_with("OnGridPVAdvanced") || system.starts_with("OnGridPremium") { FeedIn::Full } else { FeedIn::Surplus };
     if flag(root, &["ACNetz", "IstProzentualeAbregelung"]) {
         if flag(root, &["ACNetz", "AbregelungAmWR"]) {
@@ -456,7 +460,15 @@ fn read(source: &Path) -> Result<Imported> {
             thermal::add_pv_surplus_variant(&mut project, &saved, &mut warnings);
         }
     }
-    ev::apply(&mut project, root, &db, &mut warnings);
+    tariff::apply(&mut project, economy.as_ref(), &db, &sha, target_kwp, &mut warnings);
+    if has_ev {
+        ev::apply(&mut project, root, &db, &mut warnings);
+        if project.fleet.is_some() && project.grid.feed_in == FeedIn::Surplus
+            && !matches!(project.loads.profile, LoadProfile::None) {
+            use solarcraft_model::workflow::SystemType;
+            project.workflow.system = if project.storage.is_some() { SystemType::GridEvBattery } else { SystemType::GridEv };
+        }
+    }
     let reference = Reference { source_name: source_name.to_owned(), sha256: sha, format, system_type: system.to_owned(),
         weather_member, weather_diffuse, load_source, load_annual_kwh, installed_modules,
         inverters: project.electrical.inverters.len(), target_kwp,
@@ -585,7 +597,7 @@ fn apply_field_settings(project: &mut Project, root: Node<'_, '_>, warnings: &mu
     if !lengths.is_empty() && lengths.iter().all(|v| *v == 0.0) {
         project.losses.dc_wiring_pct = Field::user(0.0);
     } else if !lengths.is_empty() {
-        warnings.push("The source's DC cable lengths are not mapped; SolarCraft keeps its default DC wiring loss.".into());
+        warnings.push("Saved DC cable lengths do not activate routed losses on import. The project's current DC wiring loss still applies.".into());
     }
 }
 

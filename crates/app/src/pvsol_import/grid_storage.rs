@@ -12,13 +12,42 @@ use roxmltree::Node;
 use serde_json::{json, Value};
 use solarcraft_model::{
     equipment::{BatteryCells, BatteryPort, BatterySpec, Chemistry, Converter, Provenance},
-    plant::{BatteryModel, CatalogRef, Coupling, EnergyUse, GridService, Storage},
+    plant::{BatteryModel, CatalogRef, Coupling, EnergyUse, GridService, Storage, TimedBatteryOperation},
     Project,
 };
 
 fn rating(record: &Value, key: &str, low: f64, high: f64) -> Result<f64> {
     record[key].as_f64().filter(|v| v.is_finite() && (low..=high).contains(v))
         .ok_or_else(|| e("PVSOL_IMPORT", format!("Invalid saved battery value {key}.")))
+}
+
+// The serializer saves target SOC as a 0–1 fraction, power in watts and
+// daily interval boundaries in seconds (simulation samples them hourly).
+fn timed(node: Node<'_, '_>, direction: &str, min_soc: f64, warnings: &mut Vec<String>) -> Option<TimedBatteryOperation> {
+    let enabled = format!("Timed{direction}Enabled");
+    if !flag(node, &[&enabled]) { return None; }
+    let parse = || -> Option<TimedBatteryOperation> {
+        let target_key = format!("Timed{direction}SocTarget");
+        let power_key = format!("Timed{direction}Power");
+        let count_key = format!("Timed{direction}NrOfPeriods");
+        let target = number::<f64>(node, &[&target_key])? * 100.0;
+        let power = number::<f64>(node, &[&power_key])? / 1000.0;
+        let count = number::<usize>(node, &[&count_key])?;
+        if !(min_soc..=100.0).contains(&target) || !power.is_finite() || !(0.0..=100000.0).contains(&power) || power == 0.0 || !(1..=3).contains(&count) { return None; }
+        let mut periods = Vec::new();
+        for i in 1..=count {
+            let start = format!("Timed{direction}StartTime{i}");
+            let end = format!("Timed{direction}EndTime{i}");
+            let a = number::<u32>(node, &[&start])?;
+            let b = number::<u32>(node, &[&end])?;
+            if a >= 86400 || b > 86400 { return None; }
+            periods.push([a,b]);
+        }
+        Some(TimedBatteryOperation { target_soc_pct: target, power_kw: power, periods })
+    };
+    let result = parse();
+    if result.is_none() { warnings.push(format!("The enabled timed battery {direction} settings are invalid or incomplete; self-consumption dispatch is used.")); }
+    result
 }
 
 /// Resolve the topology and all required ratings before changing the project.
@@ -133,16 +162,42 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: 
     };
     project.library.batteries.retain(|b| b.id != battery_id);
     project.library.batteries.push(spec);
+    let timed_charge = timed(node, "Charge", soc_min, warnings);
+    let timed_discharge = timed(node, "Discharge", soc_min, warnings);
+    if !ac && timed_charge.is_some() {
+        warnings.push("For timed charging on a hybrid inverter, SolarCraft uses available PV surplus and grid charging when the shared inverter is not delivering AC; simultaneous AC output and reverse grid charging are not modeled.".into());
+    }
     project.storage = Some(Storage {
         battery_id, units: 1, coupling,
         model: BatteryModel::Detailed, soc_min_pct: soc_min, soc_max_pct: 100.0, initial_soc_pct: 100.0,
         backup_reserve_pct: 0.0, grid_services_pct: 0.0,
         charge_priority: vec![EnergyUse::Backup, EnergyUse::SelfConsumption, EnergyUse::GridServices],
-        grid_charge_backup: false, grid_service: GridService::None, outages: vec![], generator_id: None,
+        grid_charge_backup: false, grid_service: GridService::None, outages: vec![], generator_id: None, timed_charge, timed_discharge,
     });
-    if flag(node, &["TimedChargeEnabled"]) || flag(node, &["TimedDischargeEnabled"]) {
-        warnings.push("Timed battery charge and discharge windows require separate migration; SolarCraft uses self-consumption dispatch.".into());
-    }
-    warnings.push("The detailed battery uses the embedded cell ratings and converter curve, starts fully charged, and uses self-consumption dispatch. Boost, float and equalisation charging stages require separate migration.".into());
+    warnings.push("The detailed battery uses the embedded cell ratings and converter curve, starts fully charged, and otherwise uses self-consumption dispatch. Boost, float and equalisation charging stages require separate migration.".into());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imports_timed_settings_from_archive_units_and_rejects_invalid_periods() {
+        let xml = r#"<BatSys><TimedChargeEnabled>true</TimedChargeEnabled>
+            <TimedChargeSocTarget><Value>0.8</Value></TimedChargeSocTarget><TimedChargePower><Value>2000</Value></TimedChargePower>
+            <TimedChargeNrOfPeriods><Value>1</Value></TimedChargeNrOfPeriods><TimedChargeStartTime1><Value>79200</Value></TimedChargeStartTime1>
+            <TimedChargeEndTime1><Value>7200</Value></TimedChargeEndTime1></BatSys>"#;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let mut warnings = vec![];
+        let t = timed(doc.root_element(), "Charge", 5.0, &mut warnings).unwrap();
+        assert_eq!(t.target_soc_pct, 80.0);
+        assert_eq!(t.power_kw, 2.0);
+        assert_eq!(t.periods, vec![[79200, 7200]]);
+        assert!(warnings.is_empty());
+        let bad = xml.replace("79200", "99999");
+        let doc = roxmltree::Document::parse(&bad).unwrap();
+        assert!(timed(doc.root_element(), "Charge", 5.0, &mut warnings).is_none());
+        assert_eq!(warnings.len(), 1);
+    }
 }

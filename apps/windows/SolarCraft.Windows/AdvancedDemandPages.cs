@@ -123,18 +123,38 @@ public sealed partial class MainWindow
         var name = new TextBox { Header = T("fleet_group"), Text = S(current, "name") };
         panel.Children.Add(name);
         panel.Children.Add(Note(T("fleet_per_vehicle")));
+        var weekly = current?["weekly_schedule"] as JsonObject;
+        var slots = Arr(weekly?["slots"]);
         var fields = MakeFields(panel, current, [
             ("vehicles", "fleet_vehicles", 1, true), ("battery_kwh", "fleet_battery", 60, false),
             ("initial_soc_pct", "initial_soc", 60, false), ("departure_soc_pct", "fleet_departure", 60, false),
-            ("trip_kwh", "fleet_trip", 12, false), ("arrival_hour", "ev_arrival", 18, true),
-            ("departure_hour", "ev_departure", 7, true), ("charge_kw", "ev_charger", 7.2, false),
+            ("trip_kwh", "fleet_trip", 12, false), ("charge_kw", "ev_charger", 7.2, false),
             ("charge_efficiency", "ev_efficiency", 0.9, false), ("discharge_kw", "fleet_v2h", 0, false),
             ("discharge_efficiency", "fleet_v2h_eff", 0.9, false),
         ]);
+        var daily = new StackPanel { Spacing = 8, Visibility = weekly is null ? Visibility.Visible : Visibility.Collapsed };
+        var dailyFields = MakeFields(daily, current, [
+            ("arrival_hour", "ev_arrival", 18, true), ("departure_hour", "ev_departure", 7, true)
+        ]);
         var days = Weekdays(current?["weekdays"], false);
-        panel.Children.Add(H(T("fleet_arrival_days")));
-        panel.Children.Add(Row(days.Take(4).Cast<UIElement>().ToArray()));
-        panel.Children.Add(Row(days.Skip(4).Cast<UIElement>().ToArray()));
+        daily.Children.Add(H(T("fleet_arrival_days")));
+        daily.Children.Add(Row(days.Take(4).Cast<UIElement>().ToArray()));
+        daily.Children.Add(Row(days.Skip(4).Cast<UIElement>().ToArray()));
+        panel.Children.Add(daily);
+        var schedule = new TextBox {
+            Header = T("fleet_weekly"), AcceptsReturn = true, Height = 170,
+            Text = string.Join(Environment.NewLine, slots.Select(s => s?.GetValue<bool>() == true ? '1' : '0')
+                .Chunk(24).Select(day => new string(day))),
+        };
+        if (weekly is not null)
+        {
+            panel.Children.Add(Note(T(S(weekly, "origin") == "year_start" ? "fleet_weekly_year" : "fleet_weekly_monday")));
+            panel.Children.Add(schedule);
+        }
+        var start = current?["surplus_start"] as JsonObject;
+        var startFields = MakeFields(panel, start, start is null ? [] : [
+            ("minimum_kw", "fleet_surplus_min_kw", 0, false), ("fraction", "fleet_surplus_fraction", 0, false),
+        ]);
         var strategy = Combo(T("ev_strategy"), [("immediate", T("ev_immediate")), ("solar_preferred", T("ev_solar"))], S(current, "strategy"));
         panel.Children.Add(strategy);
         return AdvancedDialog(T("fleet_group"), panel, () =>
@@ -142,6 +162,28 @@ public sealed partial class MainWindow
             var group = ReadFields(fields);
             group["name"] = name.Text.Trim();
             group["weekdays"] = SelectedDays(days);
+            var hours = ReadFields(dailyFields);
+            group["arrival_hour"] = hours["arrival_hour"]?.DeepClone();
+            group["departure_hour"] = hours["departure_hour"]?.DeepClone();
+            if (weekly is not null)
+            {
+                var bits = schedule.Text.Where(c => !char.IsWhiteSpace(c)).ToArray();
+                if (bits.Length != 168 || bits.Any(c => c is not ('0' or '1')) || !bits.Contains('1')
+                    || (N(group, "trip_kwh") > 0 && !bits.Contains('0')))
+                    throw new ArgumentException(T("fleet_weekly"));
+                group["weekly_schedule"] = new JsonObject {
+                    ["origin"] = S(weekly, "origin") == "year_start" ? "year_start" : "monday",
+                    ["slots"] = new JsonArray(bits.Select(c => (JsonNode?)JsonValue.Create(c == '1')).ToArray()),
+                };
+            }
+            if (start is not null)
+            {
+                var gate = ReadFields(startFields);
+                if (N(gate, "minimum_kw") < 0 || N(gate, "minimum_kw") > N(group, "charge_kw")
+                    || N(gate, "fraction") is < 0 or > 1)
+                    throw new ArgumentException(T("fleet_surplus_fraction"));
+                group["surplus_start"] = gate;
+            }
             group["strategy"] = Sel(strategy);
             if (name.Text.Trim().Length == 0 || Arr(group["weekdays"]).Count == 0 || N(group, "arrival_hour") > 23
                 || N(group, "departure_hour") > 23 || N(group, "vehicles") < 1 || N(group,"trip_kwh") > N(group,"battery_kwh"))

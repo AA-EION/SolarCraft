@@ -240,6 +240,14 @@ pub enum GridService {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outage { pub start_hour: u32, pub hours: u32 }
 
+/// A daily forced battery operation in local standard time, with times in seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimedBatteryOperation {
+    pub target_soc_pct: f64,
+    pub power_kw: f64,
+    pub periods: Vec<[u32; 2]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Storage {
     pub battery_id: String,
@@ -265,6 +273,10 @@ pub struct Storage {
     /// Backup generator that supplies critical load the battery cannot cover during outages.
     #[serde(default)]
     pub generator_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_charge: Option<TimedBatteryOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timed_discharge: Option<TimedBatteryOperation>,
 }
 
 impl Storage {

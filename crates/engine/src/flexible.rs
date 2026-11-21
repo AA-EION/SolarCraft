@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::calendar;
 use serde::{Deserialize, Serialize};
-use solarcraft_model::demand::{ChargeStrategy, Fleet, FleetGroup, HeatStore, Heating};
+use solarcraft_model::demand::{ChargeStrategy, Fleet, FleetGroup, HeatStore, Heating, WeeklyFleetSchedule, WeeklyScheduleOrigin};
 
 mod thermal;
 pub(crate) use thermal::facade_irradiance;
@@ -54,19 +54,45 @@ struct Vehicle<'a> {
     soc: Vec<f32>,
 }
 
+fn weekly_windows(schedule: &WeeklyFleetSchedule, departure: &mut [bool], remaining: &mut [u32]) {
+    let slots = &schedule.slots;
+    let offset = match schedule.origin {
+        WeeklyScheduleOrigin::Monday => calendar::local_time(0).weekday as usize * 24,
+        WeeklyScheduleOrigin::YearStart => 0,
+    };
+    let mut until_departure = [0; 168];
+    let mut connected_hours = 0;
+    for i in (0..2 * slots.len()).rev() {
+        let slot = i % slots.len();
+        connected_hours = if slots[slot] { connected_hours + 1 } else { 0 };
+        until_departure[slot] = connected_hours;
+    }
+    let always_connected = slots.iter().all(|&slot| slot);
+    let n = remaining.len();
+    for (h, (leaves, hours)) in departure.iter_mut().zip(remaining).enumerate() {
+        let slot = (h + offset) % slots.len();
+        *leaves = !slots[slot] && slots[(slot + slots.len() - 1) % slots.len()];
+        *hours = if always_connected { (n - h) as u32 } else { until_departure[slot] };
+    }
+}
+
 impl<'a> Vehicle<'a> {
     fn new(model: &'a FleetGroup, n: usize) -> Self {
         let mut departure = vec![false; n];
         let mut remaining = vec![0; n];
         let window = (model.departure_hour + 24 - model.arrival_hour) % 24;
         let window = if window == 0 { 24 } else { window as i32 };
-        for day in -1..((n / 24) as i32) {
-            let weekday = (day + 2).rem_euclid(7) as u32;
-            if !model.weekdays.contains(&weekday) { continue; }
-            let start = day * 24 + model.arrival_hour as i32;
-            let end = start + window;
-            if (0..n as i32).contains(&end) { departure[end as usize] = true; }
-            for hour in start.max(0)..end.min(n as i32) { remaining[hour as usize] = (end - hour) as u32; }
+        if let Some(schedule) = &model.weekly_schedule {
+            weekly_windows(schedule, &mut departure, &mut remaining);
+        } else {
+            for day in -1..((n / 24) as i32) {
+                let weekday = (day + 2).rem_euclid(7) as u32;
+                if !model.weekdays.contains(&weekday) { continue; }
+                let start = day * 24 + model.arrival_hour as i32;
+                let end = start + window;
+                if (0..n as i32).contains(&end) { departure[end as usize] = true; }
+                for hour in start.max(0)..end.min(n as i32) { remaining[hour as usize] = (end - hour) as u32; }
+            }
         }
         let capacity = model.battery_kwh * f64::from(model.vehicles) * 1000.0;
         let trip = model.trip_kwh * f64::from(model.vehicles) * 1000.0;
@@ -81,6 +107,11 @@ impl<'a> Vehicle<'a> {
     }
 
     fn target_input(&self) -> f64 { (self.target - self.stored).max(0.0) / self.model.charge_efficiency }
+
+    fn minimum_input(&self) -> f64 {
+        self.model.surplus_start.as_ref().map_or(0.0, |start|
+            start.minimum_kw * f64::from(self.model.vehicles) * 1000.0)
+    }
 
     fn charge(&mut self, wh: f64) {
         self.stored += wh * self.model.charge_efficiency;
@@ -144,7 +175,9 @@ pub fn fleet(plan: &Fleet, local_hour: &[u32], load_w: &[f64], pv_w: &[f32], gri
         for &idx in &connected {
             let v = &mut vehicles[idx];
             let future = future_hours(v.remaining[h]) * v.limit.min(plan.site_charge_kw * 1000.0);
-            let amount = (v.target_input() - future).max(0.0).min(v.limit).min(left);
+            let required = (v.target_input() - future).max(0.0);
+            let amount = if required > 0.0 { required.max(v.minimum_input()).min(v.target_input()) } else { 0.0 }
+                .min(v.limit).min(left);
             v.charge(amount);
             charged[idx] = amount;
             left -= amount;
@@ -153,7 +186,10 @@ pub fn fleet(plan: &Fleet, local_hour: &[u32], load_w: &[f64], pv_w: &[f32], gri
         }
         for &idx in &connected {
             let v = &mut vehicles[idx];
-            let amount = shared_required.max(0.0).min(v.target_input()).min(v.limit - charged[idx]).min(left);
+            let required = shared_required.max(0.0).min(v.target_input());
+            let amount = if required > 0.0 {
+                required.max(v.minimum_input() - charged[idx]).min(v.target_input())
+            } else { 0.0 }.min(v.limit - charged[idx]).min(left);
             v.charge(amount);
             charged[idx] += amount;
             shared_required -= amount;
@@ -167,7 +203,15 @@ pub fn fleet(plan: &Fleet, local_hour: &[u32], load_w: &[f64], pv_w: &[f32], gri
             let available_solar = if scheduled_export > 0.0 { 0.0 } else { spare };
             let desire = match v.model.strategy {
                 ChargeStrategy::Immediate => v.target_input().max(if can_discharge { available_solar.min(room) } else { 0.0 }),
-                ChargeStrategy::SolarPreferred => available_solar.min(if can_discharge { room } else { v.target_input() }),
+                ChargeStrategy::SolarPreferred => {
+                    let solar_input = v.model.surplus_start.as_ref().map_or(available_solar, |start| {
+                        let minimum = v.minimum_input();
+                        if available_solar > minimum * start.fraction || charged[idx] > 0.0 {
+                            available_solar.max(minimum - charged[idx])
+                        } else { 0.0 }
+                    });
+                    solar_input.min(if can_discharge { room } else { v.target_input() })
+                }
             };
             let amount = desire.min(v.limit - charged[idx]).min(left);
             v.charge(amount);
@@ -423,6 +467,7 @@ mod tests {
             departure_soc_pct: 20.0, trip_kwh: 1.0, weekdays: vec![2],
             arrival_hour: 1, departure_hour: 5, charge_kw: 2.0, charge_efficiency: 1.0,
             discharge_kw: 0.0, discharge_efficiency: 1.0, strategy: ChargeStrategy::SolarPreferred,
+            weekly_schedule: None, surplus_start: None,
         };
         let mut second = group.clone();
         second.name = "Second".into();
@@ -436,5 +481,37 @@ mod tests {
         let run = fleet(&plan, &hours, &[0.0; 24], &[0.0; 24], &blackout, true, None);
         assert_eq!(run.charge[4], 0.0);
         assert_eq!(run.result.groups.iter().map(|r| r.departures_below_target).sum::<u32>(), 1);
+    }
+
+    #[test]
+    fn weekly_fleet_wraps_and_uses_the_surplus_start_fraction() {
+        use solarcraft_model::demand::SurplusChargeStart;
+        let n = 170;
+        let mut slots = vec![true; 168];
+        slots[0] = false;
+        slots[4..6].fill(false);
+        let group = FleetGroup {
+            name: "Archived EV".into(), vehicles: 1, battery_kwh: 20.0,
+            initial_soc_pct: 20.0, departure_soc_pct: 20.0, trip_kwh: 2.0,
+            weekdays: vec![], arrival_hour: 0, departure_hour: 0,
+            charge_kw: 3.0, charge_efficiency: 1.0, discharge_kw: 0.0,
+            discharge_efficiency: 1.0, strategy: ChargeStrategy::SolarPreferred,
+            weekly_schedule: Some(WeeklyFleetSchedule { slots, origin: WeeklyScheduleOrigin::YearStart }),
+            surplus_start: Some(SurplusChargeStart { minimum_kw: 1.0, fraction: 0.5 }),
+        };
+        let plan = Fleet { groups: vec![group], site_charge_kw: 3.0, site_discharge_kw: 0.0, v2g: None };
+        assert!(plan.valid());
+        let hours: Vec<_> = (0..n as u32).collect();
+        let mut pv = vec![0.0; n];
+        pv[1] = 500.0;
+        pv[2] = 750.0;
+        pv[4] = 3000.0;
+        let run = fleet(&plan, &hours, &vec![0.0; n], &pv, &vec![true; n], false, None);
+        assert_eq!(&run.charge[..6], &[0.0, 0.0, 1000.0, 1000.0, 0.0, 0.0]);
+        assert_eq!(run.charge[168], 0.0);
+        let result = &run.result.groups[0];
+        assert_eq!(result.departures, 3);
+        assert_eq!(result.departures_below_target, 0);
+        assert_eq!(result.travelled_kwh, 6.0);
     }
 }
