@@ -184,6 +184,21 @@ pub(crate) fn results(view: &mut View, input: &ReportInput) {
             [tr(l, "Export credit", "Crédito de exportación", "Einspeisegutschrift", "Crédito de exportação"), cost(before.export_credit), cost(after.export_credit)],
             [view.s["total"].into(), cost(before.total), cost(after.total)],
         ]);
+        if let Some(meter) = &after.metering {
+            bill.table(vec![tr(l, "Net metering", "Medición neta", "Net-Metering", "Compensação de energia"), "kWh".into()], [
+                [tr(l, "Imports offset", "Importación compensada", "Verrechneter Netzbezug", "Importação compensada"), n(meter.offset_kwh, 2)],
+                [tr(l, "Billed imports", "Importación facturada", "Abgerechneter Bezug", "Importação faturada"), n(meter.billed_kwh, 2)],
+                [tr(l, "Unused exports", "Excedentes sin usar", "Ungenutzte Einspeisung", "Excedente não utilizado"), n(meter.unused_export_kwh, 2)],
+            ]);
+        }
+        if !f.consumers.is_empty() {
+            bill.table(vec![
+                tr(l, "Consumer tariff", "Tarifa por consumidor", "Verbrauchertarif", "Tarifa por consumidor"),
+                before_label.clone(), after_label.clone(),
+            ], f.consumers.iter().map(|meter| [
+                meter.name.clone(), cost(meter.bill_without.total), cost(meter.bill_with.total)
+            ]));
+        }
         let comparison = [(String::new(), vec![(0, before.total), (1, after.total)])];
         bill.figure(charts::time_lines(&comparison, &[(0, &before_label), (1, &after_label)], currency, l),
             tr(l, "Total bill comparison", "Comparación de facturas totales", "Vergleich der Gesamtrechnung", "Comparação da conta total"), view);
@@ -265,34 +280,36 @@ pub(crate) fn planner(view: &mut View, input: &ReportInput) {
         }
         view.contents.push(circuit);
     }
-    if let Some(storage) = &p.storage {
+    if p.storage.is_some() {
         let mut hardware = ContentSection::new("storage_datasheets", tr(l, "Storage and backup equipment specifications", "Especificaciones de almacenamiento y respaldo", "Daten für Speicher- und Ersatzstromausrüstung", "Especificações de armazenamento e reserva"));
-        if let Some(battery) = p.library.battery(&storage.battery_id) {
-            hardware.text(format!("{} {}", battery.manufacturer, battery.model));
-            hardware.table(vec![], [
-                ["V DC".into(), n(battery.nominal_voltage_v)], ["kWh".into(), n(battery.capacity_kwh)],
-                [tr(l, "Charge / discharge limit", "Límite de carga y descarga", "Lade- und Entladegrenze", "Limite de carga e descarga"),
-                    format!("{} / {} kW", n(battery.p_charge_max_kw), n(battery.p_discharge_max_kw))],
-                ["SOC min–max".into(), format!("{}–{} %", n(battery.soc_min_pct), n(battery.soc_max_pct))],
-            ]);
-            if let Some(cells) = &battery.cells {
-                hardware.table(vec![], [["V/cell".into(), n(cells.cell_voltage_v)], ["S × P × strings".into(), format!("{} × {} × {}", cells.series, cells.parallel, cells.strings)],
-                    ["Ω".into(), l.num(cells.pack_resistance(), 4)]]);
+        for storage in p.storage_banks() {
+            if let Some(battery) = p.library.battery(&storage.battery_id) {
+                hardware.text(format!("{} {}", battery.manufacturer, battery.model));
+                hardware.table(vec![], [
+                    ["V DC".into(), n(battery.nominal_voltage_v)], ["kWh".into(), n(battery.capacity_kwh)],
+                    [tr(l, "Charge / discharge limit", "Límite de carga y descarga", "Lade- und Entladegrenze", "Limite de carga e descarga"),
+                        format!("{} / {} kW", n(battery.p_charge_max_kw), n(battery.p_discharge_max_kw))],
+                    ["SOC min–max".into(), format!("{}–{} %", n(battery.soc_min_pct), n(battery.soc_max_pct))],
+                ]);
+                if let Some(cells) = &battery.cells {
+                    hardware.table(vec![], [["V/cell".into(), n(cells.cell_voltage_v)], ["S × P × strings".into(), format!("{} × {} × {}", cells.series, cells.parallel, cells.strings)],
+                        ["Ω".into(), l.num(cells.pack_resistance(), 4)]]);
+                }
+                if let (Coupling::Integrated, Some(c)) = (&storage.coupling, &battery.converter) {
+                    hardware.table(vec![], [[tr(l, "Converter charge / discharge", "Carga y descarga del convertidor", "Wandler Laden und Entladen", "Carga e descarga do conversor"),
+                        format!("{} / {} W", n(c.p_charge_max_w), n(c.p_discharge_max_w))]]);
+                }
             }
-            if let (Coupling::Integrated, Some(c)) = (&storage.coupling, &battery.converter) {
-                hardware.table(vec![], [[tr(l, "Converter charge / discharge", "Carga y descarga del convertidor", "Wandler Laden und Entladen", "Carga e descarga do conversor"),
-                    format!("{} / {} W", n(c.p_charge_max_w), n(c.p_discharge_max_w))]]);
+            if let Coupling::AcCoupled { battery_inverter_id } = &storage.coupling {
+                if let Some(i) = p.library.battery_inverter(battery_inverter_id) {
+                    hardware.text(format!("{} {}", i.manufacturer, i.model));
+                    hardware.table(vec![], [["W AC".into(), n(i.p_ac_max_w)], ["W standby".into(), n(i.standby_w)]]);
+                }
             }
-        }
-        if let Coupling::AcCoupled { battery_inverter_id } = &storage.coupling {
-            if let Some(i) = p.library.battery_inverter(battery_inverter_id) {
-                hardware.text(format!("{} {}", i.manufacturer, i.model));
-                hardware.table(vec![], [["W AC".into(), n(i.p_ac_max_w)], ["W standby".into(), n(i.standby_w)]]);
+            if let Some(g) = storage.generator_id.as_ref().and_then(|id| p.library.generator(id)) {
+                hardware.text(format!("{} {}", g.manufacturer, g.model));
+                hardware.table(vec![], [["VA".into(), n(g.rated_va)], ["VA max".into(), n(g.max_va)], ["V AC".into(), n(g.voltage_v)]]);
             }
-        }
-        if let Some(g) = storage.generator_id.as_ref().and_then(|id| p.library.generator(id)) {
-            hardware.text(format!("{} {}", g.manufacturer, g.model));
-            hardware.table(vec![], [["VA".into(), n(g.rated_va)], ["VA max".into(), n(g.max_va)], ["V AC".into(), n(g.voltage_v)]]);
         }
         if !hardware.blocks.is_empty() { view.contents.push(hardware); }
     }

@@ -55,10 +55,14 @@ impl Workflow {
         let mut p = project.clone();
         p.grid.feed_in = if system == GridExport { FeedIn::Full } else { FeedIn::Surplus };
         if system == GridExport { p.loads.profile = LoadProfile::None; }
-        if !system.needs_storage() { p.storage = None; }
+        if !system.needs_storage() {
+            p.storage = None;
+            p.additional_storage.clear();
+        }
         if !system.needs_ev() { p.ev = None; p.fleet = None; }
         if !system.needs_heating() { p.heating = None; p.heat_store = None; }
         if system.islanded() {
+            p.additional_storage.clear();
             p.grid.export_limit_kw = None;
             if !p.island_clusters.is_empty() { p.storage = None; }
             for storage in p.storage.iter_mut().chain(p.island_clusters.iter_mut().map(|c| &mut c.storage)) {

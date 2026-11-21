@@ -276,7 +276,9 @@ pub fn compare_variants(path: &Path) -> Result<Vec<VariantMetrics>> {
             let (series, islands) = load_series(&s, &solarcraft_model::workflow::Workflow::active(&q))?;
             solarcraft_engine::simulate_with_island_profiles(&q, &w, &hash, series.as_deref(), &islands, |_| true).map_err(|x| e("SIMULATION", x))
         })();
-        let bkwh = q.storage.as_ref().and_then(|st| q.library.battery(&st.battery_id).map(|b| b.capacity_kwh * st.units as f64)).unwrap_or(0.0);
+        let active = solarcraft_model::workflow::Workflow::active(&q);
+        let bkwh = active.storage_banks().filter_map(|st| q.library.battery(&st.battery_id)
+            .map(|b| b.capacity_kwh * f64::from(st.units))).sum();
         out.push(match res {
             Ok(r) => { let f = r.finance.clone().unwrap_or_default(); VariantMetrics { id, name, dc_kwp: r.annual.dc_kwp, battery_kwh: bkwh, ac_kwh: r.annual.ac_kwh, specific_yield: r.annual.specific_yield_kwh_kwp, performance_ratio: r.annual.performance_ratio,
                 self_consumption_pct: r.balance.self_consumption_rate * 100.0, autarky_pct: r.balance.autarky * 100.0, import_kwh: r.balance.import_kwh, export_kwh: r.balance.export_kwh, clipped_kwh: r.balance.clipped_kwh,

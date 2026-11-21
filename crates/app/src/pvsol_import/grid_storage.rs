@@ -56,14 +56,44 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: 
         return Err(e("PVSOL_IMPORT", "The selected storage design has no saved battery system."));
     };
     let systems: Vec<_> = children(group, "BatSys").collect();
-    let [node] = systems.as_slice() else {
-        return Err(e("PVSOL_IMPORT", "Exactly one saved battery system is required."));
-    };
-    let node = *node;
-    let count = number::<u32>(node, &["AnzahlBatterieSysteme"]).unwrap_or(0);
-    if count != 1 {
-        return Err(e("PVSOL_IMPORT", format!("The saved battery system has {count} parallel units. This import supports one unit.")));
+    if !(1..=32).contains(&systems.len()) {
+        return Err(e("PVSOL_IMPORT", "The archive must contain between 1 and 32 battery configurations."));
     }
+    let mut staged_warnings = Vec::new();
+    let prepared = systems.into_iter().map(|node| prepare(project, node, db, sha, &mut staged_warnings))
+        .collect::<Result<Vec<_>>>()?;
+    if prepared.len() > 1 && prepared.iter().any(|bank| bank.hybrid_port.is_some()) {
+        return Err(e("PVSOL_IMPORT", "Multiple battery configurations require a shared AC bus. An archive with a hybrid battery and another group needs separate migration."));
+    }
+    project.storage = None;
+    project.additional_storage.clear();
+    for bank in prepared {
+        if let Some((id, port)) = bank.hybrid_port {
+            project.library.inverters.iter_mut().find(|inverter| inverter.id == id)
+                .expect("hybrid inverter verified before import").battery_port = Some(port);
+        }
+        project.library.batteries.retain(|battery| battery.id != bank.spec.id);
+        project.library.batteries.push(bank.spec);
+        if project.storage.is_none() { project.storage = Some(bank.storage); }
+        else { project.additional_storage.push(bank.storage); }
+    }
+    warnings.extend(staged_warnings);
+    if !project.additional_storage.is_empty() {
+        warnings.push("The shared AC bus allocates PV surplus and demand in proportion to each battery group's nominal converter rating. Each group keeps its own limits, SOC, and timed controls.".into());
+    }
+    warnings.push("The detailed batteries use embedded cell ratings and converter curves, start fully charged, and otherwise use self-consumption dispatch. Boost, float and equalisation charging stages require separate migration.".into());
+    Ok(())
+}
+
+struct PreparedBank {
+    spec: BatterySpec,
+    storage: Storage,
+    hybrid_port: Option<(String, BatteryPort)>,
+}
+
+fn prepare(project: &Project, node: Node<'_, '_>, db: &Value, sha: &str, warnings: &mut Vec<String>) -> Result<PreparedBank> {
+    let count = number::<u32>(node, &["AnzahlBatterieSysteme"]).filter(|count| (1..=128).contains(count))
+        .ok_or_else(|| e("PVSOL_IMPORT", "The saved battery quantity must be between 1 and 128."))?;
     let id = value(node, &["BatteryDBId"]).filter(|v| !v.is_empty() && v.len() <= 80)
         .ok_or_else(|| e("PVSOL_IMPORT", "The saved battery system has no database ID."))?;
     let revisions: Vec<_> = db["BatterySystems"].as_array().into_iter().flatten()
@@ -135,7 +165,7 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: 
             .as_object().unwrap().clone(),
         datasheet_ref: String::new(),
     };
-    let coupling = if ac {
+    let (coupling, hybrid_port) = if ac {
         if xml_dc || xml_link {
             warnings.push("The embedded battery system specifies AC coupling. SolarCraft uses its integrated AC converter despite the conflicting saved DC flag.".into());
         }
@@ -143,39 +173,44 @@ pub(super) fn apply(project: &mut Project, root: Node<'_, '_>, db: &Value, sha: 
             p_rated_w: nominal_w, p_charge_max_w: charge_w, p_discharge_max_w: discharge_w,
             efficiency_curve: curve, standby_w: 0.0,
         });
-        Coupling::Integrated
+        (Coupling::Integrated, None)
     } else {
+        if count != 1 {
+            return Err(e("PVSOL_IMPORT", "Multiple DC units on a single hybrid inverter port need separate migration."));
+        }
         let unit = number::<usize>(node, &["ConnectedWrOrMppIndex"]).and_then(|index| project.electrical.inverters.get(index))
             .ok_or_else(|| e("PVSOL_IMPORT", "The battery system points to an inverter that was not imported."))?;
-        let inverter = project.library.inverters.iter_mut().find(|i| i.id == unit.inverter_id)
+        let inverter = project.library.inverter(&unit.inverter_id)
             .ok_or_else(|| e("PVSOL_IMPORT", "The battery inverter record is missing from the project library."))?;
         spec.unverified.insert("pack_voltage_window".into(), json!("±20 % of nominal (the archive stores no converter voltage window)"));
         if system["Coupling"].as_i64() == Some(3) {
             warnings.push("The battery system is connected to the inverter's DC link; SolarCraft models it on the hybrid inverter's DC battery port.".into());
         }
-        inverter.battery_port = Some(BatteryPort {
+        let port = BatteryPort {
             v_min: pack_v * 0.8, v_max: pack_v * 1.2, p_charge_max_w: charge_w, p_discharge_max_w: discharge_w,
             dc_dc_efficiency: curve.iter().find(|k| k[0] == 0.5).map_or(0.95, |k| k[1]),
             efficiency_curve: curve, p_rated_w: Some(nominal_w),
-        });
-        Coupling::DcHybrid { unit_id: unit.id.clone() }
+        };
+        (Coupling::DcHybrid { unit_id: unit.id.clone() }, Some((inverter.id.clone(), port)))
     };
-    project.library.batteries.retain(|b| b.id != battery_id);
-    project.library.batteries.push(spec);
-    let timed_charge = timed(node, "Charge", soc_min, warnings);
-    let timed_discharge = timed(node, "Discharge", soc_min, warnings);
+    let scale = |mut control: TimedBatteryOperation| {
+        // The archive saves this power per unit. The native timer limits the whole group.
+        control.power_kw *= f64::from(count);
+        control
+    };
+    let timed_charge = timed(node, "Charge", soc_min, warnings).map(scale);
+    let timed_discharge = timed(node, "Discharge", soc_min, warnings).map(scale);
     if !ac && timed_charge.is_some() {
         warnings.push("For timed charging on a hybrid inverter, SolarCraft uses available PV surplus and grid charging when the shared inverter is not delivering AC; simultaneous AC output and reverse grid charging are not modeled.".into());
     }
-    project.storage = Some(Storage {
-        battery_id, units: 1, coupling,
+    let storage = Storage {
+        battery_id, units: count, coupling,
         model: BatteryModel::Detailed, soc_min_pct: soc_min, soc_max_pct: 100.0, initial_soc_pct: 100.0,
         backup_reserve_pct: 0.0, grid_services_pct: 0.0,
         charge_priority: vec![EnergyUse::Backup, EnergyUse::SelfConsumption, EnergyUse::GridServices],
         grid_charge_backup: false, grid_service: GridService::None, outages: vec![], generator_id: None, timed_charge, timed_discharge,
-    });
-    warnings.push("The detailed battery uses the embedded cell ratings and converter curve, starts fully charged, and otherwise uses self-consumption dispatch. Boost, float and equalisation charging stages require separate migration.".into());
-    Ok(())
+    };
+    Ok(PreparedBank { spec, storage, hybrid_port })
 }
 
 #[cfg(test)]

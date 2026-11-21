@@ -459,13 +459,16 @@ public sealed partial class MainWindow
         var lib = _project!["library"];
         p.Children.Add(H(T("use_battery")));
         var required = SystemType is "grid_battery" or "grid_ev_battery" or "grid_thermal_battery" or "off_grid" or "off_grid_generator";
-        var enabled = new ToggleSwitch { IsOn = required || s is JsonObject, IsEnabled = !required };
+        var otherBanks = Arr(_project["additional_storage"]);
+        var enabled = new ToggleSwitch { IsOn = required || s is JsonObject, IsEnabled = !required && otherBanks.Count == 0 };
         p.Children.Add(enabled);
         if (Arr(lib?["batteries"]).Count == 0) p.Children.Add(Btn(T("add_generic_storage"), () => { if (Try(() => Api.Invoke("add_generic_storage_equipment", new { file = _file }))) Reload(); }));
         var battery = Combo(T("battery"), Arr(lib?["batteries"]).Select(b => (S(b, "id"), $"{S(b, "manufacturer")} {S(b, "model")}")).ToList(), S(s, "battery_id"));
         var units = Num(T("units"), N(s, "units", 1));
         var c = s?["coupling"];
-        var coupling = Combo(T("coupling"), new[] { ("dc_hybrid", T("dc_hybrid")), ("ac_coupled", T("ac_coupled")), ("integrated", T("integrated")) }, S(c, "kind") is "" ? "dc_hybrid" : S(c, "kind"));
+        var couplingChoices = new List<(string, string)> { ("ac_coupled", T("ac_coupled")), ("integrated", T("integrated")) };
+        if (otherBanks.Count == 0) couplingChoices.Insert(0, ("dc_hybrid", T("dc_hybrid")));
+        var coupling = Combo(T("coupling"), couplingChoices, S(c, "kind") is "" ? "dc_hybrid" : S(c, "kind"));
         var hybrids = Arr(_stringing?["inverters"]).Where(i => i?["has_battery_port"]?.GetValue<bool>() == true).Select(i => (S(i!["unit"], "id"), S(i!["unit"], "name"))).ToList();
         var unit = Combo(T("dc_hybrid"), hybrids, S(c, "unit_id"));
         var batInv = Combo(T("ac_coupled"), Arr(lib?["battery_inverters"]).Select(b => (S(b, "id"), $"{S(b, "manufacturer")} {S(b, "model")}")).ToList(), S(c, "battery_inverter_id"));
@@ -540,7 +543,56 @@ public sealed partial class MainWindow
                 ["timed_charge"] = s?["timed_charge"]?.DeepClone(), ["timed_discharge"] = s?["timed_discharge"]?.DeepClone(),
             });
         }, true));
-        IssuesInto(p, x => x.StartsWith("/storage") || x.StartsWith("/loads") || x.StartsWith("STORAGE") || x.StartsWith("BATTERY"));
+        if (!Islanded && s is JsonObject && S(c, "kind") is "ac_coupled" or "integrated")
+        {
+            var banks = new StackPanel { Spacing = 8 };
+            banks.Children.Add(Note(T("battery_banks_hint")));
+            AdvancedList(banks, otherBanks, T("battery_banks"), current => EditAcBank(current, s, lib),
+                rows => SetSection("additional_storage", rows), bank =>
+                {
+                    var id = S(bank, "battery_id");
+                    var spec = Arr(lib?["batteries"]).FirstOrDefault(b => S(b, "id") == id);
+                    return $"{S(spec, "model")} · {F(N(bank, "units"))} ×";
+                });
+            p.Children.Add(new Expander { Header = T("battery_banks"), Content = banks, IsExpanded = otherBanks.Count > 0 });
+        }
+        IssuesInto(p, x => x.StartsWith("/storage") || x.StartsWith("/additional_storage") || x.StartsWith("/loads") || x.StartsWith("STORAGE") || x.StartsWith("BATTERY"));
+    }
+
+    private Task<JsonObject?> EditAcBank(JsonNode? current, JsonNode primary, JsonNode? lib)
+    {
+        var source = current ?? primary;
+        var panel = new StackPanel { Spacing = 8 };
+        var batteries = Arr(lib?["batteries"]).Where(b => S(b?["converter"], "kind") != "dc_dc").ToArray();
+        var battery = Combo(T("battery"), batteries.Select(b => (S(b, "id"), S(b, "model"))).ToList(), S(source, "battery_id"));
+        panel.Children.Add(battery);
+        var coupling = Combo(T("coupling"), [("integrated", T("integrated")), ("ac_coupled", T("ac_coupled"))], S(source["coupling"], "kind"));
+        var inverter = Combo(T("inverter"), Arr(lib?["battery_inverters"]).Select(b => (S(b, "id"), S(b, "model"))).ToList(),
+            S(source["coupling"], "battery_inverter_id"));
+        panel.Children.Add(coupling);
+        panel.Children.Add(inverter);
+        var fields = MakeFields(panel, source, [
+            ("units", "units", 1, true), ("soc_min_pct", "soc_window", 10, false),
+            ("soc_max_pct", "soc_maximum", 100, false), ("initial_soc_pct", "initial_soc", 50, false),
+        ]);
+        return AdvancedDialog(T("battery_banks"), panel, () =>
+        {
+            var bank = (JsonObject)source.DeepClone();
+            foreach (var (key, value) in ReadFields(fields)) bank[key] = value?.DeepClone();
+            bank["battery_id"] = Sel(battery);
+            bank["coupling"] = Sel(coupling) == "integrated"
+                ? new JsonObject { ["kind"] = "integrated" }
+                : new JsonObject { ["kind"] = "ac_coupled", ["battery_inverter_id"] = Sel(inverter) };
+            if (current is null)
+            {
+                bank["outages"] = new JsonArray();
+                bank["grid_service"] = new JsonObject { ["kind"] = "none" };
+                bank["grid_services_pct"] = 0;
+                bank["timed_charge"] = null;
+                bank["timed_discharge"] = null;
+            }
+            return bank;
+        });
     }
 
     private void BuildSimulationPanels()
@@ -568,6 +620,12 @@ public sealed partial class MainWindow
             new[] { T("batt_charge") + " / " + T("batt_discharge"), F(N(b, "batt_charge_kwh")) + " / " + F(N(b, "batt_discharge_kwh")) + " kWh" },
             new[] { "Δ max", N(b, "max_abs_residual_wh").ToString("0.0e0", CultureInfo.InvariantCulture) + " Wh" },
         }));
+        var bankRows = Arr(_summary["battery_banks"]);
+        if (bankRows.Count > 0)
+            p.Children.Add(Table([T("battery_banks"), T("units"), T("batt_charge") + " (kWh)", T("batt_discharge") + " (kWh)"],
+                bankRows.Select((bank, index) => (IList<string>)new[] {
+                    (index + 1).ToString(), F(N(bank, "units")), F(N(bank, "charge_kwh"), 2), F(N(bank, "discharge_kwh"), 2),
+                }), 8));
         p.Children.Add(H(T("stringing")));
         var rows = new List<IList<string>>();
         foreach (var u in Arr(_summary["electrical"]))
@@ -667,12 +725,83 @@ public sealed partial class MainWindow
         var tou = new TextBox { Header = T("tou_periods") + " (name,price,start,end; …)", Width = 520, HorizontalAlignment = HorizontalAlignment.Left,
             Text = string.Join("; ", Arr(t?["tou"]).Select(x => string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3}", S(x, "name"), N(x, "price"), N(x, "start_hour"), N(x, "end_hour")))) };
         foreach (var el in new UIElement[] { currency, imp, Row(exKind, exPrice), Row(fixedM, demand), Row(escI, escE), tou }) p.Children.Add(el);
+        var meters = new StackPanel { Spacing = 8 };
+        meters.Children.Add(Note(T("consumer_tariff_hint")));
+        var editMeters = new List<(string key, JsonNode? source, ToggleSwitch enabled, TextBox name, NumberBox price, NumberBox fixedCharge, NumberBox demandCharge)>();
+        foreach (var (key, label) in new[] { ("electric_vehicles", "ev_page"), ("heating", "heat_page") })
+        {
+            var saved = Arr(t?["consumer_rates"]).FirstOrDefault(rate => S(rate, "consumer") == key);
+            var enabled = new ToggleSwitch { Header = T(label), IsOn = saved is not null };
+            var name = new TextBox { Header = T("tariff"), Text = saved is null ? T(label) : S(saved, "name"), Width = 220 };
+            var price = Num(T("import_price"), N(saved, "import_price", imp.Value));
+            var monthly = Num(T("fixed_monthly"), N(saved, "fixed_per_month"));
+            var demandCharge = Num(T("demand_charge"), N(saved, "demand_charge_per_kw_month"));
+            var rateFields = new StackPanel { Spacing = 6, Visibility = enabled.IsOn ? Visibility.Visible : Visibility.Collapsed };
+            rateFields.Children.Add(Row(name, price));
+            rateFields.Children.Add(Row(monthly, demandCharge));
+            enabled.Toggled += (_, _) => rateFields.Visibility = enabled.IsOn ? Visibility.Visible : Visibility.Collapsed;
+            meters.Children.Add(enabled);
+            meters.Children.Add(rateFields);
+            editMeters.Add((key, saved, enabled, name, price, monthly, demandCharge));
+        }
+        var consumerEditor = new Expander { Header = T("consumer_tariffs"), Content = meters,
+            IsExpanded = Arr(t?["consumer_rates"]).Count > 0,
+            Visibility = Sel(exKind) == "net_metering" ? Visibility.Collapsed : Visibility.Visible };
+        exKind.SelectionChanged += (_, _) => consumerEditor.Visibility = Sel(exKind) == "net_metering" ? Visibility.Collapsed : Visibility.Visible;
+        p.Children.Add(consumerEditor);
+        var net = t?["net_metering"];
+        var settlement = Combo(T("metering_period"), [("monthly", T("metering_monthly")), ("annual", T("metering_annual"))],
+            S(net, "period") == "annual" ? "annual" : "monthly");
+        var rollover = new CheckBox { Content = T("metering_rollover"), IsChecked = net?["rollover"]?.GetValue<bool>() == true };
+        var settlementRow = Row(settlement, rollover);
+        settlementRow.Visibility = Sel(exKind) == "net_metering" ? Visibility.Visible : Visibility.Collapsed;
+        exKind.SelectionChanged += (_, _) => settlementRow.Visibility = Sel(exKind) == "net_metering" ? Visibility.Visible : Visibility.Collapsed;
+        p.Children.Add(settlementRow);
         p.Children.Add(Btn(T("apply"), () =>
         {
             var nt = t?.DeepClone() as JsonObject ?? new JsonObject { ["name"] = "Tariff" };
             nt["currency"] = currency.Text; nt["import_price"] = imp.Value; nt["fixed_per_month"] = fixedM.Value; nt["demand_charge_per_kw_month"] = demand.Value;
             nt["import_escalation_pct"] = escI.Value; nt["export_escalation_pct"] = escE.Value;
+            var changedImportPrice = imp.Value != N(t, "import_price");
+            if (changedImportPrice)
+            {
+                nt.Remove("zones");
+                nt.Remove("catalog_ref");
+                nt.Remove("catalog_import_rate");
+            }
             nt["export"] = Sel(exKind) switch { "none" => new JsonObject { ["kind"] = "none" }, "net_metering" => new JsonObject { ["kind"] = "net_metering", ["surplus_price"] = exPrice.Value }, _ => new JsonObject { ["kind"] = "fixed", ["price"] = exPrice.Value } };
+            var consumerRates = new JsonArray();
+            if (Sel(exKind) == "net_metering")
+            {
+                if (net is not null || Sel(settlement) == "annual" || rollover.IsChecked == true)
+                {
+                    var contract = net?.DeepClone() as JsonObject ?? new JsonObject();
+                    if (changedImportPrice) contract.Remove("zone_rates");
+                    contract["period"] = Sel(settlement);
+                    contract["rollover"] = rollover.IsChecked == true;
+                    nt["net_metering"] = contract;
+                }
+            }
+            else
+            {
+                nt.Remove("net_metering");
+                foreach (var m in editMeters.Where(m => m.enabled.IsOn))
+                {
+                    var rate = m.source?.DeepClone() as JsonObject ?? new JsonObject();
+                    if (m.source is not null && m.price.Value != N(m.source, "import_price"))
+                    {
+                        rate.Remove("zones");
+                        rate.Remove("catalog_ref");
+                    }
+                    rate["consumer"] = m.key;
+                    rate["name"] = m.name.Text.Trim();
+                    rate["import_price"] = m.price.Value;
+                    rate["fixed_per_month"] = m.fixedCharge.Value;
+                    rate["demand_charge_per_kw_month"] = m.demandCharge.Value;
+                    consumerRates.Add(rate);
+                }
+            }
+            nt["consumer_rates"] = consumerRates;
             var periods = new JsonArray();
             foreach (var part in tou.Text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
@@ -703,6 +832,12 @@ public sealed partial class MainWindow
         if (_cash is JsonObject c && Arr(c["years"]).Count > 0)
         {
             p.Children.Add(H(T("cash_flow")));
+            if (Arr(c["consumers"]) is { Count: > 0 } bills)
+                p.Children.Add(Table([T("consumer_tariffs"), T("grid_import") + " (kWh)", T("bill_before"), T("bill_after")],
+                    bills.Select(b => (IList<string>)new[] {
+                        S(b, "name"), F(N(b?["bill_with"], "import_kwh"), 2),
+                        F(N(b?["bill_without"], "total"), 2), F(N(b?["bill_with"], "total"), 2),
+                    }), 8));
             p.Children.Add(Note($"{T("npv")} {F(N(c, "npv"))} {S(c, "currency")} · {T("irr")} {(c["irr_pct"] is null ? "–" : F(N(c, "irr_pct"), 1) + " %")} · {T("payback")} {(c["payback_years"] is null ? "–" : F(N(c, "payback_years"), 1))} · LCOE {F(N(c, "lcoe_per_kwh"), 3)}"));
             var years = Arr(c["years"]);
             var max = Math.Max(1, years.Max(y => Math.Abs(N(y, "cumulative"))));

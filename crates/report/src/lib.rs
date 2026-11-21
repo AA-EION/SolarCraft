@@ -396,19 +396,32 @@ pub fn plant_sections(inp: &ReportInput) -> Vec<Section> {
         } else if b.outage_hours > 0 { rows.push(vec![tr(l, "Outage hours · unserved critical load", "Horas de corte · carga crítica no atendida", "Ausfallstunden · nicht versorgte kritische Last", "Horas de interrupção · carga crítica não atendida"), format!("{} h · {}", b.outage_hours, kwh(b.unserved_kwh))]); }
         out.push(Section { id: "energy_balance", title: tr(l, "Energy balance", "Balance energético", "Energiebilanz", "Balanço energético"), intro: tr(l, "Hourly simulation for one year; the balance closes in every hour.", "Simulación horaria de un año; el balance cierra en cada hora.", "Stündliche Jahressimulation; die Bilanz ist in jeder Stunde geschlossen.", "Simulação horária de um ano; o balanço fecha em cada hora."), header: vec![], rows });
     }
-    if let (Some(st), Some(bat)) = (&p.storage, p.storage.as_ref().and_then(|st| p.library.battery(&st.battery_id))) {
+    let mut battery_rows = Vec::new();
+    for (index, st) in p.storage_banks().enumerate() {
+        let Some(bat) = p.library.battery(&st.battery_id) else { continue; };
         let coupling = match &st.coupling { solarcraft_model::plant::Coupling::DcHybrid { unit_id } => format!("{} ({unit_id})", tr(l, "DC, hybrid inverter port", "CC, puerto del inversor híbrido", "DC, Hybrid-Wechselrichter", "CC, porta do inversor híbrido")),
             solarcraft_model::plant::Coupling::AcCoupled { battery_inverter_id } => format!("{} ({battery_inverter_id})", tr(l, "AC, battery inverter", "CA, inversor de batería", "AC, Batteriewechselrichter", "CA, inversor de bateria")),
             solarcraft_model::plant::Coupling::Integrated => tr(l, "AC, integrated battery system", "CA, sistema de batería integrado", "AC, integriertes Batteriesystem", "CA, sistema de bateria integrado") };
-        let rows = vec![
-            vec![tr(l, "Battery", "Batería", "Batterie", "Bateria"), format!("{} × {} {} ({} kWh)", st.units, bat.manufacturer, bat.model, n(bat.capacity_kwh * st.units as f64, 1))],
+        let label = if p.additional_storage.is_empty() { tr(l, "Battery", "Batería", "Batterie", "Bateria") }
+            else { format!("{} {}", tr(l, "Battery group", "Grupo de baterías", "Batteriegruppe", "Grupo de baterias"), index + 1) };
+        battery_rows.extend([
+            vec![label, format!("{} × {} {} ({} kWh)", st.units, bat.manufacturer, bat.model, n(bat.capacity_kwh * f64::from(st.units), 1))],
             vec![tr(l, "Connection", "Conexión", "Anschluss", "Conexão"), coupling],
             vec![tr(l, "Operating window", "Ventana de operación", "Betriebsfenster", "Janela de operação"), format!("{}–{} % SOC", n(st.soc_min_pct, 0), n(st.soc_max_pct, 0))],
             vec![tr(l, "Allocation: backup · self-consumption · grid services", "Asignación: respaldo · autoconsumo · servicios de red", "Aufteilung: Notstrom · Eigenverbrauch · Netzdienste", "Alocação: reserva · autoconsumo · serviços de rede"), format!("{} · {} · {} %", n(st.backup_reserve_pct, 0), n(st.self_consumption_pct(), 0), n(st.grid_services_pct, 0))],
+        ]);
+        if let Some(meter) = r.flows.battery_banks.get(index) {
+            let total_kwh = |series: &[f32]| series.iter().map(|&wh| f64::from(wh)).sum::<f64>() / 1000.0;
+            battery_rows.push(vec![tr(l, "Group charged · discharged", "Grupo cargado · descargado", "Gruppe geladen · entladen", "Grupo carregado · descarregado"),
+                format!("{} · {} kWh", n(total_kwh(&meter.charge_wh), 0), n(total_kwh(&meter.discharge_wh), 0))]);
+        }
+    }
+    if !battery_rows.is_empty() {
+        battery_rows.extend([
             vec![tr(l, "Charged · discharged", "Cargada · descargada", "Geladen · entladen", "Carregada · descarregada"), format!("{} · {} kWh", n(b.batt_charge_kwh, 0), n(b.batt_discharge_kwh, 0))],
             vec![tr(l, "Full cycles per year", "Ciclos completos por año", "Vollzyklen pro Jahr", "Ciclos completos por ano"), n(b.battery_full_cycles, 0)],
-        ];
-        out.push(Section { id: "battery", title: tr(l, "Battery storage", "Almacenamiento en batería", "Batteriespeicher", "Armazenamento em bateria"), intro: String::new(), header: vec![], rows });
+        ]);
+        out.push(Section { id: "battery", title: tr(l, "Battery storage", "Almacenamiento en batería", "Batteriespeicher", "Armazenamento em bateria"), intro: String::new(), header: vec![], rows: battery_rows });
     }
     if let Some(f) = &r.finance {
         if f.investment > 0.0 {

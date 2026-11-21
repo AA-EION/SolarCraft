@@ -300,6 +300,9 @@ pub struct Project {
     pub loads: plant::Loads,
     #[serde(default)]
     pub storage: Option<plant::Storage>,
+    /// Additional stationary battery groups on the shared grid-connected AC bus.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_storage: Vec<plant::Storage>,
     #[serde(default, skip_serializing_if = "workflow::Workflow::is_default")]
     pub workflow: workflow::Workflow,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -376,11 +379,15 @@ impl Project {
             weather: None,
             library,
             electrical: Default::default(), grid: Default::default(), loads: Default::default(), storage: None, workflow: Default::default(), cable_plan: vec![], network_fault_studies: vec![], hourly_cables: Default::default(), ev: None, fleet: None, imported_ev_groups: vec![], heating: None, heat_store: None, island_plan: None, island_clusters: vec![],
-            tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None,
+            additional_storage: vec![], tariff: Default::default(), economics: Default::default(), variants: vec![], scene: None,
             use_archived_scene_shading: false, roof_photos: vec![],
         };
         derive::derive(&mut p);
         p
+    }
+
+    pub fn storage_banks(&self) -> impl Iterator<Item = &plant::Storage> {
+        self.storage.iter().chain(&self.additional_storage)
     }
 
     /// The design without variants (what a variant snapshot stores).
@@ -435,6 +442,9 @@ impl Project {
             return Ok(());
         }
         let mut doc = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
+        if pointer == "/additional_storage" && self.additional_storage.is_empty() {
+            doc["additional_storage"] = serde_json::json!([]);
+        }
         let target = doc.pointer_mut(pointer).ok_or_else(|| format!("no such field: {pointer}"))?;
         let is_field = target.as_object().is_some_and(|o| o.contains_key("value") && o.contains_key("origin"));
         if is_field {

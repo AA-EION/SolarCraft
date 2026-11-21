@@ -98,6 +98,7 @@ pub fn apply(t: &mut Tariff, family: TariffFamily, rec: &Value, ctx: TariffConte
         t.demand_charge_per_kw_month = defaults.demand_charge_per_kw_month;
         t.tou.clear();
         t.zones = None;
+        t.net_metering = None;
         t.catalog_import_rate = None;
         t.catalog_base_charge = None;
         if t.export_catalog_ref.is_none() && matches!(t.export, ExportCompensation::NetMetering { .. }) {
@@ -111,6 +112,7 @@ pub fn apply(t: &mut Tariff, family: TariffFamily, rec: &Value, ctx: TariffConte
             (TariffFamily::FeedIn, 0) => match tier_rate(&c.tiers, ctx.installed_kwp, zoning) {
                 Some(r) if u.starts_with("kwh") => {
                     t.export = ExportCompensation::Fixed { price: r };
+                    t.net_metering = None;
                     t.export_catalog_ref = Some(cref.clone());
                     t.catalog_export_rate = Some(CatalogTierRate { tiers: c.tiers, zoning, applied_rate: r, unit_scale: 1.0 });
                     cv.notes.push(format!("feed-in {r} per kWh (tier by installed {} kWp, zoning {zoning})", ctx.installed_kwp));

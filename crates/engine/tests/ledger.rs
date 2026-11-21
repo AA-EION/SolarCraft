@@ -282,3 +282,90 @@ fn hybrid_timed_charge_at_night_respects_port_and_reconciles() {
     assert_eq!(r.flows.import[0], 1500.0);
     assert!(r.balance.max_abs_residual_wh < 1e-6);
 }
+
+fn multiple_battery_fixture() -> Project {
+    use solarcraft_model::plant::{Coupling, GridService};
+    let mut p = dispatch_fixture(Coupling::Integrated);
+    let primary = p.storage.as_mut().unwrap();
+    primary.initial_soc_pct = 50.0;
+    primary.grid_services_pct = 0.0;
+    primary.grid_service = GridService::None;
+
+    let mut second = primary.clone();
+    let mut spec = p.library.battery(&second.battery_id).unwrap().clone();
+    spec.id = "second-ac-bank".into();
+    spec.capacity_kwh = 10.0;
+    spec.roundtrip_efficiency = 0.81;
+    let converter = spec.converter.as_mut().unwrap();
+    converter.p_rated_w = 2500.0;
+    converter.p_charge_max_w = 750.0;
+    second.battery_id = spec.id.clone();
+    p.library.batteries.push(spec);
+    p.additional_storage.push(second);
+    p
+}
+
+#[test]
+fn battery_groups_use_nominal_shares_and_close_independent_soc_ledgers() {
+    use solarcraft_engine::energy::{dispatch, UnitInput};
+    use solarcraft_model::equipment::InverterSpec;
+    let p = multiple_battery_fixture();
+    let mut inverter = InverterSpec::generic(5.0);
+    inverter.night_w = 0.0;
+    inverter.efficiency_curve = vec![[0.0, 1.0], [1.0, 1.0]];
+    let unit = UnitInput { id: "pv", spec: &inverter, dc_w: vec![3000.0, 0.0], v_dc: vec![0.0; 2] };
+    let r = dispatch(&p, &[unit], &[0.0, 3000.0], &[12, 23], 1.0).unwrap();
+    let [primary, second] = r.flows.battery_banks.as_slice() else { panic!("expected two battery meters") };
+    assert_eq!(primary.charge_wh, [2000.0, 0.0]);
+    assert_eq!(second.charge_wh, [750.0, 0.0]);
+    assert_eq!(primary.discharge_wh, [0.0, 2000.0]);
+    assert_eq!(second.discharge_wh, [0.0, 1000.0]);
+    assert_eq!(primary.soc_pct, [60.0, 50.0]);
+    assert!((second.soc_pct[1] - 45.63889).abs() < 1e-5);
+    assert_eq!(r.flows.export, [250.0, 0.0]);
+    assert_eq!(r.flows.import, [0.0, 0.0]);
+    assert!(r.balance.batt_conversion_loss_kwh > 0.18);
+    assert!(r.balance.max_abs_residual_wh < 1e-6);
+}
+
+#[test]
+fn battery_groups_share_export_headroom_and_keep_scheduled_grid_charges_separate() {
+    use solarcraft_engine::energy::dispatch;
+    use solarcraft_model::plant::TimedBatteryOperation;
+    let mut p = multiple_battery_fixture();
+    for bank in p.storage.iter_mut().chain(&mut p.additional_storage) {
+        bank.timed_discharge = Some(TimedBatteryOperation {
+            target_soc_pct: 40.0, power_kw: 1.0, periods: vec![[12 * 3600, 13 * 3600]],
+        });
+        bank.timed_charge = Some(TimedBatteryOperation {
+            target_soc_pct: 70.0, power_kw: 1.0, periods: vec![[22 * 3600, 2 * 3600]],
+        });
+    }
+    p.grid.export_limit_kw = Some(1.2);
+    let r = dispatch(&p, &[], &[0.0; 2], &[12, 23], 1.0).unwrap();
+    let [primary, second] = r.flows.battery_banks.as_slice() else { panic!("expected two battery meters") };
+    assert_eq!(primary.discharge_wh, [1000.0, 0.0]);
+    assert_eq!(second.discharge_wh, [200.0, 0.0]);
+    assert_eq!(primary.charge_grid_wh, [0.0, 1000.0]);
+    assert_eq!(second.charge_grid_wh, [0.0, 750.0]);
+    assert_eq!(r.flows.export, [1200.0, 0.0]);
+    assert_eq!(r.flows.import, [0.0, 1750.0]);
+    assert!(r.balance.max_abs_residual_wh < 1e-6);
+}
+
+#[test]
+fn parallel_integrated_units_scale_converter_power() {
+    use solarcraft_engine::energy::dispatch;
+    use solarcraft_model::plant::{Coupling, TimedBatteryOperation};
+    let mut p = dispatch_fixture(Coupling::Integrated);
+    let bank = p.storage.as_mut().unwrap();
+    bank.units = 2;
+    bank.initial_soc_pct = 30.0;
+    bank.timed_charge = Some(TimedBatteryOperation {
+        target_soc_pct: 70.0, power_kw: 5.0, periods: vec![[0, 3600]],
+    });
+    let r = dispatch(&p, &[], &[0.0], &[0], 1.0).unwrap();
+    assert_eq!(r.flows.batt_charge_grid, [4000.0]);
+    assert_eq!(r.flows.soc_pct, [40.0]);
+    assert!(r.balance.max_abs_residual_wh < 1e-6);
+}

@@ -316,6 +316,7 @@ fn validate_clusters(p: &Project, push: &mut Push) {
         }
         let mut child = p.clone();
         child.island_clusters.clear();
+        child.additional_storage.clear();
         child.hourly_cables = Default::default();
         child.storage = Some(c.storage.clone());
         child.island_plan = c.controls.clone();
@@ -393,69 +394,97 @@ fn plant_issues(p: &Project, push: &mut Push) {
     if !matches!(p.grid.phases, 1 | 3) { push("GRID_PHASES", Severity::Error, "/grid/phases".into(), "Grid connection must be single-phase (1) or three-phase (3).".into()); }
     if !all_islands_have_loads && matches!(p.loads.profile, LoadProfile::Synthetic { .. }) && p.loads.annual_kwh <= 0.0 { push("LOAD_ANNUAL", Severity::Error, "/loads/annual_kwh".into(), "Annual consumption must be positive.".into()); }
     if !all_islands_have_loads && !(0.0..=1.0).contains(&p.loads.critical_fraction) { push("LOAD_CRITICAL", Severity::Error, "/loads/critical_fraction".into(), "Critical load share must be between 0 and 1.".into()); }
-    if let Some(st) = &p.storage {
-        let Some(b) = p.library.battery(&st.battery_id) else { push("BATTERY_MISSING", Severity::Error, "/storage/battery_id".into(), format!("Battery '{}' is not in the project library.", st.battery_id)); return };
+    if !p.additional_storage.is_empty() && (p.storage.is_none() || p.additional_storage.len() > 31 || system.islanded()
+        || p.storage_banks().any(|s| matches!(s.coupling, Coupling::DcHybrid { .. }) || s.generator_id.is_some())) {
+        push("STORAGE_TOPOLOGY", Severity::Error, "/additional_storage".into(),
+            "A shared bus supports up to 32 AC battery groups with a primary battery and a grid connection.".into());
+    }
+    let paths = p.storage.iter().map(|s| ("/storage".to_owned(), s))
+        .chain(p.additional_storage.iter().enumerate().map(|(i, s)| (format!("/additional_storage/{i}"), s)));
+    for (base, st) in paths {
+        let Some(b) = p.library.battery(&st.battery_id) else { push("BATTERY_MISSING", Severity::Error, format!("{base}/battery_id"), format!("Battery '{}' is not in the project library.", st.battery_id)); continue };
         for (name, timed) in [("timed_charge", &st.timed_charge), ("timed_discharge", &st.timed_discharge)] {
             if let Some(t) = timed {
                 if !t.target_soc_pct.is_finite() || !(st.soc_min_pct..=st.soc_max_pct).contains(&t.target_soc_pct)
                     || !t.power_kw.is_finite() || t.power_kw <= 0.0 || t.power_kw > 1e8
                     || t.periods.is_empty() || t.periods.len() > 3
                     || t.periods.iter().any(|p| p[0] >= 86400 || p[1] > 86400) {
-                    push("STORAGE_TIMED_OPERATION", Severity::Error, format!("/storage/{name}"), "Timed battery operation needs a target in the SOC window, positive power and one to three daily periods.".into());
+                    push("STORAGE_TIMED_OPERATION", Severity::Error, format!("{base}/{name}"), "Timed battery operation needs a target in the SOC window, positive power and one to three daily periods.".into());
                 }
             }
         }
-        if st.units == 0 { push("BATTERY_UNITS", Severity::Error, "/storage/units".into(), "At least one battery unit is required.".into()); }
+        if st.units == 0 { push("BATTERY_UNITS", Severity::Error, format!("{base}/units"), "At least one battery unit is required.".into()); }
         if st.soc_min_pct < b.soc_min_pct - 1e-9 || st.soc_max_pct > b.soc_max_pct + 1e-9 || st.soc_min_pct >= st.soc_max_pct {
-            push("STORAGE_SOC_WINDOW", Severity::Error, "/storage/soc_min_pct".into(), format!("Operating SOC window {:.0}–{:.0} % must lie inside the battery's {:.0}–{:.0} % and be non-empty.", st.soc_min_pct, st.soc_max_pct, b.soc_min_pct, b.soc_max_pct));
+            push("STORAGE_SOC_WINDOW", Severity::Error, format!("{base}/soc_min_pct"), format!("Operating SOC window {:.0}–{:.0} % must lie inside the battery's {:.0}–{:.0} % and be non-empty.", st.soc_min_pct, st.soc_max_pct, b.soc_min_pct, b.soc_max_pct));
         }
         if st.backup_reserve_pct < 0.0 || st.grid_services_pct < 0.0 || st.backup_reserve_pct + st.grid_services_pct > 100.0 + 1e-9 {
-            push("STORAGE_ALLOCATION", Severity::Error, "/storage/backup_reserve_pct".into(), format!("Backup reserve {:.0} % plus grid services {:.0} % exceed the usable energy (100 %). Stored energy cannot be allocated twice.", st.backup_reserve_pct, st.grid_services_pct));
+            push("STORAGE_ALLOCATION", Severity::Error, format!("{base}/backup_reserve_pct"), format!("Backup reserve {:.0} % plus grid services {:.0} % exceed the usable energy (100 %). Stored energy cannot be allocated twice.", st.backup_reserve_pct, st.grid_services_pct));
         }
         let mut pr = st.charge_priority.clone(); pr.sort_by_key(|u| *u as u8); pr.dedup();
-        if pr.len() != 3 || st.charge_priority.len() != 3 { push("STORAGE_PRIORITY", Severity::Error, "/storage/charge_priority".into(), "Charge priority must list backup, self_consumption and grid_services once each.".into()); }
+        if pr.len() != 3 || st.charge_priority.len() != 3 { push("STORAGE_PRIORITY", Severity::Error, format!("{base}/charge_priority"), "Charge priority must list backup, self_consumption and grid_services once each.".into()); }
         match &st.coupling {
             Coupling::DcHybrid { unit_id } => {
                 let e = crate::derive::electrical(p);
                 match e.inverters.iter().find(|u| &u.id == unit_id) {
-                    None => push("STORAGE_COUPLING", Severity::Error, "/storage/coupling".into(), format!("DC coupling names inverter unit '{unit_id}', which does not exist. Units: {}.", e.inverters.iter().map(|u| u.id.as_str()).collect::<Vec<_>>().join(", "))),
+                    None => push("STORAGE_COUPLING", Severity::Error, format!("{base}/coupling"), format!("DC coupling names inverter unit '{unit_id}', which does not exist. Units: {}.", e.inverters.iter().map(|u| u.id.as_str()).collect::<Vec<_>>().join(", "))),
                     Some(u) => match p.library.inverter(&u.inverter_id).and_then(|i| i.battery_port.clone()) {
-                        None => push("STORAGE_COUPLING", Severity::Error, "/storage/coupling".into(), format!("{} has no DC battery port. Choose a hybrid inverter or AC coupling with a battery inverter.", u.name)),
+                        None => push("STORAGE_COUPLING", Severity::Error, format!("{base}/coupling"), format!("{} has no DC battery port. Choose a hybrid inverter or AC coupling with a battery inverter.", u.name)),
                         Some(port) => if b.nominal_voltage_v < port.v_min || b.nominal_voltage_v > port.v_max {
-                            push("STORAGE_VOLTAGE", Severity::Error, "/storage/battery_id".into(), format!("Battery voltage {:.0} V is outside the inverter battery port range {:.0}–{:.0} V.", b.nominal_voltage_v, port.v_min, port.v_max));
+                            push("STORAGE_VOLTAGE", Severity::Error, format!("{base}/battery_id"), format!("Battery voltage {:.0} V is outside the inverter battery port range {:.0}–{:.0} V.", b.nominal_voltage_v, port.v_min, port.v_max));
                         },
                     },
                 }
             }
             Coupling::Integrated => if b.converter.is_none() {
-                push("STORAGE_COUPLING", Severity::Error, "/storage/coupling".into(), format!("{} {} has no built-in converter; choose DC or AC coupling.", b.manufacturer, b.model));
+                push("STORAGE_COUPLING", Severity::Error, format!("{base}/coupling"), format!("{} {} has no built-in converter; choose DC or AC coupling.", b.manufacturer, b.model));
             },
             Coupling::AcCoupled { battery_inverter_id } => if p.library.battery_inverter(battery_inverter_id).is_none() {
-                push("STORAGE_COUPLING", Severity::Error, "/storage/coupling".into(), format!("Battery inverter '{battery_inverter_id}' is not in the project library."));
+                push("STORAGE_COUPLING", Severity::Error, format!("{base}/coupling"), format!("Battery inverter '{battery_inverter_id}' is not in the project library."));
             },
         }
-        if let Some(g) = &st.generator_id { if p.library.generator(g).is_none() { push("GENERATOR_MISSING", Severity::Error, "/storage/generator_id".into(), format!("Generator '{g}' is not in the project library.")); } }
+        if let Some(g) = &st.generator_id { if p.library.generator(g).is_none() { push("GENERATOR_MISSING", Severity::Error, format!("{base}/generator_id"), format!("Generator '{g}' is not in the project library.")); } }
         if let Coupling::AcCoupled { battery_inverter_id } = &st.coupling {
             if let Some(bi) = p.library.battery_inverter(battery_inverter_id) {
                 let v = b.cells.as_ref().map_or(b.nominal_voltage_v, |c| c.pack_voltage());
                 if bi.battery_v_min.is_some_and(|lo| v < lo) || bi.battery_v_max.is_some_and(|hi| v > hi) {
-                    push("STORAGE_VOLTAGE", Severity::Error, "/storage/battery_id".into(), format!("Battery voltage {v:.0} V is outside the battery inverter's {:.0}–{:.0} V range.", bi.battery_v_min.unwrap_or(0.0), bi.battery_v_max.unwrap_or(f64::INFINITY)));
+                    push("STORAGE_VOLTAGE", Severity::Error, format!("{base}/battery_id"), format!("Battery voltage {v:.0} V is outside the battery inverter's {:.0}–{:.0} V range.", bi.battery_v_min.unwrap_or(0.0), bi.battery_v_max.unwrap_or(f64::INFINITY)));
                 }
             }
         }
         for (i, o) in st.outages.iter().enumerate() {
-            if o.start_hour >= 8760 || o.hours == 0 { push("OUTAGE_RANGE", Severity::Error, format!("/storage/outages/{i}"), "Outage must start within the year (hour 0–8759) and last at least one hour.".into()); }
+            if o.start_hour >= 8760 || o.hours == 0 { push("OUTAGE_RANGE", Severity::Error, format!("{base}/outages/{i}"), "Outage must start within the year (hour 0–8759) and last at least one hour.".into()); }
         }
         if let crate::plant::GridService::ExportWindow { start_hour, end_hour, power_kw } = st.grid_service {
-            if start_hour > 23 || end_hour > 24 || power_kw <= 0.0 { push("GRID_SERVICE", Severity::Error, "/storage/grid_service".into(), "Export window hours must be 0–24 and power positive.".into()); }
+            if start_hour > 23 || end_hour > 24 || power_kw <= 0.0 { push("GRID_SERVICE", Severity::Error, format!("{base}/grid_service"), "Export window hours must be 0–24 and power positive.".into()); }
         }
         if st.grid_services_pct > 0.0 && matches!(st.grid_service, crate::plant::GridService::None) {
-            push("GRID_SERVICE_UNUSED", Severity::Warning, "/storage/grid_services_pct".into(), "Energy is allocated to grid services but no grid service is configured; it stays unused.".into());
+            push("GRID_SERVICE_UNUSED", Severity::Warning, format!("{base}/grid_services_pct"), "Energy is allocated to grid services but no grid service is configured; it stays unused.".into());
         }
     }
     if system.islanded() { return; }
+    if let crate::plant::ExportCompensation::NetMetering { surplus_price } = p.tariff.export {
+        if !surplus_price.is_finite() || surplus_price < 0.0
+            || p.tariff.net_metering.as_ref().is_some_and(|terms| !terms.valid(p.tariff.zones.as_ref())) {
+            push("NET_METERING_TERMS", Severity::Error, "/tariff/net_metering".into(),
+                "Use nonnegative surplus and energy rates and one ordered rate table for each tariff zone.".into());
+        }
+    }
     for (i, t) in p.tariff.tou.iter().enumerate() {
         if t.start_hour > 23 || t.end_hour > 24 || t.months.iter().any(|m| !(1..=12).contains(m)) { push("TARIFF_PERIOD", Severity::Error, format!("/tariff/tou/{i}"), format!("Tariff period '{}' has invalid hours or months.", t.name)); }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (i, rate) in p.tariff.consumer_rates.iter().enumerate() {
+        let valid = seen.insert(rate.consumer) && !rate.name.trim().is_empty() && rate.name.len() <= 200
+            && [rate.import_price, rate.fixed_per_month, rate.demand_charge_per_kw_month]
+                .iter().all(|v| v.is_finite() && *v >= 0.0);
+        if !valid {
+            push("CONSUMER_TARIFF", Severity::Error, format!("/tariff/consumer_rates/{i}"),
+                "Use one named rate per consumer with nonnegative prices and charges.".into());
+        }
+    }
+    if !seen.is_empty() && matches!(p.tariff.export, crate::plant::ExportCompensation::NetMetering { .. }) {
+        push("CONSUMER_NET_METERING", Severity::Error, "/tariff/consumer_rates".into(),
+            "Use the shared site tariff for net metering.".into());
     }
     if p.economics.horizon_years == 0 || p.economics.horizon_years > 50 { push("ECON_HORIZON", Severity::Error, "/economics/horizon_years".into(), "Analysis period must be 1–50 years.".into()); }
 }

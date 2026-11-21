@@ -756,6 +756,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
     };
     let mut load_w: Vec<f64> = local_hour.iter().map(|&h| profile[h as usize % profile.len()]).collect();
     let mut reference_load = load_w.clone();
+    let mut reference_heating = vec![];
+    let mut reference_ev = vec![];
     let mut heat_store = None;
     let heating = p.heating.as_ref().map(|config| {
         let (series, reference, result) = if let Some(tank) = &p.heat_store {
@@ -776,7 +778,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             (series.clone(), series, result)
         };
         for (load, extra) in load_w.iter_mut().zip(&series) { *load += f64::from(*extra); }
-        for (load, extra) in reference_load.iter_mut().zip(reference) { *load += f64::from(extra); }
+        for (load, &extra) in reference_load.iter_mut().zip(&reference) { *load += f64::from(extra); }
+        if !p.tariff.consumer_rates.is_empty() { reference_heating = reference; }
         hourly.heating_wh = series;
         result
     });
@@ -787,19 +790,21 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             *load += f64::from(*extra);
             *reference += f64::from(*extra);
         }
+        if !p.tariff.consumer_rates.is_empty() { reference_ev.clone_from(&series); }
         hourly.ev_wh = series;
         result
     });
     let mut vehicle_export = vec![];
     let mut fleet = p.fleet.as_ref().map(|config| {
-        let outage: std::collections::HashSet<_> = p.storage.iter().flat_map(|s| &s.outages)
+        let outage: std::collections::HashSet<_> = p.storage_banks().flat_map(|s| &s.outages)
             .flat_map(|o| (0..o.hours.min(8760)).map(|h| (o.start_hour + h) % 8760)).collect();
         let online: Vec<_> = local_hour.iter().map(|h| !outage.contains(h)).collect();
         let bidirectional = p.grid.feed_in != solarcraft_model::plant::FeedIn::Full;
         let run = flexible::fleet(config, &local_hour, &load_w, &hourly.ac_w, &online, bidirectional, p.grid.export_limit_kw.map(|limit| limit * 1000.0));
         let reference = flexible::fleet(config, &local_hour, &reference_load, &vec![0.0; n], &online, false, None);
         for (load, extra) in load_w.iter_mut().zip(&run.charge) { *load += f64::from(*extra); }
-        for (load, extra) in reference_load.iter_mut().zip(reference.charge) { *load += f64::from(extra); }
+        for (load, &extra) in reference_load.iter_mut().zip(&reference.charge) { *load += f64::from(extra); }
+        if !p.tariff.consumer_rates.is_empty() { reference_ev = reference.charge; }
         hourly.ev_wh = run.charge;
         hourly.ev_discharge_wh = run.discharge;
         vehicle_export = run.export;
@@ -837,8 +842,8 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             text: "Off-grid results include unserved demand and generator fuel. Grid-tariff ROI is unavailable for this system.".into() });
         None
     } else {
-        let battery_kwh = p.storage.as_ref().and_then(|s| p.library.battery(&s.battery_id).map(|b| b.capacity_kwh * s.units as f64)).unwrap_or(0.0);
-        let zero = vec![0.0f32; n];
+        let battery_kwh = p.storage_banks().filter_map(|s| p.library.battery(&s.battery_id)
+            .map(|b| b.capacity_kwh * f64::from(s.units))).sum();
         let load_f32: Vec<f32> = reference_load.iter().map(|&x| x as f32).collect();
         let base_load_kwh = match &p.loads.profile {
             solarcraft_model::plant::LoadProfile::None => 0.0,
@@ -849,9 +854,23 @@ pub fn simulate_with_island_profiles(p: &Project, w: &Weather, weather_hash: &st
             + heating.as_ref().map_or(0.0, |r| r.pump_electric_kwh + r.backup_kwh)
             + fleet.as_ref().map_or(0.0, |r| r.charge_kwh);
         let tariff = p.tariff.for_run(annual_load_kwh, dc_kwp);
-        let without = finance::bill(&tariff, &load_f32, &zero, &local_hour);
-        let with = finance::bill(&tariff, &en.flows.import, &en.flows.export, &local_hour);
-        Some(finance::cash_flow(&tariff, &p.economics, &finance::Plant { dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_generation_kwh }, without, with))
+        let (without, with, consumers) = if tariff.consumer_rates.is_empty() {
+            let zero = vec![0.0; n];
+            (finance::bill(&tariff, &load_f32, &zero, &local_hour),
+             finance::bill(&tariff, &en.flows.import, &en.flows.export, &local_hour), vec![])
+        } else {
+            use finance::consumers::Demand;
+            use solarcraft_model::plant::Consumer;
+            finance::consumers::bills(&tariff, &[
+                Demand { consumer: Consumer::Heating, actual: &hourly.heating_wh, reference: &reference_heating },
+                Demand { consumer: Consumer::ElectricVehicles, actual: &hourly.ev_wh, reference: &reference_ev },
+            ], &en.flows, &load_f32, &local_hour)
+        };
+        let mut result = finance::cash_flow(&tariff, &p.economics, &finance::Plant {
+            dc_kwp, ac_kw, battery_kwh, pv_ac_kwh: en.balance.pv_generation_kwh,
+        }, without, with);
+        result.consumers = consumers;
+        Some(result)
     };
     progress(1.0);
     if en.balance.pv_to_battery_dc_kwh > 0.0 {

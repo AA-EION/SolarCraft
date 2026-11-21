@@ -15,10 +15,23 @@
 //! discounted AC energy.
 use crate::calendar::local_time;
 use serde::{Deserialize, Serialize};
-use solarcraft_model::plant::{Economics, ExportCompensation, Tariff};
+use solarcraft_model::plant::{Economics, ExportCompensation, MeteringDegradation, NetMeteringPeriod, Tariff};
+
+mod metering;
+pub use metering::MeteringBill;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct Bill { pub energy: f64, pub demand: f64, pub fixed: f64, pub export_credit: f64, pub total: f64, pub import_kwh: f64, pub export_kwh: f64 }
+pub struct Bill {
+    pub energy: f64,
+    pub demand: f64,
+    pub fixed: f64,
+    pub export_credit: f64,
+    pub total: f64,
+    pub import_kwh: f64,
+    pub export_kwh: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metering: Option<MeteringBill>,
+}
 
 pub fn import_price(t: &Tariff, hoy: u32) -> f64 {
     let lt = local_time(hoy);
@@ -36,6 +49,9 @@ pub fn import_price(t: &Tariff, hoy: u32) -> f64 {
 
 /// Annual bill from hourly import/export (Wh) indexed with their local hours.
 pub fn bill(t: &Tariff, import_wh: &[f32], export_wh: &[f32], local_hour: &[u32]) -> Bill {
+    if let (Some(terms), ExportCompensation::NetMetering { surplus_price }) = (&t.net_metering, &t.export) {
+        return metering::bill(t, terms, *surplus_price, import_wh, export_wh, local_hour);
+    }
     let mut b = Bill { fixed: t.fixed_per_month * 12.0, ..Default::default() };
     let (mut imp_m, mut exp_m, mut cost_m, mut peak_m) = ([0.0f64; 12], [0.0f64; 12], [0.0f64; 12], [0.0f64; 12]);
     for (k, &h) in local_hour.iter().enumerate() {
@@ -87,9 +103,23 @@ pub struct Finance {
     pub payback_years: Option<f64>,
     pub lcoe_per_kwh: f64,
     pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumers: Vec<ConsumerBill>,
 }
 
+pub(crate) mod consumers;
+pub use consumers::ConsumerBill;
+
 pub struct Plant { pub dc_kwp: f64, pub ac_kw: f64, pub battery_kwh: f64, pub pv_ac_kwh: f64 }
+
+fn archived_savings(curve: &MeteringDegradation, months: [f64; 12], year: u32) -> Option<f64> {
+    months.into_iter().enumerate().try_fold(0.0, |sum, (month, cost)| {
+        let month = month as u32 + 1;
+        let first = curve.retention(month).filter(|&retention| retention > 0.0)?;
+        let later = curve.retention(month + 12 * (year - 1))?;
+        Some(sum + cost * later / first)
+    })
+}
 
 pub fn cash_flow(t: &Tariff, ec: &Economics, plant: &Plant, without: Bill, with: Bill) -> Finance {
     let mut notes = vec![];
@@ -101,6 +131,12 @@ pub fn cash_flow(t: &Tariff, ec: &Economics, plant: &Plant, without: Bill, with:
     let n = ec.horizon_years;
     let annuity = ec.loan.as_ref().map(|l| { let i = l.rate_pct / 100.0; if i.abs() < 1e-12 { l.amount / l.years.max(1) as f64 } else { l.amount * i / (1.0 - (1.0 + i).powi(-(l.years.max(1) as i32))) } });
     let base_import = without.energy + without.demand + without.fixed - (with.energy + with.demand + with.fixed);
+    let archived = t.net_metering.as_ref()
+        .filter(|terms| terms.period == NetMeteringPeriod::Annual && with.energy <= 1e-9 && with.export_credit == 0.0)
+        .and_then(|terms| terms.savings_degradation.as_ref())
+        .filter(|curve| curve.reference_annual_pct == ec.degradation_pct_per_year)
+        .zip(without.metering.as_ref().and_then(|meter| meter.monthly_flat_cost))
+        .filter(|(curve, months)| archived_savings(curve, *months, 1).is_some_and(|x| (x - base_import).abs() <= 1e-6));
     let mut years = vec![];
     let cf0 = -(investment - ec.subsidy) + ec.loan.as_ref().map_or(0.0, |l| l.amount);
     years.push(Year { year: 0, cash_flow: cf0, cumulative: cf0, ..Default::default() });
@@ -110,7 +146,8 @@ pub fn cash_flow(t: &Tariff, ec: &Economics, plant: &Plant, without: Bill, with:
         let d = (1.0 - ec.degradation_pct_per_year / 100.0).powi(y as i32 - 1);
         let esc_i = (1.0 + t.import_escalation_pct / 100.0).powi(y as i32 - 1);
         let esc_e = (1.0 + t.export_escalation_pct / 100.0).powi(y as i32 - 1);
-        let savings = base_import * d * esc_i;
+        let savings = archived.and_then(|(curve, months)| archived_savings(curve, months, y))
+            .unwrap_or(base_import * d) * esc_i;
         let export_revenue = with.export_credit * d * esc_e;
         let om = investment * ec.om_pct_of_investment / 100.0 * (1.0 + ec.om_escalation_pct / 100.0).powi(y as i32 - 1);
         let mut repl = 0.0;
@@ -135,9 +172,14 @@ pub fn cash_flow(t: &Tariff, ec: &Economics, plant: &Plant, without: Bill, with:
     let irr_pct = irr(&years.iter().map(|y| y.cash_flow).collect::<Vec<_>>()).map(|x| x * 100.0);
     let payback_years = years.windows(2).find(|w| w[0].cumulative < 0.0 && w[1].cumulative >= 0.0)
         .map(|w| (w[1].year - 1) as f64 + (-w[0].cumulative) / w[1].cash_flow.max(1e-9));
+    if archived.is_some() {
+        notes.push("Net-metering savings use the saved module degradation curve by month and the first-year settled bill.".into());
+    } else if with.metering.is_some() {
+        notes.push("Cash flow scales first-year net-metering savings using import escalation and PV degradation.".into());
+    }
     if ec.loan.is_some() { notes.push("Cash flow is shown for the owner's equity: loan payout in year 0, annuities in later years.".into()); }
     Finance { currency: t.currency.clone(), investment, bill_without: without, bill_with: with, years, npv, irr_pct, payback_years,
-              lcoe_per_kwh: if pv_energy > 0.0 { pv_cost / pv_energy } else { 0.0 }, notes }
+              lcoe_per_kwh: if pv_energy > 0.0 { pv_cost / pv_energy } else { 0.0 }, notes, consumers: vec![] }
 }
 
 /// Internal rate of return by bisection; None without a sign change.

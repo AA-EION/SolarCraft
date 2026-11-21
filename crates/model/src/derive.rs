@@ -182,7 +182,7 @@ pub fn equipment_counts(project: &Project) -> Vec<EquipmentCount> {
             add("inverter", &device.id, &device.manufacturer, &device.model, 1);
         }
     }
-    if let Some(storage) = &project.storage {
+    for storage in project.storage_banks() {
         if let Some(device) = project.library.battery(&storage.battery_id) {
             add("battery", &device.id, &device.manufacturer, &device.model, storage.units);
         }

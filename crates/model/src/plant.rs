@@ -310,6 +310,84 @@ pub enum ExportCompensation {
     NetMetering { surplus_price: f64 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetMeteringPeriod {
+    Monthly,
+    Annual,
+}
+
+/// Terms with independent energy settlement in each tariff zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetMeteringTerms {
+    pub period: NetMeteringPeriod,
+    /// Carry positive balances to subsequent months of the billing year.
+    pub rollover: bool,
+    /// Ordered by tariff zone, with one rate table per zone.
+    pub zone_rates: Vec<CatalogTierRate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub savings_degradation: Option<MeteringDegradation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeteringDegradation {
+    /// Editing this native input switches the projection to the edited annual rate.
+    pub reference_annual_pct: f64,
+    pub arrays: Vec<DegradationArray>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DegradationArray {
+    pub kwp: f64,
+    /// Years and remaining power as a fraction, starting at (0, 1).
+    pub points: Vec<(u32, f64)>,
+}
+
+impl MeteringDegradation {
+    /// Module-area-weighted output remaining in the specified month (January = 1).
+    pub fn retention(&self, month: u32) -> Option<f64> {
+        let years = f64::from(month) / 12.0;
+        let mut power = 0.0;
+        let mut initial = 0.0;
+        for array in &self.arrays {
+            let first = array.points.windows(2).find(|pair| years <= f64::from(pair[1].0));
+            let [(start, low), (end, high)] = first.or_else(|| array.points.windows(2).last())? else {
+                return None;
+            };
+            if end <= start || !array.kwp.is_finite() || array.kwp <= 0.0 {
+                return None;
+            }
+            let retention = low + (high - low) * (years - f64::from(*start)) / f64::from(end - start);
+            power += array.kwp * retention.clamp(0.0, 1.0);
+            initial += array.kwp;
+        }
+        let ratio = power / initial;
+        ratio.is_finite().then_some(ratio)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Consumer {
+    ElectricVehicles,
+    Heating,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConsumerTariff {
+    pub consumer: Consumer,
+    pub name: String,
+    pub import_price: f64,
+    #[serde(default)]
+    pub fixed_per_month: f64,
+    #[serde(default)]
+    pub demand_charge_per_kw_month: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zones: Option<ZoneSchedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_ref: Option<CatalogRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tariff {
     pub name: String,
@@ -319,12 +397,17 @@ pub struct Tariff {
     #[serde(default)]
     pub tou: Vec<TouPeriod>,
     pub export: ExportCompensation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net_metering: Option<NetMeteringTerms>,
     pub fixed_per_month: f64,
     /// Charge per kW of the month's highest hourly import.
     pub demand_charge_per_kw_month: f64,
     /// Annual price escalation, %.
     pub import_escalation_pct: f64,
     pub export_escalation_pct: f64,
+    /// Separate import meters for supported hourly demands. Other imports use the site tariff.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumer_rates: Vec<ConsumerTariff>,
     /// Zone schedule (time-of-use grid) that sets the import price per hour when present.
     #[serde(default)]
     pub zones: Option<ZoneSchedule>,
@@ -370,6 +453,26 @@ impl CatalogTierRate {
         if current_rate != self.applied_rate { return current_rate; }
         Self::rate(&self.tiers, quantity, self.zoning)
             .map_or(current_rate, |rate| rate * self.unit_scale)
+    }
+}
+
+impl NetMeteringTerms {
+    pub fn rate(&self, zone: usize, price: f64, quantity_kwh: f64) -> f64 {
+        self.zone_rates.get(zone).map_or(price, |rate| rate.resolve(price, quantity_kwh))
+    }
+
+    pub fn valid(&self, zones: Option<&ZoneSchedule>) -> bool {
+        if self.zone_rates.is_empty() { return true; }
+        let Some(zones) = zones else { return false; };
+        zones.zone_prices.len() == self.zone_rates.len()
+            && zones.zone_prices.iter().all(|price| price.is_finite() && *price >= 0.0)
+            && self.zone_rates.iter().all(|rate| {
+                rate.tiers.first().is_some_and(|first| first[0] == 0.0)
+                    && rate.tiers.windows(2).all(|pair| pair[0][0] < pair[1][0])
+                    && rate.tiers.iter().flatten().all(|value| value.is_finite() && *value >= 0.0)
+                    && rate.applied_rate.is_finite() && rate.applied_rate >= 0.0
+                    && rate.unit_scale.is_finite() && rate.unit_scale > 0.0
+            })
     }
 }
 
@@ -423,8 +526,8 @@ impl ZoneSchedule {
 
 impl Default for Tariff {
     fn default() -> Self {
-        Tariff { name: "Flat tariff".into(), currency: "EUR".into(), import_price: 0.30, tou: vec![], export: ExportCompensation::Fixed { price: 0.08 },
-                 fixed_per_month: 0.0, demand_charge_per_kw_month: 0.0, import_escalation_pct: 2.0, export_escalation_pct: 0.0, zones: None, catalog_ref: None, export_catalog_ref: None, catalog_import_rate: None, catalog_base_charge: None, catalog_export_rate: None }
+        Tariff { name: "Flat tariff".into(), currency: "EUR".into(), import_price: 0.30, tou: vec![], export: ExportCompensation::Fixed { price: 0.08 }, net_metering: None,
+                 fixed_per_month: 0.0, demand_charge_per_kw_month: 0.0, import_escalation_pct: 2.0, export_escalation_pct: 0.0, consumer_rates: vec![], zones: None, catalog_ref: None, export_catalog_ref: None, catalog_import_rate: None, catalog_base_charge: None, catalog_export_rate: None }
     }
 }
 

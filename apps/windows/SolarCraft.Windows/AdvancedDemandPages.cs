@@ -27,10 +27,11 @@ public sealed partial class MainWindow
         return await dialog.ShowAsync() == ContentDialogResult.Primary ? result : null;
     }
 
-    private ComboBox AdvancedList(Panel panel, JsonArray rows, string title, Func<JsonNode?, Task<JsonObject?>> edit, Action<JsonArray> save)
+    private ComboBox AdvancedList(Panel panel, JsonArray rows, string title, Func<JsonNode?, Task<JsonObject?>> edit,
+        Action<JsonArray> save, Func<JsonNode?, string>? label = null)
     {
         var file = _file;
-        var select = Combo(title, rows.Select((r, i) => (i.ToString(), S(r, "name"))).ToList(), "0");
+        var select = Combo(title, rows.Select((r, i) => (i.ToString(), label?.Invoke(r) ?? S(r, "name"))).ToList(), "0");
         if (rows.Count > 0) panel.Children.Add(select);
         var add = new Button { Content = T("advanced_add") };
         var change = new Button { Content = T("advanced_edit"), IsEnabled = rows.Count > 0 };

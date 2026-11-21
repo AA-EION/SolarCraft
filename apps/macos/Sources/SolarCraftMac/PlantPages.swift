@@ -124,12 +124,14 @@ struct StorageLoadsPage: View {
     @State private var outages: [OutageEdit] = []
     @State private var generatorID = ""
     @State private var generatorEditor = false
+    @State private var bankDraft: AcBankDraft?
     private var generators: [JSONDict] { dicts(lib["generators"]) }
     private var requiresStorage: Bool { ["grid_battery", "grid_ev_battery", "grid_thermal_battery", "off_grid", "off_grid_generator"].contains(m.systemType) }
 
     private var lib: JSONDict { m.section("library") }
     private var batteries: [JSONDict] { dicts(lib["batteries"]) }
     private var batInverters: [JSONDict] { dicts(lib["battery_inverters"]) }
+    private var additionalBanks: [JSONDict] { dicts(m.raw["additional_storage"]) }
     private var hybridUnits: [JSONDict] { dicts(m.stringingDoc?["inverters"]).filter { ($0["has_battery_port"] as? Bool) == true }.compactMap { $0["unit"] as? JSONDict } }
 
     var body: some View {
@@ -150,13 +152,17 @@ struct StorageLoadsPage: View {
             }
             } else { GroupBox(m.t("use_battery")) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle(m.t("use_battery"), isOn: $enabled).disabled(requiresStorage)
+                    Toggle(m.t("use_battery"), isOn: $enabled).disabled(requiresStorage || !additionalBanks.isEmpty)
                     if enabled {
                         if batteries.isEmpty { Button(m.t("add_generic_storage")) { m.addGenericStorage() } }
                         Form {
                             Picker(m.t("battery"), selection: $batteryId) { ForEach(batteries.indices, id: \.self) { i in Text("\(str(batteries[i], "manufacturer")) \(str(batteries[i], "model"))").tag(str(batteries[i], "id")) } }
                             Stepper("\(m.t("units")): \(units)", value: $units, in: 1...20)
-                            Picker(m.t("coupling"), selection: $coupling) { Text(m.t("dc_hybrid")).tag("dc_hybrid"); Text(m.t("ac_coupled")).tag("ac_coupled"); Text(m.t("integrated")).tag("integrated") }
+                            Picker(m.t("coupling"), selection: $coupling) {
+                                if additionalBanks.isEmpty { Text(m.t("dc_hybrid")).tag("dc_hybrid") }
+                                Text(m.t("ac_coupled")).tag("ac_coupled")
+                                Text(m.t("integrated")).tag("integrated")
+                            }
                             if coupling == "dc_hybrid" {
                                 Picker(m.t("inverter"), selection: $unitId) { ForEach(hybridUnits.indices, id: \.self) { i in Text(str(hybridUnits[i], "name")).tag(str(hybridUnits[i], "id")) } }
                             } else if coupling == "ac_coupled" {
@@ -201,13 +207,44 @@ struct StorageLoadsPage: View {
                         }
                     }
                     Button(m.t("apply")) { applyStorage() }.keyboardShortcut(.defaultAction)
-                    IssueList(issues: m.issues.filter { $0.pointer.hasPrefix("/storage") || $0.pointer.hasPrefix("/loads") }.map { ["severity": $0.severity, "message": $0.message] })
+                    if !m.isIslanded, !m.section("storage").isEmpty,
+                       ["integrated", "ac_coupled"].contains(str(m.section("storage")["coupling"] as? JSONDict ?? [:], "kind")) {
+                        bankList
+                    }
+                    IssueList(issues: m.issues.filter { $0.pointer.hasPrefix("/storage") || $0.pointer.hasPrefix("/additional_storage") || $0.pointer.hasPrefix("/loads") }.map { ["severity": $0.severity, "message": $0.message] })
                 }
             }
             }
         }
         .onAppear(perform: load)
         .sheet(isPresented: $generatorEditor) { GeneratorEditor().environmentObject(m) }
+        .sheet(item: $bankDraft) { draft in
+            AcBankEditor(draft: draft, batteries: batteries, inverters: batInverters) { value in
+                var banks = additionalBanks
+                if let index = draft.index { banks[index] = value } else { banks.append(value) }
+                m.setSection("additional_storage", banks)
+            }.environmentObject(m)
+        }
+    }
+
+    private var bankList: some View {
+        DisclosureGroup(m.t("battery_banks")) {
+            Text(m.t("battery_banks_hint")).foregroundStyle(.secondary)
+            ForEach(additionalBanks.indices, id: \.self) { index in
+                let bank = additionalBanks[index]
+                let battery = batteries.first { str($0, "id") == str(bank, "battery_id") } ?? [:]
+                HStack {
+                    Text("\(int(bank, "units")) × \(str(battery, "model"))")
+                    Button(m.t("advanced_edit")) { bankDraft = AcBankDraft(index: index, source: bank) }
+                    Button(m.t("remove")) {
+                        var next = additionalBanks
+                        next.remove(at: index)
+                        m.setSection("additional_storage", next)
+                    }
+                }
+            }
+            Button(m.t("advanced_add")) { bankDraft = AcBankDraft(index: nil, source: m.section("storage")) }
+        }
     }
 
     private func applyLoads() {
@@ -270,6 +307,81 @@ struct StorageLoadsPage: View {
         gsKind = str(gs, "kind").isEmpty ? "none" : str(gs, "kind")
         gsLimit = num(gs, "import_limit_kw", 2); gsStart = num(gs, "start_hour", 18); gsEnd = num(gs, "end_hour", 21); gsPower = num(gs, "power_kw", 3)
         outages = dicts(s["outages"]).map { o in OutageEdit(day: Double(int(o, "start_hour") / 24 + 1), hour: Double(int(o, "start_hour") % 24), hours: num(o, "hours", 1)) }
+    }
+}
+
+private struct AcBankDraft: Identifiable {
+    let id = UUID()
+    let index: Int?
+    let source: JSONDict
+}
+
+private struct AcBankEditor: View {
+    @EnvironmentObject var m: AppModel
+    @Environment(\.dismiss) var dismiss
+    let draft: AcBankDraft
+    let batteries: [JSONDict]
+    let inverters: [JSONDict]
+    let save: (JSONDict) -> Void
+    @State private var battery = ""
+    @State private var coupling = "integrated"
+    @State private var inverter = ""
+    @State private var units = 1
+    @State private var minimum = 10.0
+    @State private var maximum = 100.0
+    @State private var initial = 50.0
+
+    var body: some View {
+        Form {
+            Picker(m.t("battery"), selection: $battery) {
+                ForEach(batteries.indices, id: \.self) { i in Text(str(batteries[i], "model")).tag(str(batteries[i], "id")) }
+            }
+            Picker(m.t("coupling"), selection: $coupling) {
+                Text(m.t("integrated")).tag("integrated")
+                Text(m.t("ac_coupled")).tag("ac_coupled")
+            }
+            if coupling == "ac_coupled" {
+                Picker(m.t("inverter"), selection: $inverter) {
+                    ForEach(inverters.indices, id: \.self) { i in Text(str(inverters[i], "model")).tag(str(inverters[i], "id")) }
+                }
+            }
+            Stepper("\(m.t("units")) · \(units)", value: $units, in: 1...128)
+            NumField(label: m.t("soc_window"), value: $minimum)
+            NumField(label: m.t("soc_maximum"), value: $maximum)
+            NumField(label: m.t("initial_soc"), value: $initial)
+            HStack {
+                Button(m.t("cancel")) { dismiss() }
+                Button(m.t("apply")) {
+                    var bank = draft.source
+                    bank["battery_id"] = battery
+                    bank["coupling"] = coupling == "integrated" ? ["kind":coupling] : ["kind":coupling, "battery_inverter_id":inverter]
+                    bank["units"] = units
+                    bank["soc_min_pct"] = minimum
+                    bank["soc_max_pct"] = maximum
+                    bank["initial_soc_pct"] = initial
+                    if draft.index == nil {
+                        bank["outages"] = [JSONDict]()
+                        bank["grid_service"] = ["kind": "none"]
+                        bank["grid_services_pct"] = 0
+                        bank.removeValue(forKey: "timed_charge")
+                        bank.removeValue(forKey: "timed_discharge")
+                    }
+                    save(bank)
+                    dismiss()
+                }.disabled(battery.isEmpty || (coupling == "ac_coupled" && inverter.isEmpty))
+            }
+        }.padding(18).frame(width: 490)
+        .onAppear {
+            let source = draft.source
+            let connection = source["coupling"] as? JSONDict ?? [:]
+            battery = str(source, "battery_id")
+            coupling = str(connection, "kind")
+            inverter = str(connection, "battery_inverter_id")
+            units = int(source, "units")
+            minimum = num(source, "soc_min_pct")
+            maximum = num(source, "soc_max_pct")
+            initial = num(source, "initial_soc_pct")
+        }
     }
 }
 
@@ -584,6 +696,31 @@ struct SimulationPage: View {
 
 struct TouEdit: Identifiable { let id = UUID(); var name = "Peak"; var price = 0.4; var start = 18.0; var end = 22.0; var weekdays = true; var weekends = true }
 
+private struct ConsumerRateEdit: Identifiable {
+    let id: String
+    let label: String
+    let saved: JSONDict
+    var enabled: Bool
+    var name: String
+    var price: Double
+    var monthly: Double
+    var demand: Double
+
+    var payload: JSONDict {
+        var rate = saved
+        if price != num(saved, "import_price") {
+            rate.removeValue(forKey: "zones")
+            rate.removeValue(forKey: "catalog_ref")
+        }
+        rate["consumer"] = id
+        rate["name"] = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        rate["import_price"] = price
+        rate["fixed_per_month"] = monthly
+        rate["demand_charge_per_kw_month"] = demand
+        return rate
+    }
+}
+
 struct EconomicsPage: View {
     @EnvironmentObject var m: AppModel
     @State private var t: JSONDict = [:]
@@ -597,6 +734,9 @@ struct EconomicsPage: View {
     @State private var escI = 2.0
     @State private var escE = 0.0
     @State private var tou: [TouEdit] = []
+    @State private var meters: [ConsumerRateEdit] = []
+    @State private var settlement = "monthly"
+    @State private var rollover = false
     @State private var econ: [String: Double] = [:]
     @State private var loanOn = false
     @State private var variantName = ""
@@ -611,6 +751,15 @@ struct EconomicsPage: View {
                     NumField(label: m.t("import_price"), value: $importPrice)
                     Picker(m.t("grid_export"), selection: $exportKind) { Text(m.t("export_price")).tag("fixed"); Text(m.t("net_metering")).tag("net_metering"); Text(m.t("gs_none")).tag("none") }
                     if exportKind != "none" { NumField(label: m.t("export_price"), value: $exportPrice) }
+                    if exportKind == "net_metering" {
+                        Picker(m.t("metering_period"), selection: $settlement) {
+                            Text(m.t("metering_monthly")).tag("monthly")
+                            Text(m.t("metering_annual")).tag("annual")
+                        }
+                        Toggle(m.t("metering_rollover"), isOn: $rollover)
+                    } else {
+                        consumerRates
+                    }
                     NumField(label: m.t("fixed_monthly"), value: $fixedMonthly)
                     NumField(label: m.t("demand_charge"), value: $demand)
                     HStack { NumField(label: m.t("escalation"), value: $escI); TextField("", value: $escE, format: .number).frame(width: 60) }
@@ -645,6 +794,7 @@ struct EconomicsPage: View {
                             Kpi(label: m.t("payback"), value: (c["payback_years"] as? NSNumber).map { fmt($0.doubleValue, 1) } ?? "–", unit: "a")
                             Kpi(label: "LCOE", value: fmt(num(c, "lcoe_per_kwh"), 3), unit: str(c, "currency") + "/kWh")
                         }
+                        consumerBills(c)
                         Chart(dicts(c["years"]).indices, id: \.self) { i in
                             let y = dicts(c["years"])[i]
                             BarMark(x: .value("year", int(y, "year")), y: .value("cumulative", num(y, "cumulative"))).foregroundStyle(num(y, "cumulative") < 0 ? Color.red.opacity(0.7) : Color.green.opacity(0.7))
@@ -681,6 +831,17 @@ struct EconomicsPage: View {
         let ex = t["export"] as? JSONDict ?? [:]
         exportKind = str(ex, "kind").isEmpty ? "fixed" : str(ex, "kind")
         exportPrice = num(ex, exportKind == "net_metering" ? "surplus_price" : "price")
+        let terms = t["net_metering"] as? JSONDict ?? [:]
+        settlement = str(terms, "period") == "annual" ? "annual" : "monthly"
+        rollover = terms["rollover"] as? Bool ?? false
+        let rates = dicts(t["consumer_rates"])
+        meters = [("electric_vehicles", "ev_page"), ("heating", "heat_page")].map { key, label in
+            let saved = rates.first(where: { str($0, "consumer") == key }) ?? [:]
+            return ConsumerRateEdit(id: key, label: label, saved: saved, enabled: !saved.isEmpty,
+                                    name: saved.isEmpty ? m.t(label) : str(saved, "name"),
+                                    price: num(saved, "import_price", importPrice),
+                                    monthly: num(saved, "fixed_per_month"), demand: num(saved, "demand_charge_per_kw_month"))
+        }
         tou = dicts(t["tou"]).map { TouEdit(name: str($0, "name"), price: num($0, "price"), start: num($0, "start_hour"), end: num($0, "end_hour"), weekdays: ($0["weekdays"] as? Bool) ?? true, weekends: ($0["weekends"] as? Bool) ?? true) }
         for (k, _) in econFields { econ[k] = num(e, k) }
         let loan = e["loan"] as? JSONDict
@@ -692,6 +853,12 @@ struct EconomicsPage: View {
         var nt = t
         nt["currency"] = currency; nt["import_price"] = importPrice; nt["fixed_per_month"] = fixedMonthly; nt["demand_charge_per_kw_month"] = demand
         nt["import_escalation_pct"] = escI; nt["export_escalation_pct"] = escE
+        let changedPrice = importPrice != num(t, "import_price")
+        if changedPrice {
+            nt.removeValue(forKey: "zones")
+            nt.removeValue(forKey: "catalog_ref")
+            nt.removeValue(forKey: "catalog_import_rate")
+        }
         let ex: JSONDict
         switch exportKind {
         case "none": ex = ["kind": "none"]
@@ -699,9 +866,49 @@ struct EconomicsPage: View {
         default: ex = ["kind": "fixed", "price": exportPrice]
         }
         nt["export"] = ex
+        if exportKind == "net_metering" {
+            if t["net_metering"] is JSONDict || settlement == "annual" || rollover {
+                var terms = t["net_metering"] as? JSONDict ?? [:]
+                terms["period"] = settlement
+                terms["rollover"] = rollover
+                if changedPrice { terms.removeValue(forKey: "zone_rates") }
+                nt["net_metering"] = terms
+            }
+            nt["consumer_rates"] = [JSONDict]()
+        } else {
+            nt.removeValue(forKey: "net_metering")
+            nt["consumer_rates"] = meters.filter(\.enabled).map(\.payload)
+        }
         nt["tou"] = tou.map { p -> JSONDict in ["name": p.name, "price": p.price, "start_hour": Int(p.start), "end_hour": Int(p.end), "weekdays": p.weekdays, "weekends": p.weekends, "months": [Int]()] }
         if str(nt, "name").isEmpty { nt["name"] = "Tariff" }
         m.setSection("tariff", nt)
+    }
+
+    private var consumerRates: some View {
+        DisclosureGroup(m.t("consumer_tariffs")) {
+            Text(m.t("consumer_tariff_hint")).foregroundStyle(.secondary)
+            ForEach($meters) { $meter in
+                Toggle(m.t(meter.label), isOn: $meter.enabled)
+                if meter.enabled {
+                    TextField(m.t("tariff"), text: $meter.name)
+                    NumField(label: m.t("import_price"), value: $meter.price)
+                    NumField(label: m.t("fixed_monthly"), value: $meter.monthly)
+                    NumField(label: m.t("demand_charge"), value: $meter.demand)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func consumerBills(_ cash: JSONDict) -> some View {
+        let bills = dicts(cash["consumers"])
+        if !bills.isEmpty {
+            SimpleTable(header: [m.t("consumer_tariffs"), m.t("grid_import") + " (kWh)", m.t("bill_before"), m.t("bill_after")],
+                        rows: bills.map { bill in
+                let before = bill["bill_without"] as? JSONDict ?? [:]
+                let after = bill["bill_with"] as? JSONDict ?? [:]
+                return [str(bill, "name"), fmt(num(after, "import_kwh"), 2), fmt(num(before, "total"), 2), fmt(num(after, "total"), 2)]
+            })
+        }
     }
 
     private func applyEconomics() {

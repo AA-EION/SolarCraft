@@ -11,6 +11,7 @@ mod archived_scene;
 mod archived_shade;
 mod island;
 mod tariff;
+mod net_metering;
 mod thermal;
 mod wbv_timing;
 
@@ -460,7 +461,7 @@ fn read(source: &Path) -> Result<Imported> {
             thermal::add_pv_surplus_variant(&mut project, &saved, &mut warnings);
         }
     }
-    tariff::apply(&mut project, economy.as_ref(), &db, &sha, target_kwp, &mut warnings);
+    tariff::apply(&mut project, root, economy.as_ref(), &db, &sha, target_kwp, &mut warnings);
     if has_ev {
         ev::apply(&mut project, root, &db, &mut warnings);
         if project.fleet.is_some() && project.grid.feed_in == FeedIn::Surplus
